@@ -38,3 +38,4 @@ Expected output: see the `print` lines; screenshots go to a temp dir printed at 
 - `pctest.py` — PC database e2e on the real ROM (deposit, commit to server, stand-ins, restart).
 - `crossgame.py` — Yellow and Crystal share one PC database (real PC menus in both games).
 - `crystal_mp.py` — two Crystal players + one Yellow player: seeing each other, Crystal trade with evolution, cross-game refusal.
+- `challenge_flow.py` — challenges with two clients: invite, fresh separate save, pause/partner-left pop-up, continue, closing the game, abandon.
