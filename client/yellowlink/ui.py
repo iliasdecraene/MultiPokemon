@@ -135,7 +135,8 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
     text(surf, f.body, "Chat", (x, y), TEXT)
     y += 24
     hint_h = 92
-    chat_bottom = h - hint_h - (34 if app.mode == "chat" else 4)
+    btn_h = 52   # Multiplayer / Regions buttons above the key hints
+    chat_bottom = h - hint_h - btn_h - (34 if app.mode == "chat" else 4)
     lines = []
     for who, msg, color in app.chat_log[-40:]:
         prefix = f"{who}: " if who else ""
@@ -147,7 +148,7 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
         y += 18
 
     if app.mode == "chat":
-        r = pygame.Rect(x - 4, h - hint_h - 30, SIDEBAR_W - 20, 26)
+        r = pygame.Rect(x - 4, h - hint_h - btn_h - 30, SIDEBAR_W - 20, 26)
         box(surf, r, PANEL, ACCENT, 6)
         cursor = "_" if int(time.time() * 2) % 2 else " "
         shown = app.chat_input
@@ -155,11 +156,22 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
             shown = shown[1:]
         text(surf, f.small, shown + cursor, (r.x + 6, r.y + 6), TEXT)
 
+    # big clickable buttons
+    bw = (SIDEBAR_W - 34) // 2
+    for i, (label, panel) in enumerate((("Multiplayer", "multiplayer"), ("Regions", "regions"))):
+        br = pygame.Rect(x0 + 12 + i * (bw + 10), h - hint_h - btn_h + 4, bw, 40)
+        active = app.panel == panel
+        hover = br.collidepoint(pygame.mouse.get_pos())
+        pygame.draw.rect(surf, ACCENT if active else ((78, 86, 114) if hover else (58, 64, 86)), br,
+                         border_radius=8)
+        text(surf, f.body, label, br.center, (30, 28, 20) if active else TEXT, anchor="center")
+        app.click_targets.append((br, lambda p=panel: app.toggle_panel(p), label))
+
     hy = h - hint_h + 6
     pygame.draw.line(surf, PANEL_HI, (x0 + 10, hy - 6), (x0 + SIDEBAR_W - 10, hy - 6))
     hints = ["A button: X or A  ·  B button: Z or S",
              "Start: Enter · Select: Bksp · Space: fast",
-             "Tab: trade/battle menu · T: chat",
+             "Tab: multiplayer · T: chat · F4: leave battle",
              "F1: help · F3: report · V: wide view"]
     for hline in hints:
         text(surf, f.small, hline, (x, hy), DIM)

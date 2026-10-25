@@ -10,6 +10,8 @@ Everyone plays their **own** game with their own save and story. On top of that:
 - **Practice**: fight a copy of a friend's team played by the game's AI (Tab → P), even when they're offline.
 - **Wide view** (press **V**): see twice as much of the world around you, NPCs and friends included. The real Game Boy picture stays untouched in the middle.
 - **Straight into your game**: with a save, the intro and title screen are skipped and Continue is picked for you.
+- **Regions**: add your other Pokémon game files (Red, Blue, Gold, Silver, Crystal) and travel between them from the sidebar. Each game keeps its own progress. Multiplayer features are Yellow-only for now.
+- **No saving needed**: closing YellowLink remembers exactly where you were (it also snapshots every 30 seconds), and every game resumes where you left it.
 - **Chat.** You can also see who's online, and the app shows a notice when an update is available.
 
 > **No ROM is included, and none ever should be.** Each player needs their own copy of
@@ -35,7 +37,7 @@ Everyone plays their **own** game with their own save and story. On top of that:
 | **X** or **A** | A button (talk, confirm, next text) |
 | **Z** or **S** | B button (back) |
 | Enter / Backspace | Start / Select |
-| **Tab** | Link menu: pick a trainer, then **B** battle (live), **R** trade, **P** practice vs their team |
+| **Tab** | Multiplayer panel (or click **Multiplayer** in the sidebar): click a trainer, then Battle, Trade or Practice |
 | F4 | Leave a live battle |
 | **T** | Chat |
 | Space (hold) | Fast-forward |

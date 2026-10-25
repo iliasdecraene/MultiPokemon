@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pygame
 
-from . import __version__, game, pvp, sprites, ui, updater, worldview
+from . import __version__, game, library, panels, pvp, sprites, ui, updater, worldview
 from .audio import AudioOut
 from .config import Config, app_dir
 from .diag import Diagnostics, send_report_sync, show_report_window
@@ -27,6 +27,7 @@ WIDE_MX, WIDE_MY = 80, 72   # extra game pixels on each side in wide view
 STATE_SEND_EVERY = 4        # frames
 PARTY_CHECK_EVERY = 180     # frames
 SRAM_FLUSH_EVERY = 600      # frames (~10 s)
+AUTOSAVE_EVERY = 1800       # frames (~30 s) between resume snapshots
 
 KEYMAP = {
     pygame.K_UP: "up", pygame.K_DOWN: "down", pygame.K_LEFT: "left", pygame.K_RIGHT: "right",
@@ -111,11 +112,21 @@ class App:
     def __init__(self, cfg: Config, diag: Diagnostics | None = None):
         self.cfg = cfg
         self.diag = diag
+        self.lib = library.Library(cfg, app_dir())
+        self.game_id = self.lib.current or "yellow"
+        self.game_info = self.lib.info(self.game_id)
+        self.travel_to = None
+        self.panel = None            # None | "multiplayer" | "regions"
+        self.panel_sel = None        # selected uid in the multiplayer panel
+        self.click_targets = []      # [(screen Rect, callback, label)] rebuilt every frame
         self._last_mode = "play"
         self._err_times: list = []
         self._last_err_toast = 0.0
         self.fps = 0.0
+        cfg["rom_path"] = self.lib.rom_path(self.game_id) or cfg.get("rom_path", "")
         self.rom = RomData.from_file(cfg["rom_path"])
+        # Multiplayer features rely on verified Yellow memory addresses. Other games just play.
+        self.full = self.game_info.full_support and game.sha1_of(cfg["rom_path"]) == game.YELLOW_SHA1
         self.scale = 4
         self.wide = bool(cfg.get("wide_view", False))
         self.wv = None
@@ -164,7 +175,7 @@ class App:
         pygame.mixer.pre_init(48000, -16, 2, 1024)
         pygame.init()
         pygame.key.stop_text_input()
-        pygame.display.set_caption(f"YellowLink {__version__}")
+        pygame.display.set_caption(f"YellowLink {__version__} - {self.game_info.title}")
         self._make_window()
         self.fonts = ui.Fonts()
         self.audio = AudioOut(cfg.get("volume", 60))
@@ -216,11 +227,14 @@ class App:
 
     def _start_emulator(self):
         from pyboy import PyBoy
+        msg = self.cfg.pop("_travel_msg", None)
+        if msg:
+            self._loading_screen(msg)
         save = self.cfg.save_path
         ram = None
         self.had_save = save.exists() and any(save.read_bytes()[:32768])
         if save.exists():
-            shutil.copy2(save, self.cfg.backup_dir / time.strftime("yellow-%Y%m%d-%H%M%S.sav"))
+            shutil.copy2(save, self.cfg.backup_dir / time.strftime(f"{self.game_id}-%Y%m%d-%H%M%S.sav"))
             self._prune_backups()
             ram = io.BytesIO(save.read_bytes()[:32768])
         else:
@@ -230,11 +244,11 @@ class App:
         self.pyboy.set_emulation_speed(0)
         self.game = GameMemory(self.pyboy.memory, self.rom)
         # Live battles hook ROM addresses, so only enable them on the exact ROM they were verified on.
-        if game.sha1_of(self.cfg["rom_path"]) == game.YELLOW_SHA1:
+        if self.full:
             self.hooks = pvp.LinkHooks(self.pyboy, self._send_battle_move)
             self.wv = worldview.WorldView(self.rom.rom, margin_x=WIDE_MX, margin_y=WIDE_MY)
         else:
-            log.warning("ROM is not USA/Europe Yellow: live battles and wide view disabled")
+            log.info("%s: multiplayer features, live battles and wide view are Yellow-only for now", self.game_id)
             if self.wide:
                 self.wide = False
                 self._make_window()
@@ -243,12 +257,52 @@ class App:
         if dev_state:
             with open(dev_state, "rb") as f:
                 self.pyboy.load_state(f)
-        elif self.had_save and self.cfg.get("skip_intro", True):
+        elif self._try_resume():
+            pass
+        elif self.full and self.had_save and self.cfg.get("skip_intro", True):
             self._loading_screen("Loading your adventure...")
             t0 = time.time()
             result = game.fast_continue(self.pyboy, on_progress=lambda: self._loading_screen(
                 "Loading your adventure..."))
             log.info("fast continue: %s in %.2fs", result, time.time() - t0)
+
+    def _try_resume(self) -> bool:
+        """Continue exactly where the player left off (snapshot written on exit / every 30 s)."""
+        path = self.cfg.resume_path
+        if not self.cfg.get("auto_resume", True) or not path.exists():
+            return False
+        try:
+            with open(path, "rb") as f:
+                self.pyboy.load_state(f)
+            self.last_sram = self._read_sram()
+            log.info("resumed %s from snapshot (%s)", self.game_id, time.ctime(path.stat().st_mtime))
+            return True
+        except Exception:  # noqa: BLE001 - corrupt/old snapshot: fall back to the normal save
+            log.exception("could not resume from snapshot; using the normal save")
+            try:
+                path.rename(path.with_suffix(".bad"))
+            except OSError:
+                pass
+            return False
+
+    def autosave(self, force=False) -> bool:
+        """Write the resume snapshot. Yellow only snapshots at safe moments (overworld, idle)."""
+        if not self.cfg.get("auto_resume", True) or os.environ.get("YL_DEV_LOAD_STATE"):
+            return False
+        if self.battle or self.live or (self.trade and self.trade.phase != "open"):
+            return False
+        if self.full and not force and not self.game.is_safe():
+            return False
+        buf = io.BytesIO()
+        try:
+            self.pyboy.save_state(buf)
+        except Exception:  # noqa: BLE001
+            log.exception("snapshot failed")
+            return False
+        ok = write_atomic(self.cfg.resume_path, buf.getvalue())
+        if ok:
+            self.flush_sram()
+        return ok
 
     def _loading_screen(self, msg):
         pygame.event.pump()
@@ -259,7 +313,7 @@ class App:
         pygame.display.flip()
 
     def _prune_backups(self, keep=15):
-        files = sorted(self.cfg.backup_dir.glob("yellow-*.sav"))
+        files = sorted(self.cfg.backup_dir.glob(f"{self.game_id}-*.sav"))
         for p in files[:-keep]:
             try:
                 p.unlink()
@@ -326,6 +380,8 @@ class App:
         return sorted(self.roster, key=lambda e: (not e.get("online"), e.get("name", "").lower()))
 
     def is_nearby(self, uid):
+        if not self.full:
+            return False
         f = self.friends.get(uid)
         return bool(f and f.state and self.game.in_game() and f.state.get("map") == self.game.m[game.CUR_MAP]
                     and f.state.get("visible"))
@@ -450,7 +506,7 @@ class App:
 
     # trades -------------------------------------------------------------
     def on_trade_request(self, msg):
-        if self.trade or self.battle or self.live or self.prompt:
+        if not self.full or self.trade or self.battle or self.live or self.prompt:
             self.net.send({"type": "trade_respond", "trade_id": msg["trade_id"], "accept": False})
             return
         self.prompt = {"kind": "trade", "id": msg["trade_id"], "name": msg.get("name", "?"),
@@ -559,6 +615,8 @@ class App:
 
     # battles ------------------------------------------------------------
     def on_party_data(self, msg):
+        if not self.full:
+            return
         if msg.get("error") or not msg.get("mons"):
             self.toast("That trainer has no Pokémon to battle yet.", color=ui.BAD)
             return
@@ -640,7 +698,7 @@ class App:
         self.net.send({"type": "battle_move", "battle_id": s.battle_id, "n": n, "v": v, "check": check})
 
     def on_battle_request(self, msg):
-        if self.trade or self.battle or self.live or self.prompt or not self.hooks or not self.game.party():
+        if not self.full or self.trade or self.battle or self.live or self.prompt or not self.hooks or not self.game.party():
             self.net.send({"type": "battle_respond", "battle_id": msg["battle_id"], "accept": False})
             return
         self.prompt = {"kind": "battle", "id": msg["battle_id"], "name": msg.get("name", "?"),
@@ -764,7 +822,7 @@ class App:
 
     # ---------------------------------------------------------- publishing
     def publish(self):
-        if self.net.status != "online":
+        if self.net.status != "online" or not self.full:
             return
         g = self.game
         if not g.in_game():
@@ -798,6 +856,91 @@ class App:
                     self.last_party_sent = key
 
     # ---------------------------------------------------------------- input
+    # panels ------------------------------------------------------------------
+    def toggle_panel(self, name):
+        if self.mode == "panel" and self.panel == name:
+            self.close_panel()
+            return
+        if self.mode not in ("play", "panel"):
+            return  # a trade window, prompt or chat is open
+        self.release_all()
+        self.panel = name
+        self.mode = "panel"
+
+    def close_panel(self):
+        self.panel = None
+        if self.mode == "panel":
+            self.mode = "play"
+
+    def select_player(self, uid):
+        self.panel_sel = None if self.panel_sel == uid else uid
+
+    def action_trade(self, e):
+        if not e.get("online"):
+            self.toast("They need to be online to trade.", color=ui.BAD)
+        elif not self.full:
+            self.toast("Trading works in Yellow for now.", color=ui.BAD)
+        elif not self.game.party():
+            self.toast("You need a Pokémon first!", color=ui.BAD)
+        else:
+            self.net.send({"type": "trade_request", "to": e["uid"]})
+            self.toast(f"Trade request sent to {e.get('name')}...")
+            self.close_panel()
+
+    def action_battle(self, e):
+        if not e.get("online"):
+            self.toast("They need to be online for a live battle. Try Practice.", color=ui.BAD)
+        elif not self.full or not self.hooks:
+            self.toast("Live battles work in Yellow for now.", color=ui.BAD)
+        elif not self.game.party():
+            self.toast("You need a Pokémon first!", color=ui.BAD)
+        elif self.trade or self.battle or self.live:
+            self.toast("Finish what you're doing first.", color=ui.BAD)
+        else:
+            self.net.send({"type": "battle_request", "to": e["uid"]})
+            self.toast(f"Battle request sent to {e.get('name')}...")
+            self.close_panel()
+
+    def action_practice(self, e):
+        if not self.full:
+            self.toast("Practice battles work in Yellow for now.", color=ui.BAD)
+            return
+        self.net.send({"type": "get_party", "uid": e["uid"]})
+        self.close_panel()
+
+    def travel(self, game_id):
+        if self.trade or self.battle or self.live:
+            self.toast("Finish your trade or battle first.", color=ui.BAD)
+            return
+        info = self.lib.info(game_id)
+        self.cfg["_travel_msg"] = f"Travelling to {info.title}..."
+        self.travel_to = game_id
+        self.quit_requested = True
+
+    def add_rom_dialog(self):
+        self.release_all()
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            path = filedialog.askopenfilename(title="Add a Pokémon game file",
+                                              filetypes=[("Game Boy ROM", "*.gb *.gbc"), ("All files", "*.*")])
+            root.destroy()
+        except Exception:  # noqa: BLE001
+            log.exception("file dialog failed")
+            self.toast("Couldn't open the file picker.", color=ui.BAD)
+            return
+        if not path:
+            return
+        try:
+            info = self.lib.add_rom(path)
+            self.toast(f"Added {info.title}! Click Travel to play it.", 5, ui.GOOD)
+        except ValueError as e:
+            self.toast(str(e), 6, ui.BAD)
+        except OSError as e:
+            self.toast(f"Couldn't copy the file: {e}", 6, ui.BAD)
+
     def set_volume(self, percent):
         percent = max(0, min(100, int(percent)))
         self.audio.volume = percent / 100
@@ -851,6 +994,11 @@ class App:
                 if self.volume_rect and self.volume_rect.collidepoint(ev.pos):
                     self.dragging_volume = True
                     self._set_volume_from_x(ev.pos[0])
+                else:
+                    for rect, cb, _label in reversed(self.click_targets):
+                        if rect.collidepoint(ev.pos):
+                            cb()
+                            break
             elif ev.type == pygame.MOUSEMOTION and self.dragging_volume:
                 self._set_volume_from_x(ev.pos[0])
             elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1 and self.dragging_volume:
@@ -891,6 +1039,21 @@ class App:
 
     def on_key(self, ev):
         k = ev.key
+        if self.mode == "panel":
+            if k in (pygame.K_ESCAPE, pygame.K_TAB):
+                self.close_panel()
+            elif self.panel == "multiplayer":
+                others = [e for e in self.sorted_roster() if e.get("uid") != self.cfg["uid"]]
+                uids = [e.get("uid") for e in others]
+                if uids and k in (pygame.K_UP, pygame.K_DOWN):
+                    i = uids.index(self.panel_sel) if self.panel_sel in uids else -1
+                    i = max(0, i - 1) if k == pygame.K_UP else min(len(uids) - 1, i + 1)
+                    self.panel_sel = uids[i]
+                elif self.panel_sel in uids and k in (pygame.K_b, pygame.K_r, pygame.K_p):
+                    e = others[uids.index(self.panel_sel)]
+                    {pygame.K_b: self.action_battle, pygame.K_r: self.action_trade,
+                     pygame.K_p: self.action_practice}[k](e)
+            return
         if self.mode != "chat":
             log.info("key %s (mode %s)", pygame.key.name(k), self.mode)
         if k == pygame.K_F3:
@@ -1028,11 +1191,9 @@ class App:
             self._skip_text = True  # the "t" that opened chat arrives as TEXTINPUT next
             pygame.key.start_text_input()
         elif k == pygame.K_TAB:
-            if self.battle:
+            if self.battle or self.live:
                 return
-            self.release_all()
-            self.mode = "menu"
-            self.menu_index = 0
+            self.toggle_panel("multiplayer")
         elif k == pygame.K_F1:
             self.release_all()
             self.mode = "help"
@@ -1131,6 +1292,8 @@ class App:
         return cache[key]
 
     def draw_friends(self, arr):
+        if not self.full:
+            return []
         g = self.game
         if not g.in_game() or g.in_battle() or self.battle or self.live:
             self.clean_frame = None
@@ -1202,6 +1365,7 @@ class App:
         self.game_surf.blit(center, (self.off_x, self.off_y))
 
     def render(self):
+        self.click_targets = []
         arr = self.pyboy.screen.ndarray
         self.compose_world(arr)
         tags = self.draw_friends(arr)
@@ -1213,7 +1377,11 @@ class App:
                 ui.name_tag(self.screen, self.fonts.tag, name, cx * self.scale,
                             self.game_y + top * self.scale - 2)
         sub = self.screen.subsurface((0, self.game_y, self.game_w, self.game_h))
-        if self.mode == "menu":
+        if self.mode == "panel" and self.panel == "multiplayer":
+            panels.draw_multiplayer(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
+        elif self.mode == "panel" and self.panel == "regions":
+            panels.draw_regions(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
+        elif self.mode == "menu":
             ui.draw_link_menu(sub, self.fonts, self, self.game_w, self.game_h)
         elif self.mode == "trade" and self.trade:
             ui.draw_trade(sub, self.fonts, self, self.game_w, self.game_h)
@@ -1295,6 +1463,8 @@ class App:
         self.publish()
         if self.frame % SRAM_FLUSH_EVERY == 0:
             self.flush_sram()
+        if self.frame % AUTOSAVE_EVERY == 0:
+            self.autosave()
 
     def run(self):
         next_t = time.perf_counter()
@@ -1343,6 +1513,7 @@ class App:
             if self.live:
                 self.net.send({"type": "battle_leave", "battle_id": self.live.battle_id})
                 self._end_live("", ui.DIM)
+            self.autosave(force=True)
             self.flush_sram(force=True)
             ram = io.BytesIO()
             self.pyboy.stop(save=True, ram_file=ram)
@@ -1394,6 +1565,9 @@ def _main(argv, cfg, diag):
         errors_before = diag.errors
         app = App(cfg, diag)
         app.run()
+        if app.travel_to:
+            library.Library(cfg, app_dir()).set_current(app.travel_to)
+            continue
         if app.restart_into:
             try:
                 updater.install_and_restart(app.restart_into)

@@ -59,8 +59,18 @@ class Config(dict):
                     and self.get("server_url") and "YOUR-SERVER" not in self["server_url"])
 
     @property
+    def game_id(self) -> str:
+        return self.get("current_game") or "yellow"
+
+    @property
     def save_path(self) -> Path:
-        return app_dir() / "saves" / "yellow.sav"
+        return app_dir() / "saves" / f"{self.game_id}.sav"
+
+    @property
+    def resume_path(self) -> Path:
+        d = app_dir() / "resume"
+        d.mkdir(exist_ok=True)
+        return d / f"{self.game_id}.state"
 
     @property
     def backup_dir(self) -> Path:

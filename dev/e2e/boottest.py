@@ -16,7 +16,7 @@ class Cfg(Config):
     def __init__(self, d, name):
         d.mkdir(parents=True, exist_ok=True); self.d=d
         super().__init__(d/"config.json")
-        self.update(name=name, server_url="ws://127.0.0.1:1", room_key="x", rom_path=ROM, seen_help=True)
+        self.update(name=name, server_url="ws://127.0.0.1:1", room_key="x", rom_path=ROM, seen_help=True, auto_resume=False)
     @property
     def save_path(self): return self.d/"yellow.sav"
     @property
