@@ -258,7 +258,7 @@ def draw_chat(surf, f: Fonts, app, r):
 def draw_toasts(surf, f: Fonts, toasts, game_w, bottom=False):
     """Short messages at the top of the game area (at the bottom while a panel/dialog covers the top)."""
     now = time.time()
-    live = [t for t in toasts if t[1] >= now]
+    live = [t for t in toasts if t[1] >= now][-3:]
     step = f.body.get_height() + 16
     y = surf.get_height() - 12 - step * len(live) if bottom else 10
     for msg, until, color in live:

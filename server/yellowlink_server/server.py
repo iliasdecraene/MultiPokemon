@@ -31,6 +31,7 @@ MAX_MESSAGE_BYTES = 256 * 1024   # a full PC store is ~100-150 KB
 RATE_LIMIT_PER_SEC = 30
 HELLO_TIMEOUT = 10.0
 TRADE_REQUEST_TIMEOUT = 60.0
+MAX_OFFER = 20                   # Pokémon per side in one trade/gift (a box)
 BATTLE_REQUEST_TIMEOUT = 60.0
 BATTLE_PREPARE_TIMEOUT = 60.0
 BATTLE_RNS_COUNT = 10
@@ -81,6 +82,18 @@ def validate_mon(mon) -> dict:
     if data[0] == 0:
         raise Invalid("mon species must not be 0")
     return {"data": mon["data"], "ot": mon["ot"], "nick": mon["nick"]}
+
+
+def mons_text(entries: list) -> str:
+    """'PIKA', 'PIKA and RATTY', 'PIKA, RATTY and 3 more'."""
+    nicks = [(e or {}).get("nick") or "a Pokémon" for e in entries]
+    if not nicks:
+        return "nothing"
+    if len(nicks) == 1:
+        return nicks[0]
+    if len(nicks) <= 3:
+        return ", ".join(nicks[:-1]) + " and " + nicks[-1]
+    return f"{nicks[0]}, {nicks[1]} and {len(nicks) - 2} more"
 
 
 def _int(msg: dict, key: str, lo: int | None = None, hi: int | None = None) -> int:
@@ -177,7 +190,7 @@ class Trade:
     b: str  # target uid
     status: str = "requested"  # requested | open | applying
     gift: bool = False          # a gives, b only receives
-    offers: dict = field(default_factory=dict)  # uid -> PC entry (the server's stored copy)
+    offers: dict = field(default_factory=dict)  # uid -> [PC entries] (the server's stored copies)
     confirmed: set = field(default_factory=set)
     done: set = field(default_factory=set)
     timer: asyncio.Task | None = None
@@ -681,20 +694,32 @@ class YellowLinkServer:
             raise Invalid("trade is not open for offers")
         if trade.gift and client.uid != trade.a:
             raise Invalid("this is a gift - you just receive")
-        eid = _str(msg, "entry_id")
+        ids = msg.get("entry_ids")
+        if ids is None:
+            ids = [_str(msg, "entry_id")]                    # 0.6.1 clients offer one at a time
+        if not isinstance(ids, list) or len(ids) > MAX_OFFER or not all(isinstance(i, str) for i in ids) \
+                or len(set(ids)) != len(ids):
+            raise Invalid(f"offer 0-{MAX_OFFER} different Pokémon")
         store = self._pc_load(client.uid)
-        hit = pcstore.find(store, eid) if self._pc_valid(store) else None
-        if hit is None:
-            raise Invalid("that Pokémon isn't in your saved PC yet - wait a few seconds and try again")
-        if not pcstore.valid_entry(hit[2]):
-            raise Invalid("that Pokémon's saved data is damaged and can't be traded")
-        if any(o.get("id") == eid for u, o in trade.offers.items() if u == client.uid):
+        entries = []
+        for eid in ids:
+            hit = pcstore.find(store, eid) if self._pc_valid(store) else None
+            if hit is None:
+                raise Invalid("a Pokémon isn't in your saved PC yet - wait a few seconds and try again")
+            if not pcstore.valid_entry(hit[2]):
+                raise Invalid(f"{hit[2].get('nick', 'a Pokémon')}'s saved data is damaged and can't be traded")
+            entries.append(hit[2])
+        if [e["id"] for e in trade.offers.get(client.uid, [])] == ids:
             return
-        trade.offers[client.uid] = hit[2]
+        if entries:
+            trade.offers[client.uid] = entries
+        else:
+            trade.offers.pop(client.uid, None)
         had_confirmations = bool(trade.confirmed)
         trade.confirmed.clear()
         await self.send(self.clients.get(trade.other(client.uid)),
-                        {"type": "trade_offer", "trade_id": trade.id, "from": client.uid, "entry": hit[2]})
+                        {"type": "trade_offer", "trade_id": trade.id, "from": client.uid, "entries": entries,
+                         "entry": entries[0] if entries else None})
         if had_confirmations:
             await self._send_confirm_state(trade)
 
@@ -742,17 +767,20 @@ class YellowLinkServer:
             c = self.clients.get(uid)
             d = deltas[uid]
             await self.send(c, {"type": "pc_trades", "deltas": [d]})
+            gave = plan["gives"][uid]
+            evolved = plan["evolved"].get(uid) or []
             await self.send(c, {"type": "trade_complete", "trade_id": trade.id,
-                                "gave": plan["gives"][uid], "received": d["add"][0] if d["add"] else None,
-                                "evolved": plan["evolved"].get(uid)})
+                                "gave_all": gave, "received_all": d["add"], "evolved_all": evolved,
+                                # single-Pokémon fields for 0.6.1 clients
+                                "gave": gave[0] if gave else None, "received": d["add"][0] if d["add"] else None,
+                                "evolved": evolved[0] if evolved else None})
         name = lambda u: (self.store.get(u) or {}).get("name", "?")  # noqa: E731
-        nick = lambda e: (e or {}).get("nick") or "a Pokémon"  # noqa: E731
         gives = plan["gives"]
         if trade.gift:
-            await self.system(f"{name(trade.a)} gave {nick(gives[trade.a])} to {name(trade.b)}!")
+            await self.system(f"{name(trade.a)} gave {mons_text(gives[trade.a])} to {name(trade.b)}!")
         else:
-            await self.system(f"{name(trade.a)} traded {nick(gives[trade.a])} with {name(trade.b)} "
-                              f"for {nick(gives[trade.b])}!")
+            await self.system(f"{name(trade.a)} traded {mons_text(gives[trade.a])} with {name(trade.b)} "
+                              f"for {mons_text(gives[trade.b])}!")
 
     def _plan_trade(self, trade: Trade):
         """Check everything and compute both deltas. Returns the plan, or a reason string to cancel."""
@@ -767,24 +795,26 @@ class YellowLinkServer:
             if len(st.get("inbox") or []) >= pcstore.INBOX_MAX:
                 return f"{who} has too many trades still syncing - try again in a minute"
             stores[uid] = st
-        gives = {uid: trade.offers.get(uid) for uid in (trade.a, trade.b)}
-        for uid, entry in gives.items():
-            if entry is not None and pcstore.find(stores[uid], entry["id"]) is None:
+        gives = {uid: list(trade.offers.get(uid) or []) for uid in (trade.a, trade.b)}
+        for uid, entries in gives.items():
+            if any(pcstore.find(stores[uid], e["id"]) is None for e in entries):
                 return "a Pokémon was moved out of the PC"
         plan = {"trade_id": trade.id, "a": trade.a, "b": trade.b, "gives": gives, "evolved": {}, "deltas": {}}
         for uid in (trade.a, trade.b):
-            entry = gives[trade.other(uid)]
-            add = []
-            if entry is not None:
+            add, names = [], []
+            for entry in gives[trade.other(uid)]:
                 evolved, new_name = pcstore.evolve_for_trade(entry)
-                add = [evolved]
+                add.append(evolved)
                 if new_name:
-                    plan["evolved"][uid] = new_name
-            frees = 1 if gives[uid] else 0
-            if sum(pcstore.MONS_PER_BOX - len(b) for b in stores[uid]["boxes"]) + frees < len(add):
+                    names.append(new_name)
+            if names:
+                plan["evolved"][uid] = names
+            room = sum(pcstore.MONS_PER_BOX - len(b) for b in stores[uid]["boxes"]) + len(gives[uid])
+            if room < len(add):
                 c = self.clients.get(uid)
-                return f"{c.name if c else 'their'} PC is full"
-            plan["deltas"][uid] = {"remove": [gives[uid]["id"]] if gives[uid] else [], "add": add}
+                who = f"{c.name}'s" if c else "their"
+                return f"{who} PC is full (room for {max(0, room)} more, needs {len(add)})"
+            plan["deltas"][uid] = {"remove": [e["id"] for e in gives[uid]], "add": add}
         return plan
 
     def _journal_dir(self) -> str:

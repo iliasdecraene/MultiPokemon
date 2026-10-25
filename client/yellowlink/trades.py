@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pygame
 
@@ -24,8 +24,8 @@ class TradeSession:
     partner_name: str
     gift: bool = False
     giving: bool = False          # gift: True on the giver's side
-    my_entry: dict | None = None
-    their_entry: dict | None = None
+    my_entries: list = field(default_factory=list)      # what I offer (several allowed)
+    their_entries: list = field(default_factory=list)
     me_confirmed: bool = False
     them_confirmed: bool = False
 
@@ -35,8 +35,11 @@ class TradeSession:
 
     def can_confirm(self) -> bool:
         if self.gift:
-            return bool(self.my_entry if self.giving else self.their_entry)
-        return bool(self.my_entry and self.their_entry)
+            return bool(self.my_entries if self.giving else self.their_entries)
+        return bool(self.my_entries and self.their_entries)
+
+    def offered(self, entry_id: str) -> bool:
+        return any(e["id"] == entry_id for e in self.my_entries)
 
 
 class TradeMixin:
@@ -47,8 +50,15 @@ class TradeMixin:
         self.trade_per = 8               # rows visible (set by the window)
 
     # --- helpers ---------------------------------------------------------------------------------------------
+    MAX_OFFER = 20
+
     def trade_entries(self) -> list:
-        return self.pcsync.offerable()
+        """Your PC as the trade window lists it: everything offerable plus what this trade already offers."""
+        ok = {e["id"] for _, e in self.pcsync.offerable()}
+        if self.trade:
+            ok |= set(self.pcsync.locks.get(self.trade.trade_id, []))
+        rows = [(bi, e) for bi, box in enumerate(self.pcsync.committed["boxes"]) for e in box if e["id"] in ok]
+        return rows
 
     def entry_label(self, e: dict) -> str:
         species = self.dex_name(e.get("dex", 0))
@@ -121,8 +131,12 @@ class TradeMixin:
 
     def on_trade_offer(self, msg):
         t = self.trade
-        if t and t.trade_id == msg.get("trade_id") and isinstance(msg.get("entry"), dict):
-            t.their_entry = msg["entry"]
+        if not t or t.trade_id != msg.get("trade_id"):
+            return
+        entries = msg.get("entries")
+        if not isinstance(entries, list):                 # 0.6.1 server: one Pokémon
+            entries = [msg["entry"]] if isinstance(msg.get("entry"), dict) else []
+        t.their_entries = [e for e in entries if isinstance(e, dict)]
 
     def on_trade_confirm_state(self, msg):
         t = self.trade
@@ -130,17 +144,45 @@ class TradeMixin:
             t.me_confirmed, t.them_confirmed = bool(msg.get("you")), bool(msg.get("them"))
 
     def offer_entry(self, entry):
+        """Click / Enter on a Pokémon in your PC: add it to your offer, or take it back out."""
         t = self.trade
         if not t or t.receiving_only:
             return
-        mine = {e["id"] for _, e in self.trade_entries()} | set(self.pcsync.locks.get(t.trade_id, []))
-        if entry["id"] not in mine:
+        if entry["id"] not in {e["id"] for _, e in self.trade_entries()}:
             self.toast("That Pokémon isn't available right now.", 3, ui.BAD)
             return
-        t.my_entry = entry
+        if t.offered(entry["id"]):
+            chosen = [e for e in t.my_entries if e["id"] != entry["id"]]
+        elif len(t.my_entries) >= self.MAX_OFFER:
+            self.toast(f"At most {self.MAX_OFFER} Pokémon at once.", 3, ui.BAD)
+            return
+        else:
+            chosen = t.my_entries + [entry]
+        self._send_offer(chosen)
+
+    def select_box(self, box_index: int):
+        """Add every available Pokémon of one PC box to the offer (up to the limit)."""
+        t = self.trade
+        if not t or t.receiving_only:
+            return
+        chosen = list(t.my_entries)
+        for bi, e in self.trade_entries():
+            if bi == box_index and not t.offered(e["id"]) and len(chosen) < self.MAX_OFFER:
+                chosen.append(e)
+        if len(chosen) != len(t.my_entries):
+            self._send_offer(chosen)
+
+    def clear_offer(self):
+        if self.trade and self.trade.my_entries:
+            self._send_offer([])
+
+    def _send_offer(self, chosen):
+        t = self.trade
+        t.my_entries = chosen
         t.me_confirmed = t.them_confirmed = False
-        self.pcsync.lock(t.trade_id, [entry["id"]])     # stays in the PC until we know how the trade ended
-        self.net.send({"type": "trade_offer", "trade_id": t.trade_id, "entry_id": entry["id"]})
+        # offered Pokémon stay in the PC until we know how the trade ended
+        self.pcsync.lock(t.trade_id, [e["id"] for e in chosen])
+        self.net.send({"type": "trade_offer", "trade_id": t.trade_id, "entry_ids": [e["id"] for e in chosen]})
 
     def confirm_trade(self):
         t = self.trade
@@ -155,21 +197,41 @@ class TradeMixin:
 
     def on_trade_complete(self, msg):
         t = self.trade
-        got, gave, evolved = msg.get("received"), msg.get("gave"), msg.get("evolved")
+        got = msg.get("received_all")
+        gave = msg.get("gave_all")
+        evolved = msg.get("evolved_all")
+        if got is None:                                     # 0.6.1 server
+            got = [msg["received"]] if msg.get("received") else []
+            gave = [msg["gave"]] if msg.get("gave") else []
+            evolved = [msg["evolved"]] if msg.get("evolved") else []
+        friend = t.partner_name if t else "your friend"
         if got:
-            text = f"You got {got.get('nick') or self.dex_name(got.get('dex', 0))}! It's in your PC."
+            text = (f"You got {self.mons_text(got)}! " + ("It's" if len(got) == 1 else "They're") + " in your PC.")
             if evolved:
-                text = f"Your new Pokémon evolved into {evolved.title()}! It's in your PC."
-            note = self.entry_note(got)
-            if note:
-                text += f" ({note[0]}.)"
+                text += " Evolved on arrival: " + ", ".join(n.title() for n in evolved) + "!"
+            notes = [e for e in got if self.entry_note(e)]
+            if notes:
+                game = self.game_info.title.replace("Pokémon ", "")
+                text += f" ({len(notes)} can't be used in {game} - they stay in the PC.)" if len(notes) > 1 \
+                    else f" ({self.entry_note(notes[0])[0]}.)"
         else:
-            text = f"You gave {(gave or {}).get('nick', 'your Pokémon')} to {t.partner_name if t else 'your friend'}."
+            text = f"You gave {self.mons_text(gave or [])} to {friend}."
         if t and t.trade_id == msg.get("trade_id"):
             self._end_trade(text, ui.GOOD)
         else:
             self.toast(text, 6, ui.GOOD)
             self.sys_msg(text, ui.GOOD)
+
+    def mons_text(self, entries) -> str:
+        names = [e.get("nick") or self.dex_name(e.get("dex", 0)) for e in entries]
+        names = [n.title() if n.isupper() else n for n in names]
+        if not names:
+            return "nothing"
+        if len(names) == 1:
+            return names[0]
+        if len(names) <= 3:
+            return ", ".join(names[:-1]) + " and " + names[-1]
+        return f"{names[0]}, {names[1]} and {len(names) - 2} more"
 
     def on_trade_cancelled(self, msg):
         self.pcsync.unlock(msg.get("trade_id"))           # the server says it didn't happen

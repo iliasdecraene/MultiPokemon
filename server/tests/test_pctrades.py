@@ -256,3 +256,46 @@ async def test_cancel_after_finish_is_quiet(server, connect_client):
     a = await connect_client("Ilias")
     await a.send(type="trade_cancel", trade_id="gone")
     await a.expect_none("error")
+
+
+async def test_gift_several_and_uneven_trade(server, connect_client):
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    BASES.pop(a.uid, None)
+    BASES.pop(b.uid, None)
+    await upload(a, store(1, g1_entry("p1", 0x54, "SPARKY", 25), g1_entry("r1", 0xA5, "RATTY", 19),
+                          g1_entry("k1", 0x26, "KADABRA", 64), g1_entry("x1", 0x24, "PIDGEY", 16)))
+    await upload(b, store(1, g2_entry("c1", 155, "CYNDA")))
+    # gift three at once
+    await a.send(type="trade_request", to=b.uid, gift=True)
+    req = await b.expect("trade_request")
+    tid = req["trade_id"]
+    await b.send(type="trade_respond", trade_id=tid, accept=True)
+    await a.send(type="trade_offer", trade_id=tid, entry_ids=["p1", "r1", "k1"])
+    off = await b.expect("trade_offer")
+    assert [e["id"] for e in off["entries"]] == ["p1", "r1", "k1"] and off["entry"]["id"] == "p1"
+    await a.send(type="trade_confirm", trade_id=tid)
+    await b.send(type="trade_confirm", trade_id=tid)
+    got = (await b.expect("pc_trades"))["deltas"][0]
+    assert [e["nick"] for e in got["add"]] == ["SPARKY", "RATTY", "ALAKAZAM"]
+    done = await b.expect("trade_complete")
+    assert len(done["received_all"]) == 3 and done["evolved_all"] == ["ALAKAZAM"]
+    await b.expect("system", timeout=3, text="Ilias gave SPARKY, RATTY and KADABRA to Alex!")
+    assert (await a.expect("pc_trades"))["deltas"][0]["remove"] == ["p1", "r1", "k1"]
+    # uneven trade: 1 for 2 (Alex offers two of the gifted ones back for Ilias's Pidgey)
+    tid = await open_trade(b, a)
+    await b.send(type="trade_offer", trade_id=tid, entry_ids=["p1", "r1"])
+    await a.expect("trade_offer")
+    await a.send(type="trade_offer", trade_id=tid, entry_ids=["x1"])
+    await b.expect("trade_offer")
+    await a.send(type="trade_confirm", trade_id=tid)
+    await b.send(type="trade_confirm", trade_id=tid)
+    await a.expect("trade_complete", trade_id=tid)
+    ids = lambda u: sorted(e["id"] for bx in server._pc_load(u)["boxes"] for e in bx)  # noqa: E731
+    assert len(ids(a.uid)) == 2 and len(ids(b.uid)) == 3          # 4-3+2-1 = 2 ; 1+3-2+1 = 3
+    # an empty list withdraws the offer; duplicates/too many are refused
+    tid = await open_trade(a, b)
+    await a.send(type="trade_offer", trade_id=tid, entry_ids=["x1", "x1"])
+    await a.expect("error")
+    await a.send(type="trade_offer", trade_id=tid, entry_ids=[f"z{i}" for i in range(21)])
+    await a.expect("error")

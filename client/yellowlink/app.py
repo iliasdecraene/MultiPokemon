@@ -1507,7 +1507,7 @@ class App(ChallengeMixin, TradeMixin):
             panels.button(sub, self, self.fonts, pygame.Rect(self.game_w // 2 - 65, band.y + 84, 130, 34),
                           "Go back", lambda: self.leave_to_main("paused"), offset=(0, self.game_y))
         ui.draw_toasts(sub, self.fonts, self.toasts, self.game_w,
-                       bottom=self.mode in ("panel", "chal_popup", "prompt", "trade", "battle_confirm"))
+                       bottom=self.mode in ("panel", "chal_popup", "prompt", "battle_confirm"))
         if self.fast:
             ui.text(sub, self.fonts.body, ">> fast", (self.game_w - 10, 10), ui.ACCENT, anchor="topright")
         ui.draw_sidebar(self.screen, self.fonts, self, self.game_w, self.screen.get_height())
