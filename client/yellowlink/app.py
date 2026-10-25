@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pygame
 
-from . import __version__, game, pvp, sprites, ui, updater
+from . import __version__, game, pvp, sprites, ui, updater, worldview
 from .audio import AudioOut
 from .config import Config, app_dir
 from .diag import Diagnostics, send_report_sync, show_report_window
@@ -23,6 +23,7 @@ from .net import NetClient
 log = logging.getLogger("yellowlink")
 
 FRAME_TIME = 1 / 59.7275
+WIDE_MX, WIDE_MY = 80, 72   # extra game pixels on each side in wide view
 STATE_SEND_EVERY = 4        # frames
 PARTY_CHECK_EVERY = 180     # frames
 SRAM_FLUSH_EVERY = 600      # frames (~10 s)
@@ -115,7 +116,11 @@ class App:
         self._last_err_toast = 0.0
         self.fps = 0.0
         self.rom = RomData.from_file(cfg["rom_path"])
-        self.scale = int(cfg.get("scale", 4))
+        self.scale = 4
+        self.wide = bool(cfg.get("wide_view", False))
+        self.wv = None
+        self.last_wide = None
+        self._wv_errors = 0
         self.mode = "play"           # play | chat | menu | trade | prompt | battle_confirm | help
         self.chat_input = ""
         self.chat_log: list = []
@@ -186,12 +191,28 @@ class App:
 
     # ------------------------------------------------------------------ setup
     def _make_window(self):
-        self.game_w, self.game_h = 160 * self.scale, 144 * self.scale
+        if self.wide:
+            self.off_x, self.off_y = WIDE_MX, WIDE_MY
+        else:
+            self.off_x, self.off_y = 0, 0
+        self.view_w, self.view_h = 160 + 2 * self.off_x, 144 + 2 * self.off_y
+        self.scale = int(self.cfg.get("wide_scale" if self.wide else "scale", 0) or 0) or self._fit_scale()
+        self.game_w, self.game_h = self.view_w * self.scale, self.view_h * self.scale
         h = max(self.game_h, 480)
         self.screen = pygame.display.set_mode((self.game_w + ui.SIDEBAR_W, h))
-        self.game_surf = pygame.Surface((160, 144))
-        self.friend_layer = pygame.Surface((160, 144), pygame.SRCALPHA)
+        self.game_surf = pygame.Surface((self.view_w, self.view_h))
+        self.friend_layer = pygame.Surface((self.view_w, self.view_h), pygame.SRCALPHA)
         self.game_y = (h - self.game_h) // 2
+
+    def _fit_scale(self):
+        """Largest integer scale that fits the desktop (with the sidebar)."""
+        try:
+            sizes = pygame.display.get_desktop_sizes()
+            dw, dh = sizes[0] if sizes else (1920, 1080)
+        except (pygame.error, AttributeError):
+            dw, dh = 1920, 1080
+        fit = min((dw - ui.SIDEBAR_W - 40) // (160 + 2 * self.off_x), (dh - 100) // (144 + 2 * self.off_y))
+        return max(1, min(4, fit))
 
     def _start_emulator(self):
         from pyboy import PyBoy
@@ -211,8 +232,12 @@ class App:
         # Live battles hook ROM addresses, so only enable them on the exact ROM they were verified on.
         if game.sha1_of(self.cfg["rom_path"]) == game.YELLOW_SHA1:
             self.hooks = pvp.LinkHooks(self.pyboy, self._send_battle_move)
+            self.wv = worldview.WorldView(self.rom.rom, margin_x=WIDE_MX, margin_y=WIDE_MY)
         else:
-            log.warning("ROM is not USA/Europe Yellow: live battles disabled")
+            log.warning("ROM is not USA/Europe Yellow: live battles and wide view disabled")
+            if self.wide:
+                self.wide = False
+                self._make_window()
         self.last_sram = self._read_sram()
         dev_state = os.environ.get("YL_DEV_LOAD_STATE")
         if dev_state:
@@ -1019,6 +1044,16 @@ class App:
             self.cfg["volume"] = int(round(self.audio.volume * 100))
             self.cfg.save()
             self.toast(f"Volume {self.cfg['volume']}%", 1.2)
+        elif k == pygame.K_v:
+            if not self.wv:
+                self.toast("Wide view needs the USA/Europe ROM.", 3, ui.BAD)
+            else:
+                self.wide = not self.wide
+                self.cfg["wide_view"] = self.wide
+                self.cfg.save()
+                self.last_wide = None
+                self._make_window()
+                self.toast("Wide view on" if self.wide else "Wide view off", 1.5)
         elif k == pygame.K_m:
             self.audio.set_muted(not self.audio.muted)
             self.toast("Sound off" if self.audio.muted else "Sound on", 1.5)
@@ -1026,8 +1061,7 @@ class App:
             self.cfg["show_names"] = not self.cfg.get("show_names", True)
             self.cfg.save()
         elif k in (pygame.K_F5, pygame.K_F6):
-            self.scale = max(2, min(6, self.scale + (1 if k == pygame.K_F6 else -1)))
-            self.cfg["scale"] = self.scale
+            self.cfg["wide_scale" if self.wide else "scale"] = max(1, min(6, self.scale + (1 if k == pygame.K_F6 else -1)))
             self.cfg.save()
             self._make_window()
         elif k == pygame.K_u and self.update_available:
@@ -1101,23 +1135,50 @@ class App:
             img = (st.get("facing", 0) & 0xC) | (int(f.anim // 8) % 4 if f.anim else 0)
             sx = sprites.PLAYER_SCREEN_X + int(f.cur_px - me["px"])
             sy = sprites.PLAYER_SCREEN_Y + int(f.cur_py - me["py"])
-            if -16 < sx < 160 and -16 < sy < 144:
+            if -16 - self.off_x < sx < 160 + self.off_x and -16 - self.off_y < sy < 144 + self.off_y:
                 surf = self.sprite_cache.get(f.sprite, img, self.palette)
-                layer.blit(surf, (sx, sy))
+                layer.blit(surf, (sx + self.off_x, sy + self.off_y))
+                in_center = 0 <= sy < 144 and 0 <= sx + 8 < 160
                 head = (min(17, max(0, sy // 8)), min(19, max(0, (sx + 8) // 8)))
-                if mask is None or not mask[head]:
-                    tags.append((f.name, sx + 8, sy))
+                if mask is None or not in_center or not mask[head]:
+                    tags.append((f.name, sx + 8 + self.off_x, sy + self.off_y))
         if mask is not None:
             # Friends stand *behind* menus and text boxes.
             for r, c in zip(*np.nonzero(mask)):
-                layer.fill((0, 0, 0, 0), (int(c) * 8, int(r) * 8, 8, 8))
+                layer.fill((0, 0, 0, 0), (int(c) * 8 + self.off_x, int(r) * 8 + self.off_y, 8, 8))
         self.game_surf.blit(layer, (0, 0))
         return tags
 
+    def compose_world(self, arr):
+        """Fill game_surf: the real 160x144 frame, plus the wide-view margins when enabled."""
+        center = pygame.image.frombuffer(arr.tobytes(), (160, 144), "RGBA")
+        if not self.wide:
+            self.game_surf.blit(center, (0, 0))
+            return
+        g = self.game
+        img = None
+        cur_map = g.m[game.CUR_MAP]
+        if self.wv and g.in_game() and not g.in_battle() and not self.battle and not self.live:
+            try:
+                img = self.wv.render(self.pyboy.memory, arr, fill_center=False)
+            except Exception:  # noqa: BLE001
+                self._wv_errors += 1
+                if self._wv_errors <= 3:
+                    log.exception("wide view render failed")
+                img = None
+            if img is not None:
+                self.last_wide = (cur_map, img)
+            elif self.last_wide and g.font_loaded() and self.last_wide[0] == cur_map:
+                img = self.last_wide[1]   # menu/text open: you can't move, keep the last view
+        if img is not None:
+            self.game_surf.blit(pygame.image.frombuffer(img.tobytes(), (self.view_w, self.view_h), "RGBA"), (0, 0))
+        else:
+            self.game_surf.fill((10, 11, 16))
+        self.game_surf.blit(center, (self.off_x, self.off_y))
+
     def render(self):
         arr = self.pyboy.screen.ndarray
-        frame = pygame.image.frombuffer(arr.tobytes(), (160, 144), "RGBA")
-        self.game_surf.blit(frame, (0, 0))
+        self.compose_world(arr)
         tags = self.draw_friends(arr)
         self.screen.fill(ui.BG)
         scaled = pygame.transform.scale(self.game_surf, (self.game_w, self.game_h))

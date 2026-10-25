@@ -8,6 +8,8 @@ Everyone plays their **own** game with their own save and story. On top of that:
 - **Trade.** Open the link menu, pick a friend, and both choose a Pokémon and confirm. Trade evolutions work (Kadabra → Alakazam and the others).
 - **Battle each other, live**: challenge a friend from anywhere in the world (Tab → B). They accept, both games jump into a real link battle and each of you picks your own moves. Exhibition match: teams are healed and you're put back where you were afterwards.
 - **Practice**: fight a copy of a friend's team played by the game's AI (Tab → P), even when they're offline.
+- **Wide view** (press **V**): see twice as much of the world around you, NPCs and friends included. The real Game Boy picture stays untouched in the middle.
+- **Straight into your game**: with a save, the intro and title screen are skipped and Continue is picked for you.
 - **Chat.** You can also see who's online, and the app shows a notice when an update is available.
 
 > **No ROM is included, and none ever should be.** Each player needs their own copy of
@@ -38,6 +40,8 @@ Everyone plays their **own** game with their own save and story. On top of that:
 | **T** | Chat |
 | Space (hold) | Fast-forward |
 | M | Mute |
+| − / + | Volume (or drag the slider in the sidebar) |
+| **V** | Wide view on/off |
 | F5 / F6 | Smaller / bigger window |
 | F1 | Help |
 | **F3** | Report a problem (shows the log with Copy / Send to host) |
