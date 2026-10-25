@@ -411,7 +411,7 @@ def draw_trade(surf, f, app, game_w, game_h, offset):
     left = pygame.Rect(r.x + 16, r.y + 54, col_w, r.h - 140)
     right = pygame.Rect(left.right + 16, left.y, col_w, left.h)
 
-    # left: your PC (the giver / both traders pick from here)
+    # left: your PC - click to add to / remove from your offer
     if t.receiving_only:
         text(surf, f.body, "You're receiving a gift", (left.x, left.y), TEXT)
         text(surf, f.small, "Nothing leaves your PC.", (left.x, left.y + 28), DIM)
@@ -419,9 +419,9 @@ def draw_trade(surf, f, app, game_w, game_h, offset):
     else:
         rows = app.trade_entries()
         text(surf, f.body, "Your PC", (left.x, left.y), TEXT)
-        text(surf, f.small, f"{len(rows)} Pokémon", (left.right, left.y + 4), DIM, anchor="topright")
+        text(surf, f.small, "click to pick (several OK)", (left.x + 78, left.y + 4), DIM)
         row_h = 34
-        per = max(1, (left.h - 34) // row_h)
+        per = max(1, (left.h - 70) // row_h)
         app.trade_per = per
         app.trade_scroll = max(0, min(app.trade_scroll, max(0, len(rows) - per)))
         app.trade_sel = max(app.trade_scroll, min(app.trade_sel, app.trade_scroll + per - 1, len(rows) - 1))
@@ -432,16 +432,21 @@ def draw_trade(surf, f, app, game_w, game_h, offset):
         for i in range(app.trade_scroll, min(len(rows), app.trade_scroll + per)):
             bi, e = rows[i]
             rr = pygame.Rect(left.x, y, left.w, row_h - 4)
-            offered = t.my_entry is not None and t.my_entry.get("id") == e["id"]
+            picked = t.offered(e["id"])
             hover = rr.move(offset).collidepoint(pygame.mouse.get_pos())
-            pygame.draw.rect(surf, ACCENT if offered else (PANEL_HI if (hover or i == app.trade_sel) else PANEL),
+            pygame.draw.rect(surf, ACCENT if picked else (PANEL_HI if (hover or i == app.trade_sel) else PANEL),
                              rr, border_radius=6)
-            fg = (30, 28, 20) if offered else TEXT
-            text(surf, f.small, app.entry_label(e), (rr.x + 8, rr.y + 2), fg)
+            fg = (30, 28, 20) if picked else TEXT
+            check = pygame.Rect(rr.x + 6, rr.y + 7, 16, 16)
+            pygame.draw.rect(surf, fg if picked else DIM, check, 2, border_radius=3)
+            if picked:
+                pygame.draw.lines(surf, fg, False, [(check.x + 3, check.y + 8), (check.x + 7, check.y + 12),
+                                                    (check.x + 13, check.y + 3)], 2)
+            text(surf, f.small, app.entry_label(e), (rr.x + 30, rr.y + 2), fg)
             note = app.entry_note(e)
             sub = f"Box {bi + 1}" + (f" · from {e.get('origin', '').title()}" if e.get("origin") not in
                                      (None, "", app.game_id) else "")
-            text(surf, f.small, sub, (rr.x + 8, rr.y + 15), (60, 55, 40) if offered else (note[1] if note else DIM))
+            text(surf, f.small, sub, (rr.x + 30, rr.y + 15), (60, 55, 40) if picked else (note[1] if note else DIM))
             app.click_targets.append((rr.move(offset), lambda e=e, i=i: (setattr(app, "trade_sel", i),
                                                                          app.offer_entry(e)), "offer"))
             y += row_h
@@ -450,35 +455,42 @@ def draw_trade(surf, f, app, game_w, game_h, offset):
                    lambda: setattr(app, "trade_scroll", max(0, app.trade_scroll - per)), offset=offset)
             button(surf, app, f, pygame.Rect(left.right - 32, left.y - 2, 30, 26), "v",
                    lambda: setattr(app, "trade_scroll", app.trade_scroll + per), offset=offset)
+        if rows:
+            sel_box = rows[min(app.trade_sel, len(rows) - 1)][0]
+            by = left.bottom - 32
+            button(surf, app, f, pygame.Rect(left.x, by, 150, 30), f"Select box {sel_box + 1}",
+                   lambda b=sel_box: app.select_box(b), offset=offset)
+            button(surf, app, f, pygame.Rect(left.x + 158, by, 80, 30), "Clear", app.clear_offer,
+                   enabled=bool(t.my_entries), offset=offset)
 
-    # right: what you give / get
+    # right: what changes hands
     y = right.y
     if t.gift and t.giving:
-        text(surf, f.body, "You're giving:", (right.x, y), TEXT)
-        shown = t.my_entry
-        empty = "Click a Pokémon on the left."
+        head, shown, empty = f"You're giving ({len(t.my_entries)}):", t.my_entries, "Pick Pokémon on the left."
     else:
-        text(surf, f.body, f"{t.partner_name} {'is giving you' if t.gift else 'offers'}:", (right.x, y), TEXT)
-        shown = t.their_entry
-        empty = "Waiting for them to choose..."
-    y += 32
-    if shown:
-        card = pygame.Rect(right.x, y, right.w, 86)
-        box(surf, card, PANEL_HI, PANEL_HI, 8)
-        text(surf, f.body, app.entry_label(shown), (card.x + 10, card.y + 8), TEXT)
-        origin = shown.get("origin")
-        text(surf, f.small, f"OT {shown.get('ot', '?')}" + (f" · from {origin.title()}" if origin else ""),
-             (card.x + 10, card.y + 36), DIM)
-        note = app.entry_note(shown)
-        if note:
-            text(surf, f.small, note[0], (card.x + 10, card.y + 58), note[1])
-        y = card.bottom + 10
-    else:
+        head = f"{t.partner_name} {'is giving you' if t.gift else 'offers'} ({len(t.their_entries)}):"
+        shown, empty = t.their_entries, "Waiting for them to choose..."
+    text(surf, f.body, head, (right.x, y), TEXT)
+    y += 30
+    if not shown:
         text(surf, f.small, empty, (right.x, y), DIM)
-        y += 30
-    if not t.gift and t.my_entry:
-        text(surf, f.small, "You offer: " + app.entry_label(t.my_entry), (right.x, y), ACCENT)
-        y += 22
+        y += 26
+    max_rows = 7 if t.gift else 5
+    for e in shown[:max_rows]:
+        card = pygame.Rect(right.x, y, right.w, 40)
+        box(surf, card, PANEL_HI, PANEL_HI, 6)
+        text(surf, f.small, app.entry_label(e), (card.x + 8, card.y + 3), TEXT)
+        note = app.entry_note(e)
+        origin = e.get("origin")
+        sub = note[0] if note else (f"OT {e.get('ot', '?')}" + (f" · from {origin.title()}" if origin else ""))
+        text(surf, f.small, sub, (card.x + 8, card.y + 20), note[1] if note else DIM)
+        y += 44
+    if len(shown) > max_rows:
+        text(surf, f.small, f"... and {len(shown) - max_rows} more", (right.x, y), DIM)
+        y += 20
+    if not t.gift and t.my_entries:
+        text(surf, f.small, f"You offer ({len(t.my_entries)}): " + app.mons_text(t.my_entries),
+             (right.x, max(y + 4, right.bottom - 44)), ACCENT)
     text(surf, f.small, "Trade evolutions happen on arrival.", (right.x, right.bottom - 20), DIM)
 
     # bottom: confirmations + buttons
@@ -487,7 +499,12 @@ def draw_trade(surf, f, app, game_w, game_h, offset):
     them = f"{t.partner_name} confirmed" if t.them_confirmed else f"{t.partner_name} hasn't confirmed"
     text(surf, f.small, me, (r.x + 18, by), GOOD if t.me_confirmed else DIM)
     text(surf, f.small, them, (r.x + 18, by + 18), GOOD if t.them_confirmed else DIM)
-    label = "Accept gift" if t.receiving_only else ("Give it" if t.gift else "Confirm trade")
+    if t.receiving_only:
+        label = "Accept gift" if len(t.their_entries) <= 1 else f"Accept {len(t.their_entries)} Pokémon"
+    elif t.gift:
+        label = "Give it" if len(t.my_entries) <= 1 else f"Give {len(t.my_entries)}"
+    else:
+        label = "Confirm trade"
     button(surf, app, f, pygame.Rect(r.right - 300, r.bottom - 54, 160, 38), label, app.confirm_trade,
            enabled=t.can_confirm() and not t.me_confirmed, offset=offset, primary=True,
            tip="Pick a Pokémon first." if not t.can_confirm() else "")

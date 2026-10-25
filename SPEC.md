@@ -79,7 +79,7 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `battle_result` | `opponent_uid`, `won` bool | server broadcasts a system message |
 | `trade_request` | `to` uid, `gift` bool (optional) | target must be online, neither busy. `gift`: requester gives, target only receives |
 | `trade_respond` | `trade_id`, `accept` bool | by the target |
-| `trade_offer` | `trade_id`, `entry_id` | an entry of the sender's **server** PC store; re-offer resets both confirmations; a gift's receiver can't offer |
+| `trade_offer` | `trade_id`, `entry_ids` list (0-20; `entry_id` single still accepted) | entries of the sender's **server** PC store; replaces the previous offer and resets both confirmations; `[]` withdraws it; a gift's receiver can't offer |
 | `trade_confirm` | `trade_id` | valid when both offered (gift: when the giver offered) |
 | `trade_cancel` | `trade_id` | either side, any time before it completes (unknown/finished trade: ignored) |
 | `trade_status` | `trade_id` | outcome of a trade we lost track of (after a reconnect) |
@@ -100,9 +100,9 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `party_data` | `uid`, `name`, `trainer`, `mons` list[Mon] (or `error` if unknown) |
 | `trade_request` | `trade_id`, `from` uid, `name`, `gift` bool |
 | `trade_started` | `trade_id`, `with` uid, `name`, `gift` bool, `giver` uid (gift only) (sent to both after accept) |
-| `trade_offer` | `trade_id`, `from` uid, `entry` (the server's copy of the offered PC entry; to the *other* side) |
+| `trade_offer` | `trade_id`, `from` uid, `entries` list (the server's copies; to the *other* side), `entry` = first or null (0.6.1 clients) |
 | `trade_confirm_state` | `trade_id`, `you` bool, `them` bool |
-| `trade_complete` | `trade_id`, `gave` entry or null, `received` entry or null (after evolution) |
+| `trade_complete` | `trade_id`, `gave_all` / `received_all` lists (after evolution), `evolved_all` names; `gave` / `received` / `evolved` = first item (0.6.1 clients) |
 | `trade_cancelled` | `trade_id`, `reason` str |
 | `pc_trades` | `deltas`: list of `{trade_id, remove: [entry_id], add: [entry], srv_rev}` for this player's PC |
 | `trade_status` | `trade_id`, `state`: `complete` \| `pending` \| `failed` |
