@@ -959,6 +959,14 @@ class App:
         self.travel_to = game_id
         self.quit_requested = True
 
+    def pick_region_game(self, region_id, game_id):
+        """Remember which version to use for a region; if we're in that region, switch to it."""
+        picks = self.cfg.setdefault("region_game", {})
+        picks[region_id] = game_id
+        self.cfg.save()
+        if self.game_info.region == region_id and game_id != self.game_id:
+            self.travel(game_id)
+
     def add_rom_dialog(self):
         self.release_all()
         try:
