@@ -1,3 +1,5 @@
+import copy
+import json
 import os
 import sys
 
@@ -141,16 +143,6 @@ def test_identical_twins_and_moves(tmp_path):
     assert sorted([sync.working["boxes"][0][0]["id"], sync.working["boxes"][1][0]["id"]]) == sorted(ids)
 
 
-def test_adopt_remote_only_when_idle(tmp_path):
-    sync = pcdb.PCSync(tmp_path / "s.json")
-    remote = pcdb.empty_store()
-    remote["rev"] = 5
-    sync.pending = True
-    assert not sync.adopt_remote(remote)
-    sync.pending = False
-    assert sync.adopt_remote(remote) and sync.committed["rev"] == 5
-
-
 def test_trade_delta_applies_once_and_traded_mon_cannot_come_back(tmp_path):
     mem, pc = setup_game([[rec(0x54, "PIKA"), rec(0xA5, "RATTY")]])
     sync = pcdb.PCSync(tmp_path / "s.json")
@@ -161,12 +153,93 @@ def test_trade_delta_applies_once_and_traded_mon_cannot_come_back(tmp_path):
     assert [e["nick"] for _, e in sync.offerable()] == ["PIKA", "RATTY"]
     got = {"id": "new1", "origin": "crystal", "dex": 152, "level": 9, "nick": "LEAFY", "ot": "KRIS", "otid": 5,
            "gen1": None, "gen2": None}
-    delta = {"trade_id": "t1", "remove": [ratty["id"]], "add": [got], "rev": 7}
+    delta = {"trade_id": "t1", "remove": [ratty["id"]], "add": [got], "srv_rev": 7}
     assert sync.apply_trade(delta) and not sync.apply_trade(delta)
-    assert sync.committed["rev"] == 8 and "t1" in sync.committed["trades"]
+    assert sync.server_rev == 7 and "t1" in sync.committed["trades"]
     assert [e["nick"] for e in sync.working["boxes"][0]] == ["PIKA", "LEAFY"]
     # the game still shows RATTY (it hasn't opened the PC since): opening the PC must not re-import it
     view = sync.open_session("yellow", pc, True)
     names = [text.decode(r[44:]) for r in view[0]]
     assert "RATTY" not in names and sync.count() == 2
     assert not sync.offerable()                     # PC open in-game: nothing can be traded
+
+
+def test_merge_keeps_both_computers_changes(tmp_path):
+    """Laptop and desktop share one store: each one's changes survive, nothing comes back from the dead."""
+    a, b, c = (pcdb.empty_store() for _ in range(3))
+    e = lambda i, n: {"id": i, "nick": n, "dex": 1, "level": 5, "gen1": None, "gen2": None}  # noqa: E731
+    base = pcdb.empty_store()
+    base["boxes"][0] = [e("p1", "PIKA"), e("r1", "RATTY")]
+    sync = pcdb.PCSync(tmp_path / "s.json")
+    sync.committed = copy.deepcopy(base)
+    sync.working = copy.deepcopy(base)
+    sync.synced = copy.deepcopy(base)
+    sync.server_rev = 3
+    sync.committed["boxes"][0].append(e("d1", "DEPOSITED_HERE"))   # this computer deposited one
+    sync.working = copy.deepcopy(sync.committed)
+    remote = copy.deepcopy(base)                                   # the other computer:
+    remote["boxes"][0] = [e("p1", "PIKA"), e("o1", "OTHER_PC")]    # withdrew RATTY, deposited OTHER_PC
+    remote["srv_rev"] = 5
+    assert sync.merge_remote(remote)
+    names = sorted(x["nick"] for x in sync.committed["boxes"][0])
+    assert names == ["DEPOSITED_HERE", "OTHER_PC", "PIKA"] and sync.server_rev == 5
+    assert "r1" in sync.committed["gone"]          # this computer's game PC must not re-import RATTY
+    sync.pending = True
+    assert not sync.merge_remote(remote) and sync.deferred is remote   # waits until nothing is pending
+    del a, b, c
+
+
+def test_twins_one_traded_away(tmp_path):
+    twin = rec(0x54, "PIKA")
+    mem, pc = setup_game([[twin, twin, rec(0xA5, "RATTY")]])
+    sync = pcdb.PCSync(tmp_path / "s.json")
+    pc.write_boxes(sync.open_session("yellow", pc, True))
+    sync.close_session("yellow", pc)
+    sync.commit()
+    first = sync.committed["boxes"][0][0]["id"]
+    sync.apply_trade({"trade_id": "t", "remove": [first], "add": [], "srv_rev": 2})
+    view = sync.open_session("yellow", pc, True)                   # the game still shows both twins
+    assert [text.decode(r[44:]) for r in view[0]] == ["PIKA", "RATTY"] and sync.count() == 2
+
+
+def test_locked_mon_withdrawn_during_unknown_trade_goes_back(tmp_path):
+    mem, pc = setup_game([[rec(0x54, "PIKA"), rec(0xA5, "RATTY")]])
+    sync = pcdb.PCSync(tmp_path / "s.json")
+    pc.write_boxes(sync.open_session("yellow", pc, True))
+    sync.close_session("yellow", pc)
+    sync.commit()
+    ratty = next(e for e in sync.committed["boxes"][0] if e["nick"] == "RATTY")
+    sync.lock("t9", [ratty["id"]])
+    assert [e["nick"] for _, e in sync.offerable()] == ["PIKA"]    # can't be offered twice
+    pc.write_boxes(sync.open_session("yellow", pc, True))
+    withdrawn = pc.read_boxes()[0][1]
+    boxes = pc.read_boxes()
+    boxes[0] = boxes[0][:1]                                        # the player withdraws RATTY anyway
+    pc.write_boxes(boxes)
+    report = sync.close_session("yellow", pc, party_records=[rec(0x99, "BULBA", otid=777), withdrawn])
+    assert report["locked_returned"] == ["RATTY"] and report["standin_party_slots"] == [1]
+    assert sync.count() == 2
+
+
+def test_full_pc_trade_waits_in_incoming(tmp_path):
+    sync = pcdb.PCSync(tmp_path / "s.json")
+    filler = lambda i: {"id": f"f{i}", "nick": "F", "dex": 1, "level": 5, "gen1": None, "gen2": None}  # noqa: E731
+    for b in range(pcdb.STORE_BOXES):
+        sync.committed["boxes"][b] = [filler(b * 20 + k) for k in range(20)]
+    sync.working = copy.deepcopy(sync.committed)
+    gift = {"id": "g", "nick": "GIFT", "dex": 1, "level": 5, "gen1": None, "gen2": None}
+    sync.apply_trade({"trade_id": "t", "remove": [], "add": [gift], "srv_rev": 1})
+    assert pcdb.valid_store(sync.committed) and sync.committed["incoming"][0]["id"] == "g"
+    assert all(len(b) <= 20 for b in sync.committed["boxes"])
+
+
+def test_damaged_file_is_kept_and_overfull_repaired(tmp_path):
+    p = tmp_path / "s.json"
+    p.write_text("{ not json")
+    sync = pcdb.PCSync(p)
+    assert sync.count() == 0 and list(tmp_path.glob("s.bad-*"))
+    st = pcdb.empty_store()
+    st["boxes"][0] = [{"id": str(i), "nick": "X"} for i in range(21)]
+    p.write_text(json.dumps({"store": st}))
+    sync = pcdb.PCSync(p)
+    assert len(sync.committed["boxes"][0]) == 20 and len(sync.committed["incoming"]) == 1

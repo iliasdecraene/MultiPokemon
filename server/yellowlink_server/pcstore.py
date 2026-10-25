@@ -99,25 +99,67 @@ def evolve_for_trade(entry: dict) -> tuple[dict, str | None]:
     return e, None
 
 
+SERVER_KEYS = ("srv_rev", "inbox", "srv_trades", "srv_gone")
+INBOX_MAX = 100          # undelivered trades per player before new trades are refused
+
+
+def applied(store: dict, trade_id: str) -> bool:
+    return trade_id in store.get("srv_trades", [])
+
+
 def apply_delta(store: dict, trade_id: str, remove: list, add: list) -> dict:
-    """Remove/add entries in place; returns the delta record (also appended to store['inbox'])."""
+    """Apply one side of a trade to a stored PC in place (idempotent by trade id). Returns the delta that the
+    client must apply too (also kept in store['inbox'] until the client's upload lists the trade id).
+
+    Server-only fields: srv_rev (bumped on every change), srv_trades (applied trade ids), srv_gone (entry ids
+    given away; an upload still holding one is refused), inbox (undelivered deltas - never trimmed)."""
+    if applied(store, trade_id):
+        return next((d for d in store.get("inbox", []) if d.get("trade_id") == trade_id),
+                    {"trade_id": trade_id, "remove": list(remove), "add": list(add),
+                     "srv_rev": store.get("srv_rev", 0)})
+    gone = store.setdefault("srv_gone", [])
     for eid in remove:
         hit = find(store, eid)
         if hit:
             store["boxes"][hit[0]].pop(hit[1])
-        gone = store.setdefault("gone", [])
         gone.append(eid)
-        del gone[:-500]
     added = []
     for entry in add:
         entry = copy.deepcopy(entry)
         if find(store, entry["id"]):
             entry["id"] = uuid.uuid4().hex                          # never two entries with one id
-        box = next(b for b in store["boxes"] if len(b) < MONS_PER_BOX)
-        box.append(entry)
+        if entry["id"] in gone:
+            gone.remove(entry["id"])                                # it came back in a later trade
+        box = next((b for b in store["boxes"] if len(b) < MONS_PER_BOX), None)
+        if box is None:
+            store.setdefault("incoming", []).append(entry)
+        else:
+            box.append(entry)
         added.append(entry)
-    store["rev"] = int(store.get("rev", 0)) + 1
-    delta = {"trade_id": trade_id, "remove": list(remove), "add": added, "rev": store["rev"]}
+    del gone[:-2000]
+    store["srv_rev"] = int(store.get("srv_rev", 0)) + 1
+    trades = store.setdefault("srv_trades", [])
+    trades.append(trade_id)
+    del trades[:-2000]
+    delta = {"trade_id": trade_id, "remove": list(remove), "add": added, "srv_rev": store["srv_rev"]}
     store.setdefault("inbox", []).append(delta)
-    del store["inbox"][:-200]
     return delta
+
+
+def valid_entry(entry) -> bool:
+    """Offered entries must carry readable game data (a bad one would break the trade halfway)."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+        return False
+    ok = False
+    for k in ("gen1", "gen2"):
+        v = entry.get(k)
+        if v is None:
+            continue
+        try:
+            raw = base64.b64decode(v, validate=True)
+        except (ValueError, TypeError):
+            return False
+        if len(raw) not in (54, 55):
+            return False
+        ok = True
+    return ok

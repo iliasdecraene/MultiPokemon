@@ -270,8 +270,7 @@ async def test_trade_busy_and_non_participant(connect_client):
     tid = await open_trade(a, b)
     await c.send(type="trade_request", to=a.uid)
     assert "busy" in (await c.expect("error"))["message"]
-    await c.send(type="trade_cancel", trade_id=tid)
-    await c.expect("error")
+    await c.send(type="trade_cancel", trade_id=tid)            # not their trade: ignored quietly
     await c.send(type="trade_offer", trade_id=tid, entry_id="x")
     await c.expect("error")
     await a.expect_none("trade_cancelled")
@@ -381,17 +380,19 @@ async def test_pc_store_roundtrip_and_conflict(connect_client):
     a = await connect_client("Ilias")
     await a.send(type="pc_get")
     assert (await a.expect("pc_data"))["store"] is None
-    await a.send(type="pc_put", store=_store(1, 3))
-    assert (await a.expect("pc_saved"))["rev"] == 1
-    await a.send(type="pc_put", store=_store(1, 1))          # stale revision
+    await a.send(type="pc_put", store=_store(1, 3), base=0)
+    assert (await a.expect("pc_saved"))["srv_rev"] == 1
+    await a.send(type="pc_put", store=_store(2, 1), base=0)          # based on an old copy (other computer)
     conflict = await a.expect("pc_conflict")
-    assert conflict["store"]["rev"] == 1 and len(conflict["store"]["boxes"][0]) == 3
-    await a.send(type="pc_put", store=_store(2, 20))
-    await a.expect("pc_saved", rev=2)
+    assert conflict["store"]["srv_rev"] == 1 and len(conflict["store"]["boxes"][0]) == 3
+    await a.send(type="pc_put", store=_store(2, 20), base=1)
+    await a.expect("pc_saved", srv_rev=2)
     await a.send(type="pc_get")
     got = (await a.expect("pc_data"))["store"]
-    assert got["rev"] == 2 and len(got["boxes"][0]) == 20
-    await a.send(type="pc_put", store={"rev": 3, "boxes": [[]]})
+    assert got["srv_rev"] == 2 and len(got["boxes"][0]) == 20
+    await a.send(type="pc_put", store={"rev": 3, "boxes": [[]]}, base=2)
+    await a.expect("error")
+    await a.send(type="pc_put", store=_store(3, 1))                   # no base
     await a.expect("error")
 
 

@@ -133,11 +133,13 @@ class TradeMixin:
         t = self.trade
         if not t or t.receiving_only:
             return
-        if entry["id"] not in {e["id"] for _, e in self.trade_entries()}:
+        mine = {e["id"] for _, e in self.trade_entries()} | set(self.pcsync.locks.get(t.trade_id, []))
+        if entry["id"] not in mine:
             self.toast("That Pokémon isn't available right now.", 3, ui.BAD)
             return
         t.my_entry = entry
         t.me_confirmed = t.them_confirmed = False
+        self.pcsync.lock(t.trade_id, [entry["id"]])     # stays in the PC until we know how the trade ended
         self.net.send({"type": "trade_offer", "trade_id": t.trade_id, "entry_id": entry["id"]})
 
     def confirm_trade(self):
@@ -170,6 +172,7 @@ class TradeMixin:
             self.sys_msg(text, ui.GOOD)
 
     def on_trade_cancelled(self, msg):
+        self.pcsync.unlock(msg.get("trade_id"))           # the server says it didn't happen
         t = self.trade
         if not t or t.trade_id != msg.get("trade_id"):
             if not t:
@@ -185,13 +188,30 @@ class TradeMixin:
         self.sys_msg(s, color)
 
     # --- the PC database side ------------------------------------------------------------------------------
+    def on_trade_status(self, msg):
+        """Answer to our question about a trade we lost track of (connection dropped mid-trade)."""
+        tid, state = msg.get("trade_id"), msg.get("state")
+        if state == "failed":
+            self.pcsync.unlock(tid)
+        elif state == "complete":
+            self.net.send({"type": "pc_get"})               # the delta comes with it and releases the lock
+        elif state == "pending":
+            self._status_retry = time.time() + 5
+
+    def trades_step(self):
+        if getattr(self, "_status_retry", 0) and time.time() > self._status_retry and self.net.status == "online":
+            self._status_retry = 0
+            for tid in list(self.pcsync.locks):
+                if not self.trade or self.trade.trade_id != tid:
+                    self.net.send({"type": "trade_status", "trade_id": tid})
+
     def on_pc_trades(self, msg):
         changed = False
         for d in msg.get("deltas") or []:
             if isinstance(d, dict) and self.pcsync.apply_trade(d):
                 changed = True
         # upload so the server knows these trades arrived (it refuses uploads that miss one)
-        self.net.send({"type": "pc_put", "store": self.pcsync.committed})
+        self.pc_push()
         if changed:
             log.info("PC trades applied; store rev %s", self.pcsync.committed.get("rev"))
 

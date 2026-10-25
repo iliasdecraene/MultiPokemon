@@ -11,6 +11,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -222,6 +223,7 @@ class YellowLinkServer:
 
     # ------------------------------------------------------------ lifecycle
     async def start(self):
+        self._replay_journals()
         self._server = await serve(
             self.handler, self.config.host, self.config.port,
             max_size=MAX_MESSAGE_BYTES, ping_interval=20, ping_timeout=20,
@@ -361,10 +363,6 @@ class YellowLinkServer:
         if not isinstance(uid, str) or not (1 <= len(uid) <= 64):
             await reject("invalid uid", CLOSE_BAD_HELLO)
             return None
-        if msg.get("protocol") != PROTOCOL_VERSION:
-            await reject(f"protocol mismatch (server speaks {PROTOCOL_VERSION}); please update "
-                         f"YellowLink: {self.config.download_url}", CLOSE_BAD_HELLO)
-            return None
         version = msg.get("version") if isinstance(msg.get("version"), str) else ""
 
         if msg.get("mode") == "report":
@@ -381,6 +379,10 @@ class YellowLinkServer:
                 pass
             return None
 
+        if msg.get("protocol") != PROTOCOL_VERSION:
+            await reject(f"protocol mismatch (server speaks {PROTOCOL_VERSION}); please update "
+                         f"YellowLink: {self.config.download_url}", CLOSE_BAD_HELLO)
+            return None
         client = Client(ws=ws, uid=uid, name=name.strip(), version=version[:32])
 
         old = self.clients.get(uid)
@@ -684,6 +686,8 @@ class YellowLinkServer:
         hit = pcstore.find(store, eid) if self._pc_valid(store) else None
         if hit is None:
             raise Invalid("that Pokémon isn't in your saved PC yet - wait a few seconds and try again")
+        if not pcstore.valid_entry(hit[2]):
+            raise Invalid("that Pokémon's saved data is damaged and can't be traded")
         if any(o.get("id") == eid for u, o in trade.offers.items() if u == client.uid):
             return
         trade.offers[client.uid] = hit[2]
@@ -708,60 +712,138 @@ class YellowLinkServer:
             await self._apply_trade(trade)
 
     async def _apply_trade(self, trade: Trade) -> None:
-        """Swap the offered entries between both stored PCs in one step (SPEC.md: trade state machine)."""
+        """Swap the offered entries between both stored PCs (SPEC.md: trade state machine).
+
+        Crash-safe: the full plan is written to a journal first; the journal is replayed on startup until both
+        stores list the trade id, so a crash between the two saves can't duplicate or lose anything."""
         trade.status = "applying"
-        stores = {}
-        for uid in (trade.a, trade.b):
-            st = self._pc_load(uid)
-            stores[uid] = st if self._pc_valid(st) else pcstore.empty_store()
-        gives = {uid: trade.offers.get(uid) for uid in (trade.a, trade.b)}
-        for uid, entry in gives.items():
-            if entry is not None and pcstore.find(stores[uid], entry["id"]) is None:
-                await self._cancel(trade, "a Pokémon was moved out of the PC", (trade.a, trade.b))
-                return
-        received = {}
-        for uid in (trade.a, trade.b):
-            entry = gives[trade.other(uid)]
-            if entry is None:
-                received[uid] = None
-                continue
-            evolved, new_name = pcstore.evolve_for_trade(entry)
-            evolved["origin"] = evolved.get("origin") or "trade"
-            received[uid] = (evolved, new_name)
-        for uid in (trade.a, trade.b):
-            gets = 1 if received[uid] else 0
-            frees = 1 if gives[uid] else 0
-            if sum(pcstore.MONS_PER_BOX - len(b) for b in stores[uid]["boxes"]) + frees < gets:
-                c = self.clients.get(uid)
-                await self._cancel(trade, f"{c.name if c else 'their'} PC is full", (trade.a, trade.b))
-                return
-        deltas = {}
-        for uid in (trade.a, trade.b):
-            remove = [gives[uid]["id"]] if gives[uid] else []
-            add = [received[uid][0]] if received[uid] else []
-            deltas[uid] = pcstore.apply_delta(stores[uid], trade.id, remove, add)
-            self._pc_save(uid, stores[uid])
+        try:
+            plan = self._plan_trade(trade)
+        except Exception:  # noqa: BLE001 - never leave a trade (and both players) stuck
+            log.exception("trade %s: planning failed", trade.id)
+            plan = "the trade failed (server error)"
+        if isinstance(plan, str):
+            await self._cancel(trade, plan, (trade.a, trade.b))
+            return
+        self._journal_write(plan)
         self._record_outcome(trade, "complete")
         await self._end_trade(trade)
+        for attempt in range(1000):
+            try:
+                deltas = self._journal_apply(plan)
+                break
+            except Exception:  # noqa: BLE001 - disk trouble: the journal keeps the trade safe; retry
+                log.exception("trade %s: applying failed (attempt %d); retrying", trade.id, attempt + 1)
+                await asyncio.sleep(5)
+        else:
+            return
         log.info("trade %s applied to both PCs", trade.id)
         for uid in (trade.a, trade.b):
             c = self.clients.get(uid)
-            await self.send(c, {"type": "pc_trades", "deltas": [deltas[uid]]})
+            d = deltas[uid]
+            await self.send(c, {"type": "pc_trades", "deltas": [d]})
             await self.send(c, {"type": "trade_complete", "trade_id": trade.id,
-                                "gave": gives[uid], "received": deltas[uid]["add"][0] if deltas[uid]["add"] else None,
-                                "evolved": received[uid][1] if received[uid] else None})
+                                "gave": plan["gives"][uid], "received": d["add"][0] if d["add"] else None,
+                                "evolved": plan["evolved"].get(uid)})
         name = lambda u: (self.store.get(u) or {}).get("name", "?")  # noqa: E731
         nick = lambda e: (e or {}).get("nick") or "a Pokémon"  # noqa: E731
+        gives = plan["gives"]
         if trade.gift:
             await self.system(f"{name(trade.a)} gave {nick(gives[trade.a])} to {name(trade.b)}!")
         else:
             await self.system(f"{name(trade.a)} traded {nick(gives[trade.a])} with {name(trade.b)} "
                               f"for {nick(gives[trade.b])}!")
 
+    def _plan_trade(self, trade: Trade):
+        """Check everything and compute both deltas. Returns the plan, or a reason string to cancel."""
+        stores = {}
+        for uid in (trade.a, trade.b):
+            st, status = self._pc_load_status(uid)
+            c = self.clients.get(uid)
+            who = c.name if c else "a player"
+            if status == "corrupt":
+                return f"{who}'s saved PC couldn't be read - ask the host"
+            st = st or pcstore.empty_store()
+            if len(st.get("inbox") or []) >= pcstore.INBOX_MAX:
+                return f"{who} has too many trades still syncing - try again in a minute"
+            stores[uid] = st
+        gives = {uid: trade.offers.get(uid) for uid in (trade.a, trade.b)}
+        for uid, entry in gives.items():
+            if entry is not None and pcstore.find(stores[uid], entry["id"]) is None:
+                return "a Pokémon was moved out of the PC"
+        plan = {"trade_id": trade.id, "a": trade.a, "b": trade.b, "gives": gives, "evolved": {}, "deltas": {}}
+        for uid in (trade.a, trade.b):
+            entry = gives[trade.other(uid)]
+            add = []
+            if entry is not None:
+                evolved, new_name = pcstore.evolve_for_trade(entry)
+                add = [evolved]
+                if new_name:
+                    plan["evolved"][uid] = new_name
+            frees = 1 if gives[uid] else 0
+            if sum(pcstore.MONS_PER_BOX - len(b) for b in stores[uid]["boxes"]) + frees < len(add):
+                c = self.clients.get(uid)
+                return f"{c.name if c else 'their'} PC is full"
+            plan["deltas"][uid] = {"remove": [gives[uid]["id"]] if gives[uid] else [], "add": add}
+        return plan
+
+    def _journal_dir(self) -> str:
+        d = os.path.join(self.config.data_dir, "pc", "journal")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _journal_write(self, plan: dict) -> None:
+        path = os.path.join(self._journal_dir(), f"{plan['trade_id']}.json")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(plan, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+
+    def _journal_apply(self, plan: dict) -> dict:
+        """Apply a journalled trade to both stores (idempotent), then delete the journal."""
+        out = {}
+        for uid in (plan["a"], plan["b"]):
+            st, status = self._pc_load_status(uid)
+            if status == "corrupt":
+                raise RuntimeError(f"PC store of {uid} unreadable")
+            st = st or pcstore.empty_store()
+            d = plan["deltas"][uid]
+            out[uid] = pcstore.apply_delta(st, plan["trade_id"], d["remove"], d["add"])
+            self._pc_save(uid, st)
+        os.remove(os.path.join(self._journal_dir(), f"{plan['trade_id']}.json"))
+        return out
+
+    def _replay_journals(self) -> None:
+        for name in sorted(os.listdir(self._journal_dir())):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(self._journal_dir(), name), encoding="utf-8") as fh:
+                    plan = json.load(fh)
+                self._journal_apply(plan)
+                log.warning("finished an interrupted trade from the journal: %s", plan.get("trade_id"))
+            except Exception:  # noqa: BLE001
+                log.exception("could not replay trade journal %s", name)
+
+    async def on_trade_status(self, client: Client, msg: dict) -> None:
+        """Outcome of a trade this client offered in but lost track of (connection dropped)."""
+        tid = _str(msg, "trade_id")
+        st, _ = self._pc_load_status(client.uid)
+        if self.trade_outcomes.get(tid) == "complete" or (st and pcstore.applied(st, tid)):
+            state = "complete"
+        elif tid in self.trades or os.path.exists(os.path.join(self._journal_dir(), f"{tid}.json")):
+            state = "pending"
+        else:
+            state = "failed"
+        await self.send(client, {"type": "trade_status", "trade_id": tid, "state": state})
+
     async def on_trade_cancel(self, client: Client, msg: dict) -> None:
-        trade = self._trade_for(client, msg)
-        if trade.status == "applying":
-            return
+        tid = msg.get("trade_id") or client.trade_id
+        trade = self.trades.get(tid) if isinstance(tid, str) else None
+        if trade is None or not trade.has(client.uid) or trade.status == "applying":
+            return                                    # already finished/cancelled: nothing to do
         await self._cancel(trade, "cancelled", (trade.a, trade.b))
 
     # --------------------------------------------------------------- battles
@@ -926,16 +1008,28 @@ class YellowLinkServer:
         os.makedirs(folder, exist_ok=True)
         return os.path.join(folder, f"{safe}.json")
 
-    def _pc_load(self, uid: str):
+    def _pc_load_status(self, uid: str):
+        """(store, "ok" | "missing" | "corrupt") - a damaged file must never be replaced by an empty one."""
+        path = self._pc_path(uid)
+        if not os.path.exists(path):
+            return None, "missing"
         try:
-            with open(self._pc_path(uid), encoding="utf-8") as fh:
-                return json.load(fh)
+            with open(path, encoding="utf-8") as fh:
+                st = json.load(fh)
         except (OSError, ValueError):
-            return None
+            log.error("PC store %s is unreadable", path)
+            return None, "corrupt"
+        if not self._pc_valid(st):
+            log.error("PC store %s is invalid", path)
+            return None, "corrupt"
+        return st, "ok"
+
+    def _pc_load(self, uid: str):
+        return self._pc_load_status(uid)[0]
 
     @staticmethod
     def _pc_valid(store) -> bool:
-        if not isinstance(store, dict) or not isinstance(store.get("rev"), int) or store["rev"] < 1:
+        if not isinstance(store, dict) or not isinstance(store.get("rev"), int) or store["rev"] < 0:
             return False
         boxes = store.get("boxes")
         if not isinstance(boxes, list) or len(boxes) != 14:
@@ -946,20 +1040,22 @@ class YellowLinkServer:
             for e in box:
                 if not isinstance(e, dict) or not isinstance(e.get("id"), str):
                     return False
-        return isinstance(store.get("linked", []), list)
+        return isinstance(store.get("linked", []), list) and isinstance(store.get("incoming", []), list)
 
     def _pc_save(self, uid: str, store: dict) -> None:
+        """New file first, then keep the old one as backup 1..5 (the live file is never missing)."""
         path = self._pc_path(uid)
-        # keep the last 5 revisions as backups
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(store, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
         if os.path.exists(path):
             for i in range(4, 0, -1):
                 older = f"{path}.{i}"
                 if os.path.exists(older):
                     os.replace(older, f"{path}.{i + 1}")
-            os.replace(path, f"{path}.1")
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(store, fh)
+            shutil.copy2(path, f"{path}.1")
         os.replace(tmp, path)
 
     async def on_pc_get(self, client: Client, msg: dict) -> None:
@@ -970,24 +1066,38 @@ class YellowLinkServer:
             await self.send(client, {"type": "pc_trades", "deltas": inbox})
 
     async def on_pc_put(self, client: Client, msg: dict) -> None:
+        """Compare-and-swap upload: accepted only if it's based on the server's current copy (`base` ==
+        srv_rev) and knows every trade (SPEC.md section 5). Otherwise the client merges and tries again."""
         store = msg.get("store")
         if not self._pc_valid(store):
             raise Invalid("invalid PC store")
-        current = self._pc_load(client.uid)
+        base = msg.get("base")
+        if isinstance(base, bool) or not isinstance(base, int):
+            raise Invalid("base must be an integer")
+        current, status = self._pc_load_status(client.uid)
+        if status == "corrupt":
+            path = self._pc_path(client.uid)
+            os.replace(path, f"{path}.corrupt-{int(time.time())}")
+            log.warning("replacing the unreadable PC store of %s with their upload (kept a copy)", client.name)
+            current = None
+        current = current or {}
         applied = set(store.get("trades") or [])
-        unacked = [d for d in ((current or {}).get("inbox") or []) if d.get("trade_id") not in applied]
+        unacked = [d for d in current.get("inbox") or [] if d.get("trade_id") not in applied]
         if unacked:
-            # trades happened on the server since this copy was made: the client applies them and uploads again
             await self.send(client, {"type": "pc_trades", "deltas": unacked})
             return
-        if current and isinstance(current.get("rev"), int) and store["rev"] <= current["rev"]:
-            await self.send(client, {"type": "pc_conflict", "store": current})
+        gone = set(current.get("srv_gone") or [])
+        holds_gone = any(e.get("id") in gone for b in store["boxes"] for e in b)
+        if base != int(current.get("srv_rev", 0)) or holds_gone:
+            await self.send(client, {"type": "pc_conflict", "store": current or None})
             return
-        store = {**store, "inbox": []}
-        self._pc_save(client.uid, store)
-        count = sum(len(b) for b in store["boxes"])
-        log.info("PC store of %s saved: rev %d, %d mons", client.name, store["rev"], count)
-        await self.send(client, {"type": "pc_saved", "rev": store["rev"]})
+        new = {k: v for k, v in store.items() if k not in pcstore.SERVER_KEYS}
+        new.update(srv_rev=base + 1, inbox=[], srv_trades=current.get("srv_trades", []),
+                   srv_gone=current.get("srv_gone", []))
+        self._pc_save(client.uid, new)
+        count = sum(len(b) for b in new["boxes"])
+        log.info("PC store of %s saved: srv_rev %d, %d mons", client.name, new["srv_rev"], count)
+        await self.send(client, {"type": "pc_saved", "srv_rev": new["srv_rev"]})
 
     def _challenge_kind(self, client) -> str | None:
         """Challenge type the player is playing right now (for chat/roster labels), or None."""
@@ -1042,6 +1152,7 @@ class YellowLinkServer:
         "trade_offer": on_trade_offer,
         "trade_confirm": on_trade_confirm,
         "trade_cancel": on_trade_cancel,
+        "trade_status": on_trade_status,
         "battle_request": on_battle_request,
         "battle_respond": on_battle_respond,
         "battle_ready": on_battle_ready,

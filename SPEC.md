@@ -81,7 +81,8 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `trade_respond` | `trade_id`, `accept` bool | by the target |
 | `trade_offer` | `trade_id`, `entry_id` | an entry of the sender's **server** PC store; re-offer resets both confirmations; a gift's receiver can't offer |
 | `trade_confirm` | `trade_id` | valid when both offered (gift: when the giver offered) |
-| `trade_cancel` | `trade_id` | either side, any time before it completes |
+| `trade_cancel` | `trade_id` | either side, any time before it completes (unknown/finished trade: ignored) |
+| `trade_status` | `trade_id` | outcome of a trade we lost track of (after a reconnect) |
 | `bug_report` | `text` (<=60 KB), `reason` | saved to `<data_dir>/reports/`; answered with `report_saved`. Can also be sent on a report-only connection: `hello` with `"mode": "report"` (not logged in, not shown to others), then one `bug_report`. |
 | `ping` | `t` | server answers `pong` with same `t` |
 
@@ -103,7 +104,8 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `trade_confirm_state` | `trade_id`, `you` bool, `them` bool |
 | `trade_complete` | `trade_id`, `gave` entry or null, `received` entry or null (after evolution) |
 | `trade_cancelled` | `trade_id`, `reason` str |
-| `pc_trades` | `deltas`: list of `{trade_id, remove: [entry_id], add: [entry], rev}` for this player's PC |
+| `pc_trades` | `deltas`: list of `{trade_id, remove: [entry_id], add: [entry], srv_rev}` for this player's PC |
+| `trade_status` | `trade_id`, `state`: `complete` \| `pending` \| `failed` |
 | `report_saved` | `file` |
 | `error` | `message` |
 | `pong` | `t` |
@@ -118,13 +120,26 @@ applies trade evolutions, removes each given entry (and adds its id to the store
 entry to the first box with room, bumps `rev`, appends a delta `{trade_id, remove, add, rev}` to the store's `inbox`,
 saves both, then sends `pc_trades` + `trade_complete` to both and a system message. Nothing touches game RAM.
 Disconnect in requested/open -> `trade_cancelled` reason "partner left". Timeout: requested expires after 60 s.
-**Client side:** a delta is applied to both the committed and the working store (idempotent via the store's
-`trades` list of applied trade ids; `rev` = max). The client then `pc_put`s. `pc_put` is refused with `pc_trades`
-(the unacked deltas) while the uploaded store doesn't list every inbox trade id; the client applies them and uploads
-again. `pc_get` is answered with `pc_data` followed by `pc_trades` for any inbox deltas. When a game's PC opens, an
-entry in the store's `gone` list that the game still shows is dropped, never re-imported (no duplicates). Only
-committed entries (already uploaded) can be offered, and never while the in-game PC is open; the trade window blocks
-game input, so the PC can't be opened during a trade.
+**Crash safety:** before touching either store the server writes the whole plan to `data/pc/journal/<trade_id>.json`;
+each store records applied trade ids (`srv_trades`), so applying is idempotent; the journal is deleted when both are
+saved and replayed at startup if the server died in between. A store that can't be read is never replaced (the trade is
+cancelled). Stores are written new-file-first; the old copy is kept as `.1`…`.5`.
+**Server-only store fields:** `srv_rev` (bumped on every accepted upload and every trade), `inbox` (undelivered
+deltas, never trimmed; more than 100 → new trades refused), `srv_trades`, `srv_gone` (ids given away).
+**Uploads are compare-and-swap:** `pc_put {store, base}` is accepted only if `base` == `srv_rev` and the store lists
+every inbox trade id and holds no `srv_gone` id; then `pc_saved {srv_rev}`. Missing trades → `pc_trades` (apply, then
+upload again); stale base → `pc_conflict {store}`: the client does a three-way merge (its changes since the last
+synced copy replayed on the server copy; ids removed elsewhere go to its `gone` list so its game PC can't re-import
+them) and uploads again. Merges wait while the game's PC is open or changes are pending.
+**Client side:** a delta is applied to the committed, working and synced copies (idempotent via the store's `trades`
+list; `server_rev` = delta `srv_rev`). If no box has room it waits in the store's `incoming` list and moves in when
+the PC opens (a box never holds more than 20; a damaged local file is kept as `.bad-*` and repaired or merged from
+the server, never silently emptied). An offered entry is **locked** (persisted) until the outcome is known
+(`trade_cancelled`, the delta, or `trade_status` after a reconnect: `complete` | `pending` | `failed`). When the game's
+PC closes, a locked or traded-away (`gone`) entry that was withdrawn is put back / removed from the party. Only
+committed, unlocked entries can be offered, never while the in-game PC is open, and no resume snapshot is taken while
+it is open. The trade window blocks game input.
+
 Server persists party snapshots (by uid) + names to `data/players.json` (atomic write) so offline friends can be battled.
 
 ### Server config (`config.json`, path via `--config`, env overrides `YL_KEY`, `YL_PORT`)

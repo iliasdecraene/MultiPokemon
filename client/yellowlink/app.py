@@ -311,7 +311,10 @@ class App(ChallengeMixin, TradeMixin):
         """Write the resume snapshot. Yellow only snapshots at safe moments (overworld, idle)."""
         if not self.cfg.get("auto_resume", True) or os.environ.get("YL_DEV_LOAD_STATE"):
             return False
-        if self.battle or self.live or (self.trade and self.trade.phase != "open"):
+        if self.battle or self.live:
+            return False
+        if self.pcsync.session_open:
+            # never snapshot inside Bill's PC: the store's view of the game would no longer match on resume
             return False
         if self.full and not force and not self.game.is_safe():
             return False
@@ -324,9 +327,11 @@ class App(ChallengeMixin, TradeMixin):
         ok = write_atomic(self.cfg.resume_path, buf.getvalue())
         if ok:
             self.flush_sram()
-            store = None if self.chal else self.pcsync.commit()
-            if store:
-                self.net.send({"type": "pc_put", "store": store})
+            if not self.chal:
+                store = self.pcsync.commit()
+                merged = self.pcsync.take_deferred()
+                if store or merged:
+                    self.pc_push()
         return ok
 
     def _loading_screen(self, msg):
@@ -366,7 +371,7 @@ class App(ChallengeMixin, TradeMixin):
             gs = f"(game state unreadable: {e})"
         return (f"mode={self.mode} net={self.net.status}/{self.net.status_detail} rtt={self.net.rtt_ms} "
                 f"fps={self.fps:.1f} frame={self.frame} held={sorted(self.held)} fast={self.fast} "
-                f"trade={self.trade.phase if self.trade else None} "
+                f"trade={self.trade.trade_id if self.trade else None} "
                 f"battle={self.battle.phase if self.battle else None} "
                 f"live={(self.live.phase, self.live.exchange) if self.live else None} friends={len(self.friends)} | {gs}")
 
@@ -424,6 +429,8 @@ class App(ChallengeMixin, TradeMixin):
         log.info("connected to %s", self.cfg["server_url"])
         if not self.chal:
             self.net.send({"type": "pc_get"})
+            for tid in list(self.pcsync.locks):
+                self.net.send({"type": "trade_status", "trade_id": tid})
         self.chal_on_connected()
         self.last_state_sent = None
         self.last_sprite_sent = None
@@ -436,8 +443,10 @@ class App(ChallengeMixin, TradeMixin):
             self._end_live("Battle ended: connection lost.", ui.BAD)
         self.friends.clear()
         if self.trade:
-            # trades happen on the server in one step: a finished one arrives with pc_trades on reconnect
-            self._end_trade("Trade window closed (connection lost).", ui.BAD)
+            # trades happen on the server in one step: if both had confirmed it may have gone through; the
+            # offered Pokémon stays locked until we know (asked again on reconnect)
+            self._end_trade("Connection lost - if you'd both confirmed, the trade may still have gone through "
+                            "(it syncs when you're back).", ui.ACCENT)
         if self.net.status == "rejected":
             self.sys_msg("Server refused connection: " + self.net.status_detail, ui.BAD)
 
@@ -809,31 +818,51 @@ class App(ChallengeMixin, TradeMixin):
         report = self.pcsync.close_session(self.game_id, self.pc_codec, self.G.party_records(self.game))
         for slot in sorted(report["standin_party_slots"], reverse=True):
             self.game.remove_party_slot(slot)
+        if report.get("locked_returned"):
+            names = ", ".join(n.title() for n in report["locked_returned"][:3])
+            self.toast(f"{names} is part of a trade that's still finishing - it stays in the PC.", 6, ui.ACCENT)
+        if report.get("traded_returned"):
+            self.toast("A Pokémon you traded away can't be withdrawn - it's with your friend now.", 6, ui.ACCENT)
         if report["standins_returned"]:
             names = ", ".join(n.title() for n in report["standins_returned"][:3])
             self.toast(f"{names} can't leave the PC here - they live in another region.", 6, ui.ACCENT)
         log.info("PC closed: +%d -%d (pending=%s)", report["added"], report["removed"], self.pcsync.pending)
 
+    def pc_push(self):
+        """Compare-and-swap upload of the committed PC store (SPEC.md section 5)."""
+        if self.chal:
+            return
+        up = self.pcsync.upload()
+        if up:
+            store, base = up
+            self.net.send({"type": "pc_put", "store": store, "base": base})
+
     def on_pc_data(self, msg):
         store = msg.get("store")
-        local = self.pcsync.committed
-        if store is None or store.get("rev", 0) < local.get("rev", 0):
-            if local.get("rev", 0) > 0:
-                self.net.send({"type": "pc_put", "store": local})     # server is behind: catch it up
-        elif store.get("rev", 0) > local.get("rev", 0):
-            if self.pcsync.adopt_remote(store):
-                self.pc_trust = False                                 # boxes in this game are now stale
-                self.sys_msg("Your PC boxes were updated from the server.", ui.GOOD)
+        if store is None:
+            self.pcsync.server_rev = 0          # the server has nothing (new player / new server): give it ours
+            self.pc_push()
+            return
+        if int(store.get("srv_rev", 0)) != self.pcsync.server_rev:
+            if self.pcsync.merge_remote(store):
+                self.sys_msg("Your PC boxes were synced with the server.", ui.GOOD)
+            else:
+                return                          # merged right after the next commit
+        self.pc_push()
 
     def on_pc_conflict(self, msg):
-        if self.pcsync.adopt_remote(msg.get("store")):
-            self.pc_trust = False
-            self.sys_msg("Your PC boxes were updated from the server.", ui.GOOD)
+        store = msg.get("store")
+        if not store:
+            self.pcsync.server_rev = 0
+            self.pc_push()
+        elif self.pcsync.merge_remote(store):
+            self.pc_push()
         else:
-            log.warning("PC store conflict could not be resolved yet (pending changes)")
+            log.info("PC store conflict: merging after the next commit")
 
     def on_pc_saved(self, msg):
-        log.info("PC store saved on the server (rev %s)", msg.get("rev"))
+        self.pcsync.saved(msg.get("srv_rev", 0))
+        log.info("PC store saved on the server (srv_rev %s)", msg.get("srv_rev"))
 
     # chat / view --------------------------------------------------------------
     def focus_chat(self):
@@ -1497,6 +1526,7 @@ class App(ChallengeMixin, TradeMixin):
             self.update_battle()
             self.update_live()
         self.chal_step()
+        self.trades_step()
         if self.update_dl and self.update_dl.status != "downloading" and not getattr(self.update_dl, "announced", False):
             self.update_dl.announced = True
             if self.update_dl.status == "ready":
