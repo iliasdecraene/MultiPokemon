@@ -1168,8 +1168,13 @@ class App:
                 img = None
             if img is not None:
                 self.last_wide = (cur_map, img)
-            elif self.last_wide and g.font_loaded() and self.last_wide[0] == cur_map:
-                img = self.last_wide[1]   # menu/text open: you can't move, keep the last view
+                self._wv_misses = 0
+            elif self.last_wide and self.last_wide[0] == cur_map:
+                # The renderer refuses single frames (e.g. while the game redraws a row mid-step) and whole
+                # stretches while a menu is open. Keep the last good margins instead of flashing black.
+                self._wv_misses = getattr(self, "_wv_misses", 0) + 1
+                if g.font_loaded() or self._wv_misses <= 12:
+                    img = self.last_wide[1]
         if img is not None:
             self.game_surf.blit(pygame.image.frombuffer(img.tobytes(), (self.view_w, self.view_h), "RGBA"), (0, 0))
         else:
