@@ -86,7 +86,7 @@ class Player:
                            lambda text, kind="info": self.msgs.append(text))
         self.ref.fresh_load = False
 
-    def run(self, frames=Referee.SAFE_EVERY * 3):
+    def run(self, frames=Referee.SAFE_EVERY * 3 + Referee.END_FRAMES):
         for _ in range(frames):
             self.ref.step()
 
@@ -172,6 +172,8 @@ def test_faint_kills_both_partners_and_they_get_boxed():
     w.a.view.in_battle = {"kind": "trainer", "dex": 0, "shiny": False, "safari": False}
     w.a.run(2)
     w.a.view.slot = (1, 0)
+    w.a.ref.step()
+    assert not w.events("dead"), "one frame of HP 0 is not a faint yet"
     w.a.run(2)
     assert [(e["p"], e["key"]) for e in w.events("dead")] == [("A", "a1")]
     w.a.view.slot = None

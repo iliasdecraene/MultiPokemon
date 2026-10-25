@@ -13,8 +13,8 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(__file__))
 from common import ROM, STATES, new_pyboy, screen_text, sram_dump, tap, ticks  # noqa: E402
-from play import (choose, idle, pc_close, pc_deposit, pc_open, pc_withdraw, pick_in_pc_list, pos,  # noqa: E402
-                  screen_has, step, wait_text, warp)
+from play import (choose, idle, pc_close, pc_deposit, pc_open, pc_withdraw, screen_has, step,  # noqa: E402
+                  wait_text, warp)
 
 from yellowlink import crystal, game, text  # noqa: E402
 from yellowlink.crystal import CrystalMemory, Gen2PC  # noqa: E402
@@ -369,7 +369,7 @@ def check_faint():
         assert to_battle_menu(pb)
         save(pb, "crystal_sl_faint.state")
         # LEER every turn until the wild mon's attack knocks CYNDAQUIL out
-        f_battle = f_party = None
+        f_battle = f_party = f_text = None
         frame = 0
         for _turn in range(30):
             if not cm.in_battle():
@@ -385,6 +385,8 @@ def check_faint():
                 if f_battle is None and s is not None and s[1] == 0:
                     f_battle = frame
                     note("faint seen by battle_party_slot(): %s, party HP %d" % (s, cm.party()[0].hp))
+                if f_battle is not None and f_text is None and screen_has(pb, "fainted"):
+                    f_text = frame
                 if f_battle is not None and f_party is None and cm.party()[0].hp == 0:
                     f_party = frame
                 if f_party is not None or screen_has(pb, "FIGHT") or screen_has(pb, "Use next"):
@@ -398,7 +400,8 @@ def check_faint():
         finish_battle(pb, cm)
     ok(f_battle is not None and f_party is not None, "the wild mon knocked out CYNDAQUIL for real")
     ok(f_party > f_battle, "wBattleMonHP hits 0 first; the party struct HP becomes 0 %d frames later "
-       "(UpdateFaintedPlayerMon -> UpdateBattleMonInParty)" % (f_party - f_battle))
+       "(UpdateFaintedPlayerMon -> UpdateBattleMonInParty); '... fainted!' text at +%s" %
+       (f_party - f_battle, None if f_text is None else f_text - f_battle))
     ok(cm.party()[0].hp == 0 and cm.party()[0].data[32] == 0, "party struct: HP 0, status cleared")
     # the game asks to use the next mon: YES, pick PIDGEY; battle_party_slot must never report (1, 0)
     assert wait_text(pb, "Use next", 20, "a", 30)
@@ -550,6 +553,285 @@ def find_grass_and_battle(pb, cm, limit=60):
     return False
 
 
+
+# ---------------------------------------------------------------------------------------------------------
+# forced box moves: our functions vs. the game's own Bill's PC, byte for byte
+# ---------------------------------------------------------------------------------------------------------
+PARTY_REGION = (crystal.PARTY_COUNT, crystal.PARTY_NICKS + 6 * 11)       # DCD7..DE83
+SBOX_REGION = (crystal.SBOX_COUNT, 0xB15E)                               # sBox .. sBoxEnd
+MAIL_REGION = (0xA600, 0xA600 + 6 * crystal.MAIL_STRUCT_LENGTH)           # sPartyMail
+
+
+def regions(pb):
+    m = pb.memory
+    return (bytes(m[1, a] for a in range(*PARTY_REGION)), bytes(m[1, a] for a in range(*SBOX_REGION)),
+            bytes(m[0, a] for a in range(*MAIL_REGION)))
+
+
+def build_pc_fixture(rom):
+    """crystal_party.state + a RAM-built party of 6 (PP used, status, an egg, a mon holding MAIL with a
+    message in sPartyMail) and 3 mons in sBox (one with a stale level byte and stat exp, an egg)."""
+    pb = load()
+    cm = CrystalMemory(pb.memory, rom)
+    idle(pb)
+    party = cm.party()
+    cyn = bytearray(party[0].data)
+    cyn[23] = 0x40 | 7                               # TACKLE: 1 PP Up, 7 PP left
+    cyn[24] = 3                                      # LEER: 3 PP left
+    cyn[32] = 0x10                                   # burned (not poison: poison interrupts walking to the PC)
+    cyn[35] -= 4
+    party[0] = crystal.Mon(bytes(cyn), party[0].ot, party[0].nick)
+    egg = crystal.make_mon(rom, 175, 5, [118, 45], cm.player_id(), "CHRIS", dvs=0x1234, nick="EGG")
+    eggd = bytearray(egg.data)
+    eggd[27] = 10                                    # egg cycles
+    eggd[34] = eggd[35] = 0
+    party.append(crystal.Mon(bytes(eggd), egg.ot, egg.nick, egg=True))
+    hoot = crystal.make_mon(rom, 163, 8, [33, 45], 4321, "FRIEND", dvs=0xBEEF, nick="OWLY", item=0x9E)
+    party.append(hoot)                               # holds FLOWER MAIL
+    party.append(crystal.make_mon(rom, 25, 9, [84, 45], 999, "ASH", dvs=0x7777, nick="SPARKY"))
+    cm.set_party(party)
+    for s in range(6):
+        for k in range(crystal.MAIL_STRUCT_LENGTH):
+            pb.memory[0, 0xA600 + s * crystal.MAIL_STRUCT_LENGTH + k] = (s * 16 + k) & 0xFF
+    spin = bytearray(crystal.make_mon(rom, 167, 4, [40, 81], cm.player_id(), "CHRIS", dvs=0x4321).data[:32])
+    spin[8:11] = crystal.exp_for_level(rom.growth_rate(167), 9).to_bytes(3, "big")   # exp says level 9
+    spin[11:13] = (900).to_bytes(2, "big")          # HP stat exp
+    spin[17:19] = (2500).to_bytes(2, "big")         # Speed stat exp
+    spin[23] = 0xC0 | 2                              # POISON STING: 3 PP Ups, 2 PP left
+    egg2 = bytearray(crystal.make_mon(rom, 172, 5, [84], cm.player_id(), "CHRIS", dvs=0x2468).data[:32])
+    egg2[27] = 20
+    natu = crystal.make_mon(rom, 177, 7, [64, 43], 555, "MOM", dvs=0x1357, nick="NATTY")
+    recs = [crystal.record(spin, text.encode("CHRIS"), rom.species_name_raw(167)),
+            crystal.record(egg2, text.encode("CHRIS"), text.encode("EGG"), egg=True),
+            natu.box_record()]
+    raw = crystal.build_box(recs)
+    for i in range(crystal.BOX_BYTES):
+        pb.memory[1, 0xAD10 + i] = raw[i]
+    idle(pb)
+    return pb, cm
+
+
+def close_menus(pb):
+    for _ in range(10):
+        tap(pb, "b", 4, 40)
+        if idle(pb, 30, 90):
+            return True
+    return False
+
+
+def pc_move_index(pb, action, index):
+    """Bill's PC DEPOSIT/WITHDRAW of list entry `index` (picked by position: an egg's row-14 label is not a
+    species name)."""
+    label = "DEPOSIT" if action == "dep" else "WITHDRAW"
+    assert choose(pb, label)
+    assert wait_text(pb, "Choose a PKMN", 10, "a", 20)
+    ticks(pb, 30)
+    for _ in range(index):
+        tap(pb, "down", 4, 20)
+    ticks(pb, 20)
+    tap(pb, "a", 4, 40)
+    assert choose(pb, label), screen_text(pb)
+    assert wait_text(pb, "Stored" if action == "dep" else "Got", 10, "a", 20) or True
+    assert wait_text(pb, "Choose a PKMN", 20, "a", 20)
+    assert wait_text(pb, "WITHDRAW", 10, "b", 30)
+
+
+def game_pc(pb, action, index):
+    pc_open(pb)
+    pc_move_index(pb, action, index)
+    pc_close(pb)
+    idle(pb)
+
+
+def check_box_moves():
+    rom = rom_data()
+    pb, cm = build_pc_fixture(rom)
+    # the game accepts the RAM-built party (party menu lists the mons with the right HP)
+    tap(pb, "start", 4, 40)
+    choose(pb, "POK")
+    ticks(pb, 60)
+    rows = "\n".join(screen_text(pb))
+    ok("OWLY" in rows and "SPARKY" in rows and "EGG" in rows, "fixture: game's party menu lists the 6 RAM-built mons")
+    close_menus(pb)
+    save(pb, "crystal_sl_pc6.state")
+    base6 = snapshot(pb)
+    ok(len(cm.current_box_records()) == 3 and cm.current_box_records()[1][54] == 1,
+       "current_box_records(): 3 records, the egg flagged (sBox species list 0xFD)")
+    cases = [("dep", 0, "CYNDAQUIL"), ("dep", 3, "EGG"), ("dep", 5, "PIKACHU"), ("dep", 1, "PIDGEY")]
+    for action, idx, name in cases:
+        restore(pb, base6)
+        game_pc(pb, action, idx)
+        want = regions(pb)
+        restore(pb, base6)
+        before = cm.party()[idx]
+        assert cm.is_safe()
+        ok(cm.move_party_to_box(idx), "move_party_to_box(%d) %s" % (idx, name))
+        got = regions(pb)
+        ok(got == want, "deposit %s: party, sBox and sPartyMail byte-identical to Bill's PC DEPOSIT" % name)
+        rec = cm.current_box_records()[-1]
+        ok(crystal.mon_key(rec) == crystal.mon_key(before.data) and rec[54] == (1 if before.egg else 0),
+           "deposit %s: mon_key unchanged, egg flag %d" % (name, rec[54]))
+    # withdraws need room: drop PIKACHU from the party first (through our deposit; it was proven above)
+    restore(pb, base6)
+    assert cm.move_party_to_box(5)
+    idle(pb)
+    base5 = snapshot(pb)
+    for idx, name in ((0, "SPINARAK"), (1, "EGG"), (2, "NATU"), (3, "PIKACHU")):
+        restore(pb, base5)
+        game_pc(pb, "wd", idx)
+        want = regions(pb)
+        restore(pb, base5)
+        rec = cm.current_box_records()[idx]
+        ok(cm.move_box_to_party(idx), "move_box_to_party(%d) %s" % (idx, name))
+        got = regions(pb)
+        diff = [i for i in range(len(got[0])) if got[0][i] != want[0][i]]
+        ok(got == want, "withdraw %s: party, sBox and sPartyMail byte-identical to Bill's PC WITHDRAW%s" %
+           (name, "" if not diff else " (party diff at %s)" % [hex(PARTY_REGION[0] + i) for i in diff]))
+        new = cm.party()[-1]
+        ok(crystal.mon_key(new.data) == crystal.mon_key(rec), "withdraw %s: mon_key unchanged" % name)
+        if name == "SPINARAK":
+            ok(new.level == 9 and new.hp == new.max_hp and new.data[32] == 0,
+               "withdraw SPINARAK: level recomputed from exp (4 -> 9), stats with stat exp, HP = max HP")
+        if name == "EGG":
+            ok(new.egg and new.hp == 0, "withdraw EGG: species list 0xFD, HP 0")
+    # refusals the game also makes
+    restore(pb, base6)
+    ok(not cm.move_box_to_party(0), "move_box_to_party: False with a full party")
+    ok(not cm.move_party_to_box(4), "move_party_to_box: False for a mon holding MAIL")
+    restore(pb, base5)
+    pb.memory[1, 0xAD10] = 20
+    ok(not cm.move_party_to_box(1), "move_party_to_box: False when the box is full")
+    # end to end: our moves, then the game uses the result (party menu, PC lists, SAVE + reload)
+    restore(pb, base6)
+    assert cm.move_party_to_box(3) and cm.move_party_to_box(0) and cm.move_box_to_party(2)
+    tap(pb, "start", 4, 40)
+    choose(pb, "POK")
+    ticks(pb, 60)
+    rows = screen_text(pb)
+    ok(any("NATTY" in r for r in rows) and not any("CYNDAQUIL" in r for r in rows),
+       "after forced moves: game's party menu shows NATTY, no CYNDAQUIL")
+    note("party menu: " + " | ".join(r.strip() for r in rows[:12] if r.strip()))
+    close_menus(pb)
+    pc_open(pb)
+    pc_withdraw(pb, "CYNDAQUIL")
+    p = cm.party_checked()
+    ok(p is not None and p[-1].species == 155 and p[-1].hp == p[-1].max_hp,
+       "Bill's PC withdraws the force-deposited CYNDAQUIL normally (healed)")
+    pc_deposit(pb, "CYNDAQUIL")
+    pc_close(pb)
+    idle(pb)
+    boxes_before = cm.current_box_records()
+    party_before = cm.party_checked()
+    sav = save_via_menu(pb)
+    pb.stop(False)
+    pb2 = new_pyboy(sav=sav)
+    ok(crystal.fast_continue(pb2) == "loaded", "SAVE + reload: CONTINUE works (no 'save file is corrupted')")
+    pc2 = Gen2PC(pb2.memory, rom)
+    cm2 = CrystalMemory(pb2.memory, rom)
+    ok(pc2.save_checksum_ok(), "SAVE + reload: main save checksum valid")
+    ok(cm2.party_checked() == party_before and cm2.current_box_records() == boxes_before,
+       "SAVE + reload: party and current box identical")
+    pb2.stop(False)
+
+
+def save_via_menu(pb):
+    from make_states import save_game
+    save_game(pb)
+    return sram_dump(pb)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Day Care, hatching, Hall of Fame
+# ---------------------------------------------------------------------------------------------------------
+def check_daycare():
+    rom = rom_data()
+    pb = load()
+    cm = CrystalMemory(pb.memory, rom)
+    idle(pb)
+    ok(cm.daycare_records() == [], "daycare_records(): [] with nobody at the Day Care")
+    pidgey = cm.party()[1]
+    warp(pb, 11, 24, 4, 3)                           # DAY_CARE, left of the Day-Care Lady (5,3)
+    tap(pb, "right", 3, 20)
+    tap(pb, "a", 4, 40)
+    assert wait_text(pb, "YES", 20, "a", 30), screen_text(pb)
+    assert choose(pb, "YES")
+    for _ in range(20):
+        ticks(pb, 30)
+        if any(r.startswith(">") or ">" in r[:2] for r in screen_text(pb)) and screen_has(pb, "PIDGEY"):
+            break
+        tap(pb, "a", 4, 20)
+    assert pick_party(pb, "PIDGEY"), screen_text(pb)
+    for _ in range(40):
+        if not cm.font_loaded() and idle(pb, 30, 90):
+            break
+        tap(pb, "a", 4, 30)
+    recs = cm.daycare_records()
+    ok(len(recs) == 1 and cm.r(crystal.DAYCARE_LADY) & 1 and [m.species for m in cm.party()] == [155, 161],
+       "Day-Care Lady took PIDGEY for real (wDayCareLady bit 0, party now CYNDAQUIL, SENTRET)")
+    ok(recs[0] == pidgey.box_record(), "daycare_records()[0] == the party copy as a 55-byte record")
+    ok(crystal.mon_key(recs[0]) == crystal.mon_key(pidgey.data), "mon_key(day care) == mon_key(party copy)")
+    save(pb, "crystal_sl_daycare.state")
+    pb.stop(False)
+
+
+def check_hatch():
+    rom = rom_data()
+    pb = load()
+    cm = CrystalMemory(pb.memory, rom)
+    idle(pb)
+    party = cm.party()
+    egg = crystal.make_mon(rom, 175, 5, [118, 45], cm.player_id(), "CHRIS", dvs=0x1234, nick="EGG")
+    d = bytearray(egg.data)
+    d[27] = 1                                        # 1 egg cycle left
+    d[29] = d[30] = 0                                # Day-Care eggs start with caught data 0 (ByteFill)
+    d[34] = d[35] = 0
+    party.append(crystal.Mon(bytes(d), egg.ot, egg.nick, egg=True))
+    cm.set_party(party)
+    key = crystal.mon_key(d)
+    cm.w(0xDC73, 0x7F)                               # wStepCount: the next step is the egg step (every 256)
+    warp(pb, 24, 3, 50, 8)
+    step(pb, "left")
+    for _ in range(80):
+        if cm.r(crystal.PARTY_SPECIES + 3) == 175 and not cm.font_loaded() and idle(pb, 30, 90):
+            break
+        rows = screen_text(pb)
+        tap(pb, "b" if any("YES" in r for r in rows) else "a", 4, 30)
+    new = cm.party()[3]
+    ok(cm.r(crystal.PARTY_SPECIES + 3) == 175 and not new.egg, "the game hatched the egg (TOGEPI)")
+    ok(new.data[29] & 0x3F == crystal.CAUGHT_EGG_LEVEL and new.data[30] & 0x7F == rom_landmark(0x1803),
+       "hatching wrote caught data (level 1, Route 29): %02X %02X" % (new.data[29], new.data[30]))
+    ok(crystal.mon_key(new.data) == key, "mon_key(hatched) == mon_key(egg) (%s)" % key)
+    pb.stop(False)
+
+
+def check_hall_of_fame():
+    pb = load()
+    cm = CrystalMemory(pb.memory)
+    idle(pb)
+    ok(not cm.in_hall_of_fame() and not cm.entered_hall_of_fame(), "fresh save: not in / never entered the HoF")
+    warp(pb, 16, 8, 4, 13)
+    ok(cm.in_hall_of_fame() and cm.map_id() == crystal.HALL_OF_FAME_MAP, "in_hall_of_fame() after entering 16:8")
+    flags = []
+    for _ in range(300):
+        if cm.hall_of_fame_count():
+            break
+        tap(pb, "a", 4, 30)
+        flags.append(cm.event_flag(crystal.EVENT_BEAT_ELITE_FOUR))
+    ok(cm.hall_of_fame_count() == 1 and cm.r(crystal.STATUS_FLAGS) & 0x40 and cm.event_flag(crystal.EVENT_BEAT_ELITE_FOUR),
+       "the real HoF scene: wHallOfFameCount 1, wStatusFlags bit 6, EVENT_BEAT_ELITE_FOUR")
+    note("during the HoF scene: map %04X, in_game() %s, wGameTimerPaused %02X" %
+         (cm.map_id(), cm.in_game(), cm.r(crystal.GAME_TIMER)))
+    ok(cm.entered_hall_of_fame() and cm.in_hall_of_fame(), "entered_hall_of_fame() True, in_hall_of_fame() still True")
+    sav = sram_dump(pb)                              # HallOfFame saves the game (SaveGameData) by itself
+    pb.stop(False)
+    pb2 = new_pyboy(sav=sav)
+    ok(crystal.fast_continue(pb2) == "loaded", "the HoF save CONTINUEs")
+    cm2 = CrystalMemory(pb2.memory)
+    ok(cm2.entered_hall_of_fame() and cm2.hall_of_fame_count() == 1 and not cm2.in_hall_of_fame(),
+       "after reload: entered_hall_of_fame() persists (count 1), player is back outside the HoF (map %04X)"
+       % cm2.map_id())
+    pb2.stop(False)
+
 def main():
     check_rom()
     check_wild_timing()
@@ -558,6 +840,10 @@ def main():
     check_trainer()
     check_tutorial()
     check_contest()
+    check_box_moves()
+    check_daycare()
+    check_hatch()
+    check_hall_of_fame()
     print("\nALL PASS (%d checks)" % len(RESULTS))
 
 

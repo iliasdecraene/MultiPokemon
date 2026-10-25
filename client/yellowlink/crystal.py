@@ -690,7 +690,9 @@ class CrystalMemory:
         return bool(self.r(STATUS_FLAGS2) & 0x04)
 
     def in_hall_of_fame(self) -> bool:
-        return self.in_game() and self.map_id() == HALL_OF_FAME_MAP
+        """Standing in the HALL_OF_FAME map -- stays True through the HoF scene (where the game clock is paused,
+        so not in_game()) until the credits reset the game."""
+        return self.map_id() == HALL_OF_FAME_MAP and self.r(PLAYER_NAME) not in (0, text.TERMINATOR)
 
     def hall_of_fame_count(self) -> int:
         return self.r(HALL_OF_FAME_COUNT)

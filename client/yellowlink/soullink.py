@@ -225,6 +225,7 @@ class Referee:
 
     SAFE_EVERY = 6            # frames between light checks while standing in the overworld
     SCAN_EVERY = 600          # frames between full PC scans (release/rollback detection)
+    END_FRAMES = 8            # frames without battle data before a battle counts as over
 
     def __init__(self, sl: SoulLink, view, send, notify):
         self.sl, self.view, self._send, self.notify = sl, view, send, notify
@@ -259,9 +260,12 @@ class Referee:
             self._battle_start(info)
         if self.battle is not None:
             if info is not None:
+                self.battle["gone"] = 0
                 self._battle_tick()
-            else:
-                self.battle["over"] = True
+            else:                                    # over once "no battle" holds for a few frames
+                self.battle["gone"] = self.battle.get("gone", 0) + 1
+                if self.battle["gone"] >= self.END_FRAMES:
+                    self.battle["over"] = True
             if self.battle.get("over") and self._battle_end():
                 self.battle = None
             return
@@ -289,7 +293,9 @@ class Referee:
             return
         name = self.view.area_name(area)
         rules_on = self.sl.mine()["balls"] or self.view.has_balls()
-        if self.sl.rules["shiny"] and info.get("shiny"):
+        if info.get("contest"):
+            b["mode"] = "free"                       # Bug-Catching Contest: the mon you keep arrives later as a gift
+        elif self.sl.rules["shiny"] and info.get("shiny"):
             b["mode"] = "shiny"
             self.notify("A shiny! Shiny clause: catch it - it doesn't use up this area.", "good")
         elif not rules_on:
@@ -316,11 +322,17 @@ class Referee:
         if slot is None or b["party"] is None:
             return
         idx, hp = slot
-        if hp == 0 and 0 <= idx < len(b["party"]):
-            mon = b["party"][idx]
-            if mon.key not in b["fainted"]:
-                b["fainted"].add(mon.key)
-                self._kill(mon, "fainted")
+        if hp != 0 or not 0 <= idx < len(b["party"]):
+            b["zero"] = None
+            return
+        # count a faint only when HP 0 holds on two frames in a row (a switch writes index and HP separately)
+        if b.get("zero") != idx:
+            b["zero"] = idx
+            return
+        mon = b["party"][idx]
+        if mon.key not in b["fainted"]:
+            b["fainted"].add(mon.key)
+            self._kill(mon, "fainted")
 
     def _kill(self, mon, why):
         if not self.sl.mine()["balls"] and not self.view.has_balls():
@@ -470,8 +482,8 @@ class Referee:
                 self.forced.add(m.key)
                 self.notify(f"{m.nick or 'A Pokémon'} can't be used anymore and went to the PC.", "bad")
             else:
-                self.tell_once(f"full:{m.key}", "Your PC box is full - make room so unusable Pokémon can be "
-                                                "stored.", "bad")
+                self.tell_once(f"full:{m.key}", f"Couldn't put {m.nick or 'a Pokémon'} in the PC (box full, or it "
+                                                f"holds Mail) - please box it yourself.", "bad")
             return                                    # one move per check; the next check rereads the party
         # 2. PC rule: follow the partner's moves
         for i, m in enumerate(party):

@@ -71,6 +71,9 @@ def validate_event(ev) -> dict:
         if ev.get("where") not in ("party", "box"):
             raise ChallengeError("where is invalid")
         out["where"] = ev["where"]
+    elif t == "blackout":
+        if ev.get("why") is not None:
+            out["why"] = _str(ev.get("why"), "why", 30, None)
     elif t == "swap":
         out["old"] = _str(ev.get("old"), "old")
         out["new"] = _str(ev.get("new"), "new")
@@ -453,7 +456,8 @@ class ChallengeHub:
                 await self.end_session(rec, None, "completed", notify=False)
         elif ev["t"] == "blackout":
             rec["status"], rec["ended"] = "failed", time.time()
-            rec["reason"] = f"{client.name} blacked out"
+            rec["reason"] = (f"{client.name} has no usable Pokémon left" if ev.get("why") == "no Pokémon left"
+                             else f"{client.name} blacked out")
             log.info("challenge %s failed: %s", rec["id"], rec["reason"])
             await self.update_both(rec)
             await self.end_session(rec, None, "failed", notify=False)

@@ -39,3 +39,5 @@ Expected output: see the `print` lines; screenshots go to a temp dir printed at 
 - `crossgame.py` — Yellow and Crystal share one PC database (real PC menus in both games).
 - `crystal_mp.py` — two Crystal players + one Yellow player: seeing each other, Crystal trade with evolution, cross-game refusal.
 - `challenge_flow.py` — challenges with two clients: invite, fresh separate save, pause/partner-left pop-up, continue, closing the game, abandon.
+- `soullink_yellow.py` / `soullink_crystal.py` — Soul Link referee in the real games with two clients (catches, links, faints, PC rule, blackout).
+- `soullink_mem_yellow.py` and `../crystal/soullink_verify.py` — verify the game-memory helpers the referee uses.

@@ -111,6 +111,7 @@ B = restart(B)
 run(200, lambda: A.chal_wait is None and B.chal_wait is None)
 check("both in -> game runs", A.chal_wait is None and B.chal_wait is None and A.pyboy.frame_count > frame_before)
 check("rules engine loaded", A.sl is not None and B.sl is not None and A.sl.partner == cb["uid"])
+run(200, lambda: any(e.get("challenge") == "soul_link" for e in A.roster if e["uid"] == cb["uid"]))
 check("roster says they're in a Soul Link", A.player_region({"uid": cb["uid"], "challenge": "soul_link"}) == "Soul Link"
       and any(e.get("challenge") == "soul_link" for e in A.roster if e["uid"] == cb["uid"]))
 A.toggle_panel("soullink"); A.render(); shot(A, "5_soullink_panel.png"); A.close_panel()

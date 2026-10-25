@@ -66,7 +66,8 @@ class ChallengeMixin:
 
     # --- connection ------------------------------------------------------------------------------------------
     def chal_on_connected(self):
-        self.net.send({"type": "library", "games": sorted(self.lib.games)})
+        # only games the rules can be enforced in (e.g. not Crystal v1.1)
+        self.net.send({"type": "library", "games": sorted(g for g in self.lib.games if self._game_supported(g))})
         if self.chal:
             if self.chal_wait == "offline":
                 self.chal_wait = "load"           # back online: wait until the server says both are in
@@ -103,11 +104,11 @@ class ChallengeMixin:
     def on_challenge_request(self, msg):
         busy = self.chal or self.trade or self.battle or self.live or self.prompt
         game = msg.get("game", "yellow")
-        if busy or game not in self.lib.games:
+        if busy or not self._game_supported(game):
             self.net.send({"type": "challenge_respond", "request_id": msg.get("request_id"), "accept": False})
-            if game not in self.lib.games:
+            if not self._game_supported(game):
                 self.toast(f"{msg.get('name')} invited you to a Soul Link in {library.GAMES_BY_ID[game].title}, "
-                           f"but you haven't added that game (Regions).", 8, ui.BAD)
+                           f"but you don't have that game added (Regions; Crystal needs v1.0).", 8, ui.BAD)
             return
         self.prompt = {"kind": "challenge", "id": msg["request_id"], "name": msg.get("name", "?"),
                        "until": time.time() + 55, "shown": None, "game": game,
@@ -313,14 +314,18 @@ class ChallengeMixin:
         return [g for g in mine if theirs is None or g in theirs]
 
     def _game_supported(self, game_id) -> bool:
+        """The exact ROM the rules were verified on (hashing a ROM is slow: cached per path)."""
         info = library.GAMES_BY_ID.get(game_id)
         path = self.lib.rom_path(game_id)
         if not info or not path:
             return False
-        try:
-            return library.KNOWN_GAMES.get(library.sha1_file(path), info).full_support
-        except OSError:
-            return False
+        cache = self.__dict__.setdefault("_sup_cache", {})
+        if path not in cache:
+            try:
+                cache[path] = library.KNOWN_GAMES.get(library.sha1_file(path), info).full_support
+            except OSError:
+                return False
+        return cache[path]
 
     def send_challenge(self):
         f = self.chal_form

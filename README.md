@@ -13,6 +13,11 @@ Everyone plays their **own** game with their own save and story. On top of that:
 - **Two regions**: Kanto is Pokémon Yellow, Johto is Pokémon Crystal. Add your Crystal game file in **Regions** and travel between them from the sidebar. Each game keeps its own progress. In Crystal you see friends and trade (trade evolutions included, Metal Coat and friends too); live battles, practice and wide view are Yellow-only for now.
 - **One PC for both games**: your PC boxes live in your own database (also backed up on the server). Deposit a Pokémon in Yellow and it's in the PC in Crystal, and the other way round. Pokémon that can't exist in a game (a Chikorita in Yellow) show up as `?CHIKORITA` and stay safely in the PC.
 - **No saving needed**: closing YellowLink remembers exactly where you were (it also snapshots every 30 seconds), and every game resumes where you left it.
+- **Challenges: Soul Link.** In Multiplayer, click a friend → **Challenges** → *Start a Soul Link*. You both start a
+  fresh save (separate from your main games) of Yellow or Crystal, and YellowLink referees the Nuzlocke for you: only the
+  first encounter per area counts, catches in the same area are linked partners, a fainted Pokémon (and its partner)
+  goes to the PC for good, boxing one boxes its partner, and a blackout ends the run. The run only plays while you're
+  both in it; pause any time and **Continue** together later. Finish it (both reach the Hall of Fame) to earn the badge.
 - **Chat.** You can also see who's online, and the app shows a notice when an update is available.
 
 > **No ROM is included, and none ever should be.** Each player needs their own copy of

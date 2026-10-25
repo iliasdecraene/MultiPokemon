@@ -420,3 +420,13 @@ player reconnects or reloads is treated as **failed** (no rerolling by closing t
 derivation (in `soullink.py`): two caught encounters in the same area = a linked pair; a caught mon whose partner's
 encounter in that area failed is **unlinked** (must stay boxed); `dead` on either side kills both; `loc` to box
 on one side boxes the partner.
+
+### Game helpers used by the referee (verified on the real ROMs)
+`GameMemory` / `CrystalMemory`: `battle_info()`, `battle_party_slot()`, `has_poke_balls()`, `in_hall_of_fame()`,
+`current_box_records()`, `move_party_to_box()`, `move_box_to_party()`, `daycare_records()`, module `mon_key()`,
+`AREAS`/`area_of()`/`area_name()`. Addresses, frame timings and gotchas: `dev/notes/soullink_yellow.md` and
+`dev/notes/soullink_crystal.md`; checks: `dev/e2e/soullink_mem_yellow.py` (81) and `dev/crystal/soullink_verify.py` (109).
+Key facts: Yellow `battle_info` is valid from the first frame of `wIsInBattle`; Crystal's is None on frame 0 and valid
+from frame 1 (the referee waits for the first non-None). A faint counts when `battle_party_slot()` shows HP 0 on two
+frames in a row. Withdrawing heals in Crystal, so deaths are tracked by `mon_key`, never by HP. Bug-Catching Contest
+battles are free; the kept mon arrives later as the National Park "gift". Only call the forced moves while `is_safe()`.
