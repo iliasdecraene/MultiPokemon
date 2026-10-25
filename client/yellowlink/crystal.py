@@ -1118,6 +1118,10 @@ class Gen2PC:
         return bytes(d) + text.encode(STANDIN_OT, NAME_SIZE) + text.encode(name[:10], NAME_SIZE) + b"\x00"
 
     @staticmethod
+    def key(rec: bytes) -> str:
+        return mon_key(rec)
+
+    @staticmethod
     def is_standin(rec: bytes) -> bool:
         return rec[0] == DITTO and rec[6] == 0 and rec[7] == 0 and \
             text.decode(rec[BOX_MON_SIZE:BOX_MON_SIZE + NAME_SIZE]) == STANDIN_OT

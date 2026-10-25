@@ -5,7 +5,7 @@ Private multiplayer for Pokémon Yellow (Kanto) and Pokémon Crystal (Johto), fo
 Everyone plays their **own** game with their own save and story. On top of that:
 
 - **See each other.** Friends on the same map walk around in your world, with name tags.
-- **Trade.** Open the link menu, pick a friend, and both choose a Pokémon and confirm. Trade evolutions work (Kadabra → Alakazam and the others).
+- **Trade and gift, across games.** Multiplayer → click a friend → **Trade** or **Gift**. You pick Pokémon from your PC (not your party), so a Yellow player can trade with a Crystal player. The server swaps both PCs in one step, so a dropped connection can't duplicate or lose anything. Trade evolutions (Kadabra → Alakazam, and in Crystal Onix + Metal Coat → Steelix and friends) happen on arrival. A Pokémon your game can't hold arrives as a `?NAME` placeholder and stays safe in your PC.
 - **Battle each other, live**: challenge a friend from anywhere in the world (Tab → B). They accept, both games jump into a real link battle and each of you picks your own moves. Exhibition match: teams are healed and you're put back where you were afterwards.
 - **Practice**: fight a copy of a friend's team played by the game's AI (Tab → P), even when they're offline.
 - **Wide view** (press **V**): see twice as much of the world around you, NPCs and friends included. The real Game Boy picture stays untouched in the middle.
@@ -100,7 +100,7 @@ The client runs the game in [PyBoy](https://github.com/Baekalfen/PyBoy) and read
 addresses in `SPEC.md`, which are taken from the pret/pokeyellow disassembly and verified against the ROM:
 
 - **Friends:** your map ID and pixel position are sent about 15 times a second. Your sprite's tiles are read from video memory, so bikes and surfing show up correctly. Friends are drawn over the game screen using your own map palette.
-- **Trades:** the server runs a two-step handshake. Each client writes the received Pokémon record (44 bytes in Yellow, 48 in Crystal) into its party, and undoes the write if the other side fails.
+- **Trades:** between PC databases. The server swaps the entries in both players' stored PCs atomically and sends each a delta, which the client applies to its local store (see SPEC.md).
 - **Live battles:** both games run the game's own *link battle* engine (normally used with a link cable), started from the overworld with the same random-number list on both sides. Each turn's choice travels over the server instead of a cable, so both screens show the exact same battle. A save state taken before the battle is restored afterwards.
 - **Practice battles:** a normal trainer battle with the friend's team swapped in and the game's AI in control.
 

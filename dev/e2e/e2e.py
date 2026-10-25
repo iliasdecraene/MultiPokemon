@@ -5,7 +5,7 @@ ROM = _os.environ.get("YL_ROM", _os.path.join(_REPO, "dev", "states", "yellow.gb
 STATES = _os.environ.get("YL_STATES", _os.path.join(_REPO, "dev", "states"))
 _sys.path.insert(0, _os.path.join(_REPO, "client"))
 # ---------------------------------------------------------------------
-import os, sys, time, subprocess, tempfile, pathlib, json
+import os, sys, time, subprocess, tempfile, pathlib
 os.environ["SDL_VIDEODRIVER"]="dummy"; os.environ["SDL_AUDIODRIVER"]="dummy"
 os.environ["YL_DEV_LOAD_STATE"]=_os.path.join(STATES, "room.state")
 sys.path.insert(0,_os.path.join(_REPO, "client"))
@@ -65,22 +65,7 @@ print("roster", [(e["name"],e["online"],e["levels"]) for e in A.roster])
 
 # trade: A requests B
 brock_uid=B.cfg["uid"]
-A.net.send({"type":"trade_request","to":brock_uid})
-run(100, lambda: B.mode=="prompt")
-print("B mode", B.mode)
-time.sleep(0.6)
-B.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_y)); run(100, lambda: A.mode=="trade" and B.mode=="trade")
-print("modes", A.mode, B.mode)
-A.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN))   # offer pikachu slot0
-B.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN))   # offer kadabra slot0
-run(60)
-shot(A,"a_trade.png")
-A.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_c)); B.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_c))
-run(300, lambda: A.trade is None and B.trade is None)
-pa=[(A.rom.species_name(m.species),m.level,m.max_hp,m.nick_str(),m.ot_str()) for m in A.game.party()]
-pb=[(B.rom.species_name(m.species),m.level,m.nick_str(),m.ot_str()) for m in B.game.party()]
-print("A party", pa); print("B party", pb)
-print("A chat", A.chat_log[-3:]); print("toasts", [t[0] for t in A.toasts])
+# (party trades were replaced by PC trades in 0.6.1: dev/e2e/pctrade_e2e.py)
 run(400)
 # battle: A battles B's team
 A.net.send({"type":"get_party","uid":brock_uid}); run(100, lambda: A.mode=="battle_confirm")

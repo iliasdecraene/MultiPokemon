@@ -1,4 +1,4 @@
 """YellowLink relay server."""
 
-__version__ = "0.6.0"
-PROTOCOL_VERSION = 1
+__version__ = "0.6.1"
+PROTOCOL_VERSION = 2

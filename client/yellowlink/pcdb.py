@@ -11,6 +11,7 @@ import copy
 import json
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -33,6 +34,34 @@ def _unb64(s: str) -> bytes:
 
 def empty_store() -> dict:
     return {"version": 1, "rev": 0, "boxes": [[] for _ in range(STORE_BOXES)], "linked": []}
+
+
+def _strip_server(st: dict) -> dict:
+    return {k: copy.deepcopy(v) for k, v in st.items() if k not in ("srv_rev", "inbox", "srv_trades", "srv_gone")}
+
+
+def _key(codec, rec: bytes):
+    try:
+        return codec.key(rec)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def repair_store(s):
+    """Fix an overfull store (a box with more than 20): extras go to 'incoming'. None if beyond repair."""
+    try:
+        if not isinstance(s, dict) or not isinstance(s.get("boxes"), list) or len(s["boxes"]) != STORE_BOXES:
+            return None
+        fixed = copy.deepcopy(s)
+        fixed.setdefault("rev", 0)
+        for box in fixed["boxes"]:
+            if not isinstance(box, list):
+                return None
+            while len(box) > MONS_PER_BOX:
+                fixed.setdefault("incoming", []).append(box.pop())
+        return fixed if valid_store(fixed) else None
+    except (TypeError, KeyError):
+        return None
 
 
 def valid_store(s) -> bool:
@@ -190,6 +219,11 @@ class Gen1PC:
         return bytes(d) + text.encode(STANDIN_OT, G1_NAME) + text.encode(name[:10], G1_NAME)
 
     @staticmethod
+    def key(rec: bytes) -> str:
+        from .game import mon_key
+        return mon_key(rec)
+
+    @staticmethod
     def is_standin(rec: bytes) -> bool:
         return rec[0] == DITTO and rec[12] == 0 and rec[13] == 0 and \
             text.decode(rec[G1_STRUCT:G1_STRUCT + G1_NAME]) == STANDIN_OT
@@ -205,6 +239,11 @@ class PCSync:
         self.path = path
         self.committed = empty_store()
         self.last_view_committed = {}          # game_id -> [[ [entry_id, b64 record], ... ] x boxes]
+        self.server_rev = 0                    # the server's revision our committed store is based on
+        self.synced = None                     # the server's copy at server_rev (base for 3-way merges)
+        self.locks = {}                        # trade_id -> [entry ids] offered in a trade with unknown outcome
+        self.deferred = None                   # a server copy to merge once nothing is pending
+        self.uploading = None
         self.load()
         self.working = copy.deepcopy(self.committed)
         self.last_view = copy.deepcopy(self.last_view_committed)
@@ -215,18 +254,41 @@ class PCSync:
     def load(self):
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            if valid_store(data.get("store")):
-                self.committed = data["store"]
-                self.last_view_committed = data.get("last_view", {})
-        except (OSError, ValueError, AttributeError):
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as e:
+            self._keep_bad_copy(f"unreadable ({e})")
+            return
+        store = data.get("store") if isinstance(data, dict) else None
+        if not valid_store(store):
+            store = repair_store(store)
+            if store is None:
+                self._keep_bad_copy("invalid")
+                return
+            log.warning("PC store repaired (overfull boxes moved to incoming)")
+        self.committed = store
+        self.last_view_committed = data.get("last_view", {})
+        self.server_rev = int(data.get("server_rev", 0) or 0)
+        self.synced = data.get("synced") if valid_store(data.get("synced")) else None
+        self.locks = data.get("locks") if isinstance(data.get("locks"), dict) else {}
+
+    def _keep_bad_copy(self, why):
+        """Never silently replace a damaged store with an empty one: keep the file for the host."""
+        bad = self.path.with_suffix(f".bad-{int(time.time())}.json")
+        try:
+            os.replace(self.path, bad)
+        except OSError:
             pass
+        log.error("PC store %s %s; kept as %s and starting fresh (the server copy will be merged in)",
+                  self.path, why, bad)
 
     def save(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         try:
-            tmp.write_text(json.dumps({"store": self.committed, "last_view": self.last_view_committed}),
-                           encoding="utf-8")
+            tmp.write_text(json.dumps({"store": self.committed, "last_view": self.last_view_committed,
+                                       "server_rev": self.server_rev, "synced": self.synced,
+                                       "locks": self.locks}), encoding="utf-8")
             os.replace(tmp, self.path)
             return True
         except OSError:
@@ -252,20 +314,126 @@ class PCSync:
         self.pending = False
         self.session_open = False
 
-    def adopt_remote(self, store: dict) -> bool:
-        """Take a newer copy from the server (played on another PC). Only when idle and nothing pending."""
-        if not valid_store(store) or self.pending or self.session_open:
-            return False
-        if store["rev"] <= self.committed.get("rev", 0):
-            return False
-        self.committed = store
-        self.working = copy.deepcopy(store)
-        # last views no longer describe what the games hold relative to this store: re-materialise next time
-        self.last_view_committed = {}
-        self.last_view = {}
+    # server sync (SPEC.md section 5) ---------------------------------------------------------------
+    def upload(self):
+        """(store, base) for a compare-and-swap `pc_put`, or None while something is unfinished."""
+        if self.session_open:
+            return None
+        self.uploading = copy.deepcopy(self.committed)
+        return self.uploading, self.server_rev
+
+    def saved(self, srv_rev: int):
+        """The server accepted our last upload."""
+        self.server_rev = int(srv_rev)
+        if self.uploading is not None:
+            self.synced = _strip_server(self.uploading)
+            self.uploading = None
         self.save()
-        log.info("adopted PC store rev %d from server", store["rev"])
+
+    def merge_remote(self, remote) -> bool:
+        """Bring in the server's copy (another computer uploaded, or our base is stale). Three-way merge:
+        our changes since the last sync are replayed on top of the server's copy. Deferred while the game's
+        PC is open or changes are pending (done right after the next commit)."""
+        if not valid_store(remote):
+            return False
+        if self.pending or self.session_open:
+            self.deferred = remote
+            return False
+        base = self.synced or empty_store()
+        local = self.committed
+        ids = lambda st: {e["id"]: (bi, e) for bi, b in enumerate(st["boxes"]) for e in b}  # noqa: E731
+        b_ids, l_ids, r_ids = ids(base), ids(local), ids(remote)
+        removed_here = set(b_ids) - set(l_ids)
+        added_here = [l_ids[i] for i in l_ids if i not in b_ids]
+        server_gone = set(remote.get("srv_gone") or [])
+        merged = _strip_server(remote)
+        for box in merged["boxes"]:
+            box[:] = [e for e in box if e["id"] not in removed_here]
+        have = {e["id"] for b in merged["boxes"] for e in b}
+        for bi, e in added_here:
+            if e["id"] in have or e["id"] in server_gone:
+                continue
+            target = merged["boxes"][bi] if len(merged["boxes"][bi]) < MONS_PER_BOX else \
+                next((b for b in merged["boxes"] if len(b) < MONS_PER_BOX), None)
+            (target if target is not None else merged.setdefault("incoming", [])).append(e)
+        # removed on the other computer (or traded away): this computer's game PC must not bring them back
+        gone = merged.setdefault("gone", [])
+        for i in (set(b_ids) | set(l_ids)) - set(r_ids) - {e["id"] for _, e in added_here}:
+            if i not in gone:
+                gone.append(i)
+        for key in ("trades", "linked"):
+            merged[key] = sorted(set(merged.get(key, [])) | set(local.get(key, [])))
+        del gone[:-500]
+        merged["rev"] = max(local.get("rev", 0), remote.get("rev", 0)) + 1
+        self.committed = merged
+        self.working = copy.deepcopy(merged)
+        self.synced = _strip_server(remote)
+        self.server_rev = int(remote.get("srv_rev", 0))
+        self.deferred = None
+        self.save()
+        log.info("merged the server's PC copy (srv_rev %d, %d mons)", self.server_rev, self.count())
         return True
+
+    def take_deferred(self) -> bool:
+        if self.deferred is not None and not self.pending and not self.session_open:
+            return self.merge_remote(self.deferred)
+        return False
+
+    # locks: offered entries stay put until we know how the trade ended --------------------------------
+    def lock(self, trade_id: str, entry_ids: list):
+        self.locks[trade_id] = list(entry_ids)
+        self.save()
+
+    def unlock(self, trade_id: str):
+        if self.locks.pop(trade_id, None) is not None:
+            self.save()
+
+    def locked_ids(self) -> set:
+        return {i for ids in self.locks.values() for i in ids}
+
+    # trades (applied by the server to the stored PCs; SPEC.md "Trade state machine") ------------------
+    def apply_trade(self, delta: dict) -> bool:
+        """Apply a server trade delta to the committed and the working store (idempotent). True if new."""
+        tid = delta.get("trade_id")
+        if not tid or tid in self.committed.get("trades", []):
+            self.unlock(tid)
+            self.server_rev = max(self.server_rev, int(delta.get("srv_rev", 0)))
+            return False
+        for st in [x for x in (self.committed, self.working, self.synced) if x is not None]:
+            for eid in delta.get("remove", []):
+                for box in st["boxes"]:
+                    box[:] = [e for e in box if e.get("id") != eid]
+                gone = st.setdefault("gone", [])
+                gone.append(eid)
+                del gone[:-500]
+            have = {e["id"] for b in st["boxes"] for e in b} | {e["id"] for e in st.get("incoming", [])}
+            for entry in delta.get("add", []):
+                if entry.get("id") in have:
+                    continue
+                box = next((b for b in st["boxes"] if len(b) < MONS_PER_BOX), None)
+                if box is None:                     # PC full here: waits until there's room (never a 21st)
+                    st.setdefault("incoming", []).append(copy.deepcopy(entry))
+                else:
+                    box.append(copy.deepcopy(entry))
+            trades = st.setdefault("trades", [])
+            trades.append(tid)
+            del trades[:-200]
+        self.server_rev = max(self.server_rev, int(delta.get("srv_rev", 0)))
+        self.committed["rev"] = self.committed.get("rev", 0) + 1
+        self.working["rev"] = self.committed["rev"]
+        self.locks.pop(tid, None)
+        self.save()
+        log.info("applied trade %s: -%s +%s", tid, delta.get("remove"), [e.get("nick") for e in delta.get("add", [])])
+        return True
+
+    def offerable(self) -> list:
+        """[(box index, entry)] that can be traded: saved (committed) and not being changed right now."""
+        if self.session_open:
+            return []
+        working = {e["id"] for b in self.working["boxes"] for e in b}
+        locked = self.locked_ids()
+        return [(bi, e) for bi, box in enumerate(self.committed["boxes"]) for e in box
+                if e["id"] in working and e["id"] not in locked]
 
     def count(self, store=None) -> int:
         return sum(len(b) for b in (store or self.working)["boxes"])
@@ -281,6 +449,13 @@ class PCSync:
             self._import(game_id, codec, game_boxes)
         elif trust_game and game_id in self.last_view:
             self._apply_diff(game_id, codec, game_boxes)       # anything that changed since we last looked
+        incoming = self.working.get("incoming") or []
+        while incoming:                                        # Pokémon that arrived while the PC was full
+            box = next((b for b in self.working["boxes"] if len(b) < MONS_PER_BOX), None)
+            if box is None:
+                break
+            box.append(incoming.pop(0))
+            self.pending = True
         view = []
         rec_boxes = []
         n = len(game_boxes)
@@ -323,11 +498,13 @@ class PCSync:
         Identical bytes => same entry (possibly moved). New bytes => new entry (deposit).
         Missing entries => removed (withdraw/release), except stand-ins, which are always kept.
         """
-        report = {"added": 0, "removed": 0, "standins_returned": [], "standin_party_slots": []}
+        report = {"added": 0, "removed": 0, "standins_returned": [], "standin_party_slots": [],
+                  "locked_returned": [], "traded_returned": []}
         before = self.last_view.get(game_id)
         if before is None:
             return report
         entries = self._entries()
+        gone = set(self.working.get("gone", []))
         pool = {}                                   # record bytes -> [(box, entry_id), ...]
         for bi, box in enumerate(before):
             for eid, rb in box:
@@ -337,11 +514,15 @@ class PCSync:
         for bi, box in enumerate(game_boxes):
             for rec in box:
                 cands = pool.get(bytes(rec), [])
-                pick = next((c for c in cands if c[0] == bi and c[1] not in used), None) or \
-                    next((c for c in cands if c[1] not in used), None)
+                free = [c for c in cands if c[1] not in used]
+                pick = next((c for c in free if c[0] == bi and c[1] in entries), None) or \
+                    next((c for c in free if c[1] in entries), None) or (free[0] if free else None)
                 if pick and pick[1] in entries:
                     used.add(pick[1])
                     new_boxes[bi].append(entries[pick[1]])
+                elif pick and pick[1] in gone:
+                    used.add(pick[1])
+                    continue                        # traded away while this game still showed it: drop
                 elif codec.is_standin(rec):
                     continue                        # an unknown stand-in copy: never create entries from it
                 else:
@@ -354,18 +535,30 @@ class PCSync:
                 if e["id"] not in seen:
                     new_boxes[bi].append(e)
         # entries that disappeared from this game's view
+        locked = self.locked_ids()
+        not_ours = set()                            # keys of mons that must not stay in the party
         for bi, box in enumerate(before):
             for eid, rb in box:
-                if eid in used or eid not in entries:
+                if eid in used:
+                    continue
+                if eid not in entries:
+                    if eid in gone:                 # traded away while the PC was open, then withdrawn
+                        not_ours.add(_key(codec, _unb64(rb)))
+                        report["traded_returned"].append(eid)
                     continue
                 if codec.is_standin(_unb64(rb)):
                     new_boxes[bi].append(entries[eid])          # stand-ins can't leave: put it back
                     report["standins_returned"].append(entries[eid].get("nick", "?"))
+                elif eid in locked:                 # offered in a trade we don't know the outcome of yet
+                    new_boxes[bi].append(entries[eid])
+                    not_ours.add(_key(codec, _unb64(rb)))
+                    report["locked_returned"].append(entries[eid].get("nick", "?"))
                 else:
                     report["removed"] += 1
-        # stand-ins that were withdrawn into the party must be removed from the party by the caller
+        # stand-ins / locked / traded-away mons that were withdrawn must be removed from the party by the caller
         if party_records:
-            report["standin_party_slots"] = [i for i, r in enumerate(party_records) if codec.is_standin(r)]
+            report["standin_party_slots"] = [i for i, r in enumerate(party_records)
+                                             if codec.is_standin(r) or (not_ours and _key(codec, r) in not_ours)]
         # boxes beyond what this game shows are untouched
         for bi in range(len(game_boxes), STORE_BOXES):
             new_boxes[bi] = self.working["boxes"][bi]
