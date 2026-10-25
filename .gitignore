@@ -1,0 +1,30 @@
+# --- Never commit game files (each player supplies their own ROM) ---
+*.gb
+*.gbc
+*.sav
+*.ram
+*.state
+
+# --- Local configuration (may contain the room password) ---
+config.json
+!server/config.example.json
+
+# --- Server runtime data (player snapshots) ---
+server/data/
+
+# --- Build output ---
+dist/
+build/
+*.egg-info/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# --- Misc ---
+*.log
+.DS_Store
+Thumbs.db

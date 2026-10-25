@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: client/requirements.txt
+
+      - name: Determine version
+        id: version
+        run: |
+          CODE_VERSION=$(python -c "import re,pathlib; print(re.search(r'__version__\s*=\s*[\"\']([^\"\']+)', pathlib.Path('client/yellowlink/__init__.py').read_text()).group(1))")
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            if [[ "${VERSION}" != "${CODE_VERSION}" ]]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match __version__ = \"${CODE_VERSION}\" in client/yellowlink/__init__.py. Bump __version__, commit, and tag again."
+              exit 1
+            fi
+          else
+            VERSION="${CODE_VERSION}-dev.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "Building YellowLink ${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r client/requirements.txt pyinstaller
+          # setup_dialog.py needs tkinter; fail early if this Python lacks it
+          python -c "import tkinter, pygame, pyboy, websockets, numpy; print('deps ok')"
+
+      - name: Build YellowLink.exe
+        run: pyinstaller --noconfirm --clean client/yellowlink.spec
+
+      - name: Smoke test
+        run: |
+          EXE=dist/YellowLink.exe
+          if [[ ! -f "$EXE" ]]; then
+            echo "::error::$EXE was not produced"
+            ls -la dist || true
+            exit 1
+          fi
+          SIZE=$(stat -c %s "$EXE")
+          echo "$EXE is $SIZE bytes"
+          if (( SIZE < 5 * 1024 * 1024 )); then
+            echo "::error::$EXE is suspiciously small (< 5 MB); dependencies were probably not bundled"
+            exit 1
+          fi
+          sha256sum "$EXE" | tee dist/YellowLink.exe.sha256
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YellowLink-${{ steps.version.outputs.version }}-windows
+          path: |
+            dist/YellowLink.exe
+            dist/YellowLink.exe.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: YellowLink ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/YellowLink.exe
+            dist/YellowLink.exe.sha256

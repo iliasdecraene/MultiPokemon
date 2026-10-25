@@ -1,0 +1,35 @@
+# systemd unit -- alternative to Docker.
+# Install:
+#   sudo useradd --system --home /opt/yellowlink --shell /usr/sbin/nologin yellowlink
+#   sudo mkdir -p /opt/yellowlink/data && sudo cp -r yellowlink_server requirements.txt /opt/yellowlink/
+#   sudo cp config.example.json /opt/yellowlink/config.json   # then edit "key"
+#   sudo python3 -m venv /opt/yellowlink/venv
+#   sudo /opt/yellowlink/venv/bin/pip install -r /opt/yellowlink/requirements.txt
+#   sudo chown -R yellowlink:yellowlink /opt/yellowlink
+#   sudo cp yellowlink.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#   sudo systemctl enable --now yellowlink
+#   journalctl -u yellowlink -f
+[Unit]
+Description=YellowLink relay server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yellowlink
+Group=yellowlink
+WorkingDirectory=/opt/yellowlink
+ExecStart=/opt/yellowlink/venv/bin/python -m yellowlink_server --config /opt/yellowlink/config.json
+Environment=PYTHONUNBUFFERED=1
+Environment=YL_DATA_DIR=/opt/yellowlink/data
+# Environment=YL_KEY=override-the-config-key
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/yellowlink/data
+
+[Install]
+WantedBy=multi-user.target
