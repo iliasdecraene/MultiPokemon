@@ -13,7 +13,7 @@ import time
 
 import websockets
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 log = logging.getLogger("yellowlink.net")
 
 

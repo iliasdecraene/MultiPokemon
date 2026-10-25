@@ -20,6 +20,7 @@ from websockets.exceptions import ConnectionClosed
 
 from . import PROTOCOL_VERSION
 from .config import Config
+from . import pcstore
 from .challenges import ChallengeError, ChallengeHub
 from .store import PlayerStore
 
@@ -173,8 +174,9 @@ class Trade:
     id: str
     a: str  # requester uid
     b: str  # target uid
-    status: str = "requested"  # requested | open | executing
-    offers: dict = field(default_factory=dict)  # uid -> (slot, mon)
+    status: str = "requested"  # requested | open | applying
+    gift: bool = False          # a gives, b only receives
+    offers: dict = field(default_factory=dict)  # uid -> PC entry (the server's stored copy)
     confirmed: set = field(default_factory=set)
     done: set = field(default_factory=set)
     timer: asyncio.Task | None = None
@@ -637,16 +639,17 @@ class YellowLinkServer:
         if target is client:
             raise Invalid("cannot trade with yourself")
         if client.busy:
-            raise Invalid("you are already in a trade or battle")
+            raise Invalid("you are already in a trade, battle or challenge")
         if target.busy:
-            raise Invalid(f"{target.name} is busy with another trade or battle")
-        trade = Trade(id=uuid.uuid4().hex[:12], a=client.uid, b=target.uid)
+            raise Invalid(f"{target.name} is busy right now")
+        gift = bool(msg.get("gift"))
+        trade = Trade(id=uuid.uuid4().hex[:12], a=client.uid, b=target.uid, gift=gift)
         self.trades[trade.id] = trade
         client.trade_id = target.trade_id = trade.id
         trade.timer = asyncio.get_running_loop().create_task(self._expire(trade))
-        log.info("trade %s requested: %s -> %s", trade.id, client.name, target.name)
+        log.info("%s %s requested: %s -> %s", "gift" if gift else "trade", trade.id, client.name, target.name)
         await self.send(target, {"type": "trade_request", "trade_id": trade.id,
-                                 "from": client.uid, "name": client.name})
+                                 "from": client.uid, "name": client.name, "gift": gift})
 
     async def on_trade_respond(self, client: Client, msg: dict) -> None:
         trade = self._trade_for(client, msg)
@@ -664,23 +667,30 @@ class YellowLinkServer:
             trade.timer = None
         a, b = self.clients.get(trade.a), self.clients.get(trade.b)
         log.info("trade %s open", trade.id)
+        extra = {"gift": trade.gift, "giver": trade.a if trade.gift else None}
         await self.send(a, {"type": "trade_started", "trade_id": trade.id, "with": trade.b,
-                            "name": b.name if b else "?"})
+                            "name": b.name if b else "?", **extra})
         await self.send(b, {"type": "trade_started", "trade_id": trade.id, "with": trade.a,
-                            "name": a.name if a else "?"})
+                            "name": a.name if a else "?", **extra})
 
     async def on_trade_offer(self, client: Client, msg: dict) -> None:
         trade = self._trade_for(client, msg)
         if trade.status != "open":
             raise Invalid("trade is not open for offers")
-        slot = _int(msg, "slot", 0, 5)
-        mon = validate_mon(msg.get("mon"))
-        trade.offers[client.uid] = (slot, mon)
+        if trade.gift and client.uid != trade.a:
+            raise Invalid("this is a gift - you just receive")
+        eid = _str(msg, "entry_id")
+        store = self._pc_load(client.uid)
+        hit = pcstore.find(store, eid) if self._pc_valid(store) else None
+        if hit is None:
+            raise Invalid("that Pokémon isn't in your saved PC yet - wait a few seconds and try again")
+        if any(o.get("id") == eid for u, o in trade.offers.items() if u == client.uid):
+            return
+        trade.offers[client.uid] = hit[2]
         had_confirmations = bool(trade.confirmed)
         trade.confirmed.clear()
         await self.send(self.clients.get(trade.other(client.uid)),
-                        {"type": "trade_offer", "trade_id": trade.id, "from": client.uid,
-                         "slot": slot, "mon": mon})
+                        {"type": "trade_offer", "trade_id": trade.id, "from": client.uid, "entry": hit[2]})
         if had_confirmations:
             await self._send_confirm_state(trade)
 
@@ -688,60 +698,71 @@ class YellowLinkServer:
         trade = self._trade_for(client, msg)
         if trade.status != "open":
             raise Invalid("trade is not open")
-        if len(trade.offers) < 2:
-            raise Invalid("both players must offer a Pokemon first")
-        sizes = {len(m["data"]) for _, m in trade.offers.values()}
-        if len(sizes) > 1:
-            raise Invalid("trades only work between players in the same game for now")
+        needed = {trade.a} if trade.gift else {trade.a, trade.b}
+        if not needed <= set(trade.offers):
+            raise Invalid("the giver must choose a Pokémon first" if trade.gift
+                          else "both players must offer a Pokémon first")
         trade.confirmed.add(client.uid)
         await self._send_confirm_state(trade)
         if trade.confirmed >= {trade.a, trade.b}:
-            trade.status = "executing"
-            log.info("trade %s executing", trade.id)
-            sends = []
-            for uid in (trade.a, trade.b):
-                my_slot, _ = trade.offers[uid]
-                _, their_mon = trade.offers[trade.other(uid)]
-                sends.append(self.send(self.clients.get(uid), {
-                    "type": "trade_execute", "trade_id": trade.id,
-                    "give_slot": my_slot, "receive": their_mon}))
-            await asyncio.gather(*sends)
+            await self._apply_trade(trade)
+
+    async def _apply_trade(self, trade: Trade) -> None:
+        """Swap the offered entries between both stored PCs in one step (SPEC.md: trade state machine)."""
+        trade.status = "applying"
+        stores = {}
+        for uid in (trade.a, trade.b):
+            st = self._pc_load(uid)
+            stores[uid] = st if self._pc_valid(st) else pcstore.empty_store()
+        gives = {uid: trade.offers.get(uid) for uid in (trade.a, trade.b)}
+        for uid, entry in gives.items():
+            if entry is not None and pcstore.find(stores[uid], entry["id"]) is None:
+                await self._cancel(trade, "a Pokémon was moved out of the PC", (trade.a, trade.b))
+                return
+        received = {}
+        for uid in (trade.a, trade.b):
+            entry = gives[trade.other(uid)]
+            if entry is None:
+                received[uid] = None
+                continue
+            evolved, new_name = pcstore.evolve_for_trade(entry)
+            evolved["origin"] = evolved.get("origin") or "trade"
+            received[uid] = (evolved, new_name)
+        for uid in (trade.a, trade.b):
+            gets = 1 if received[uid] else 0
+            frees = 1 if gives[uid] else 0
+            if sum(pcstore.MONS_PER_BOX - len(b) for b in stores[uid]["boxes"]) + frees < gets:
+                c = self.clients.get(uid)
+                await self._cancel(trade, f"{c.name if c else 'their'} PC is full", (trade.a, trade.b))
+                return
+        deltas = {}
+        for uid in (trade.a, trade.b):
+            remove = [gives[uid]["id"]] if gives[uid] else []
+            add = [received[uid][0]] if received[uid] else []
+            deltas[uid] = pcstore.apply_delta(stores[uid], trade.id, remove, add)
+            self._pc_save(uid, stores[uid])
+        self._record_outcome(trade, "complete")
+        await self._end_trade(trade)
+        log.info("trade %s applied to both PCs", trade.id)
+        for uid in (trade.a, trade.b):
+            c = self.clients.get(uid)
+            await self.send(c, {"type": "pc_trades", "deltas": [deltas[uid]]})
+            await self.send(c, {"type": "trade_complete", "trade_id": trade.id,
+                                "gave": gives[uid], "received": deltas[uid]["add"][0] if deltas[uid]["add"] else None,
+                                "evolved": received[uid][1] if received[uid] else None})
+        name = lambda u: (self.store.get(u) or {}).get("name", "?")  # noqa: E731
+        nick = lambda e: (e or {}).get("nick") or "a Pokémon"  # noqa: E731
+        if trade.gift:
+            await self.system(f"{name(trade.a)} gave {nick(gives[trade.a])} to {name(trade.b)}!")
+        else:
+            await self.system(f"{name(trade.a)} traded {nick(gives[trade.a])} with {name(trade.b)} "
+                              f"for {nick(gives[trade.b])}!")
 
     async def on_trade_cancel(self, client: Client, msg: dict) -> None:
         trade = self._trade_for(client, msg)
-        if trade.status == "executing":
-            raise Invalid("trade is already executing")
-        await self._cancel(trade, "cancelled", (trade.a, trade.b))
-
-    async def on_trade_done(self, client: Client, msg: dict) -> None:
-        trade = self._trade_for(client, msg)
-        if trade.status != "executing":
-            raise Invalid("trade is not executing")
-        ok = msg.get("ok")
-        if not isinstance(ok, bool):
-            raise Invalid("ok must be a boolean")
-        if not ok:
-            await self._cancel(trade, "execution failed", (trade.other(client.uid),))
+        if trade.status == "applying":
             return
-        trade.done.add(client.uid)
-        if trade.done >= {trade.a, trade.b}:
-            self._record_outcome(trade, "complete")
-            await self._end_trade(trade)
-            for uid in (trade.a, trade.b):
-                await self.send(self.clients.get(uid),
-                                {"type": "trade_complete", "trade_id": trade.id})
-            name_a = self.store.get(trade.a)["name"]
-            name_b = self.store.get(trade.b)["name"]
-            nick_a = mon_nick(trade.offers[trade.a][1])
-            nick_b = mon_nick(trade.offers[trade.b][1])
-            await self.system(f"{name_a} traded {nick_a} with {name_b} for {nick_b}!")
-
-    async def on_trade_status(self, client: Client, msg: dict) -> None:
-        tid = _str(msg, "trade_id")
-        state = self.trade_outcomes.get(tid)
-        if state is None:
-            state = "pending" if tid in self.trades else "unknown"
-        await self.send(client, {"type": "trade_status", "trade_id": tid, "state": state})
+        await self._cancel(trade, "cancelled", (trade.a, trade.b))
 
     # --------------------------------------------------------------- battles
     def _battle_for(self, client: Client, msg: dict) -> Battle | None:
@@ -927,18 +948,8 @@ class YellowLinkServer:
                     return False
         return isinstance(store.get("linked", []), list)
 
-    async def on_pc_get(self, client: Client, msg: dict) -> None:
-        await self.send(client, {"type": "pc_data", "store": self._pc_load(client.uid)})
-
-    async def on_pc_put(self, client: Client, msg: dict) -> None:
-        store = msg.get("store")
-        if not self._pc_valid(store):
-            raise Invalid("invalid PC store")
-        current = self._pc_load(client.uid)
-        if current and isinstance(current.get("rev"), int) and store["rev"] <= current["rev"]:
-            await self.send(client, {"type": "pc_conflict", "store": current})
-            return
-        path = self._pc_path(client.uid)
+    def _pc_save(self, uid: str, store: dict) -> None:
+        path = self._pc_path(uid)
         # keep the last 5 revisions as backups
         if os.path.exists(path):
             for i in range(4, 0, -1):
@@ -950,6 +961,30 @@ class YellowLinkServer:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(store, fh)
         os.replace(tmp, path)
+
+    async def on_pc_get(self, client: Client, msg: dict) -> None:
+        store = self._pc_load(client.uid)
+        await self.send(client, {"type": "pc_data", "store": store})
+        inbox = (store or {}).get("inbox") or []
+        if inbox:
+            await self.send(client, {"type": "pc_trades", "deltas": inbox})
+
+    async def on_pc_put(self, client: Client, msg: dict) -> None:
+        store = msg.get("store")
+        if not self._pc_valid(store):
+            raise Invalid("invalid PC store")
+        current = self._pc_load(client.uid)
+        applied = set(store.get("trades") or [])
+        unacked = [d for d in ((current or {}).get("inbox") or []) if d.get("trade_id") not in applied]
+        if unacked:
+            # trades happened on the server since this copy was made: the client applies them and uploads again
+            await self.send(client, {"type": "pc_trades", "deltas": unacked})
+            return
+        if current and isinstance(current.get("rev"), int) and store["rev"] <= current["rev"]:
+            await self.send(client, {"type": "pc_conflict", "store": current})
+            return
+        store = {**store, "inbox": []}
+        self._pc_save(client.uid, store)
         count = sum(len(b) for b in store["boxes"])
         log.info("PC store of %s saved: rev %d, %d mons", client.name, store["rev"], count)
         await self.send(client, {"type": "pc_saved", "rev": store["rev"]})
@@ -995,7 +1030,6 @@ class YellowLinkServer:
         "pc_put": on_pc_put,
         "hello": on_hello,
         "ping": on_ping,
-        "trade_status": on_trade_status,
         "bug_report": on_bug_report,
         "state": on_state,
         "sprite": on_sprite,
@@ -1008,7 +1042,6 @@ class YellowLinkServer:
         "trade_offer": on_trade_offer,
         "trade_confirm": on_trade_confirm,
         "trade_cancel": on_trade_cancel,
-        "trade_done": on_trade_done,
         "battle_request": on_battle_request,
         "battle_respond": on_battle_respond,
         "battle_ready": on_battle_ready,

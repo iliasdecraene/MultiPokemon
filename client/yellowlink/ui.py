@@ -310,60 +310,6 @@ def draw_link_menu(surf, f, app, game_w, game_h):
     modal(surf, f, game_w, game_h, "Link menu", lines, footer)
 
 
-def mon_lines(app, mon, owner_label):
-    rom = app.rom
-    out = [(f"{mon.nick_str()}  ({rom.species_name(mon.species)})  Lv {mon.level}", TEXT),
-           (f"HP {mon.hp}/{mon.max_hp} · OT {mon.ot_str()} · ID {mon.ot_id:05d}", DIM),
-           ("Moves: " + ", ".join(rom.move_name(m) for m in mon.moves), DIM)]
-    return out
-
-
-def draw_trade(surf, f, app, game_w, game_h):
-    t = app.trade
-    w, h = min(game_w - 30, 600), min(game_h - 30, 500)
-    r = pygame.Rect(0, 0, w, h)
-    r.center = (game_w // 2, game_h // 2)
-    shade = pygame.Surface((game_w, game_h), pygame.SRCALPHA)
-    shade.fill((0, 0, 0, 140))
-    surf.blit(shade, (0, 0))
-    box(surf, r, PANEL, ACCENT, 10)
-    text(surf, f.title, f"Trade with {t.partner_name}", (r.x + 18, r.y + 12), ACCENT)
-    y = r.y + 50
-    text(surf, f.body, "Your party", (r.x + 18, y), TEXT)
-    y += 26
-    party = app.game.party() if app.game else []
-    for i, mon in enumerate(party):
-        sel = i == app.trade_cursor
-        offered = t.my_slot == i
-        label = f"{'>' if sel else ' '} {mon.nick_str():<10} {app.rom.species_name(mon.species)} Lv{mon.level}"
-        if offered:
-            label += "   <- offered"
-        text(surf, f.body, label, (r.x + 18, y), ACCENT if sel else TEXT)
-        y += 24
-    y = max(y, r.y + 50 + 26 + 6 * 24) + 10
-    pygame.draw.line(surf, PANEL_HI, (r.x + 14, y), (r.right - 14, y))
-    y += 10
-    text(surf, f.body, f"{t.partner_name} offers:", (r.x + 18, y), TEXT)
-    y += 26
-    if t.their_mon:
-        for s, color in mon_lines(app, t.their_mon, t.partner_name):
-            text(surf, f.small if color == DIM else f.body, s, (r.x + 28, y), color)
-            y += 22
-    else:
-        text(surf, f.small, "waiting for them to choose...", (r.x + 28, y), DIM)
-        y += 22
-    y += 8
-    me = "[OK] you confirmed" if t.me_confirmed else "you: not confirmed"
-    them = "[OK] they confirmed" if t.them_confirmed else "them: not confirmed"
-    text(surf, f.body, me, (r.x + 18, y), GOOD if t.me_confirmed else DIM)
-    text(surf, f.body, them, (r.x + w // 2, y), GOOD if t.them_confirmed else DIM)
-    status = t.status_text()
-    if status:
-        text(surf, f.small, status, (r.x + 18, r.bottom - 52), ACCENT)
-    text(surf, f.small, "[Up/Down] pick  [Enter] offer  [C] confirm  [Esc] cancel trade",
-         (r.x + 18, r.bottom - 28), DIM)
-
-
 def draw_help(surf, f, game_w, game_h):
     lines = [
         ("Game Boy controls", ACCENT),

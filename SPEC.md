@@ -7,7 +7,7 @@ each player supplies their own ROM; all graphics come from the running game's VR
 
 Features (v1):
 1. **See friends walk around** — players on the same map are drawn into your screen with their real sprite + name tag.
-2. **Trade** — server-mediated two-phase trade; each client writes the received Pokémon into its party RAM. Trade evolutions handled client-side.
+2. **Trade / gift** — between PC databases (section 5), never the party: the server swaps the entries in both players' stored PCs atomically, across games (Yellow ↔ Crystal). Trade evolutions are applied server-side. A gift is a trade where only the giver offers.
 3. **Battle (ghost battle)** — fight a friend's *current team* (uploaded snapshot; works even if they're offline), AI-controlled by the game.
    Exhibition match: client save-states before, restores after (no blackout, no money/EXP change). Result announced to everyone.
 4. Chat, player list, update notice.
@@ -64,7 +64,6 @@ All messages are JSON objects with a `"type"` field. Binary game data is base64 
 ```json
 {"data": "<b64 44 bytes (Yellow) or 48 bytes (Crystal) party_struct>", "ot": "<b64 11 bytes>", "nick": "<b64 11 bytes>"}
 ```
-Trades only complete between mons of the same size (same game); `trade_confirm` errors otherwise.
 State `map` for Crystal is `group << 8 | number` (can exceed 255).
 Server treats these as opaque except for validation: data decodes to exactly 44 or 48 bytes (roster level is byte 33 or 31), ot/nick exactly 11 bytes, species byte (data[0]) != 0.
 
@@ -78,13 +77,11 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `chat` | `text` (<=200 chars) | |
 | `get_party` | `uid` | ask for someone's latest party snapshot (online or offline) |
 | `battle_result` | `opponent_uid`, `won` bool | server broadcasts a system message |
-| `trade_request` | `to` uid | target must be online, neither in a trade |
+| `trade_request` | `to` uid, `gift` bool (optional) | target must be online, neither busy. `gift`: requester gives, target only receives |
 | `trade_respond` | `trade_id`, `accept` bool | by the target |
-| `trade_offer` | `trade_id`, `slot` int 0-5, `mon` Mon | may be re-sent to change offer; changing resets both confirmations |
-| `trade_confirm` | `trade_id` | only valid when both have offered |
-| `trade_cancel` | `trade_id` | either side, any time before execute |
-| `trade_done` | `trade_id`, `ok` bool | after the client wrote the received mon into RAM |
-| `trade_status` | `trade_id` | ask the final outcome of a trade (used after reconnecting mid-trade) |
+| `trade_offer` | `trade_id`, `entry_id` | an entry of the sender's **server** PC store; re-offer resets both confirmations; a gift's receiver can't offer |
+| `trade_confirm` | `trade_id` | valid when both offered (gift: when the giver offered) |
+| `trade_cancel` | `trade_id` | either side, any time before it completes |
 | `bug_report` | `text` (<=60 KB), `reason` | saved to `<data_dir>/reports/`; answered with `report_saved`. Can also be sent on a report-only connection: `hello` with `"mode": "report"` (not logged in, not shown to others), then one `bug_report`. |
 | `ping` | `t` | server answers `pong` with same `t` |
 
@@ -100,14 +97,13 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `system` | `text` (join/leave/battle results/trade completed) |
 | `roster` | `roster` list[RosterEntry] (re-sent whenever any party snapshot changes, someone changes game, or someone joins/leaves). RosterEntry includes `game` (current game if online, else last known; may be null) |
 | `party_data` | `uid`, `name`, `trainer`, `mons` list[Mon] (or `error` if unknown) |
-| `trade_request` | `trade_id`, `from` uid, `name` |
-| `trade_started` | `trade_id`, `with` uid, `name` (sent to both after accept) |
-| `trade_offer` | `trade_id`, `from` uid, `slot`, `mon` (sent to the *other* side; the offerer gets nothing back) |
+| `trade_request` | `trade_id`, `from` uid, `name`, `gift` bool |
+| `trade_started` | `trade_id`, `with` uid, `name`, `gift` bool, `giver` uid (gift only) (sent to both after accept) |
+| `trade_offer` | `trade_id`, `from` uid, `entry` (the server's copy of the offered PC entry; to the *other* side) |
 | `trade_confirm_state` | `trade_id`, `you` bool, `them` bool |
-| `trade_execute` | `trade_id`, `give_slot` int (your slot to overwrite), `receive` Mon |
-| `trade_complete` | `trade_id` (both sides acked ok) |
+| `trade_complete` | `trade_id`, `gave` entry or null, `received` entry or null (after evolution) |
 | `trade_cancelled` | `trade_id`, `reason` str |
-| `trade_status` | `trade_id`, `state`: `complete` \| `failed` \| `pending` \| `unknown` |
+| `pc_trades` | `deltas`: list of `{trade_id, remove: [entry_id], add: [entry], rev}` for this player's PC |
 | `report_saved` | `file` |
 | `error` | `message` |
 | `pong` | `t` |
@@ -115,15 +111,20 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 PlayerInfo: `{uid, name, state: <last state obj or null>, has_sprite: bool}`
 RosterEntry: `{uid, name, trainer, online: bool, party_size: int, levels: [int], species: [int], last_seen: unix_ts}`
 
-### Trade state machine (server)
-`requested` --accept--> `open` (both may offer/re-offer; any new offer clears confirmations)
-`open` + both confirmed --> `executing`: server sends `trade_execute` to both simultaneously.
-`executing` + both `trade_done ok` --> `complete` (system broadcast "A traded X with B"). If one side reports ok=false or disconnects during executing,
-server sends `trade_cancelled` with reason "execution failed" to the other (best effort; client logs it).
+### Trade state machine (server) — protocol 2
+`requested` --accept--> `open` (offers/re-offers; any new offer clears confirmations) --both confirmed--> **applied**:
+in one step the server loads both stored PCs, checks the offered entries are still there and the receivers have room,
+applies trade evolutions, removes each given entry (and adds its id to the store's `gone` list), adds each received
+entry to the first box with room, bumps `rev`, appends a delta `{trade_id, remove, add, rev}` to the store's `inbox`,
+saves both, then sends `pc_trades` + `trade_complete` to both and a system message. Nothing touches game RAM.
 Disconnect in requested/open -> `trade_cancelled` reason "partner left". Timeout: requested expires after 60 s.
-The server remembers the outcome of every trade that reached `executing` (last 500). A client that lost its connection
-after writing the received mon asks `trade_status` on reconnect and rolls back unless the answer is `complete`.
-Clients send `trade_done ok` *before* writing RAM and only while connected.
+**Client side:** a delta is applied to both the committed and the working store (idempotent via the store's
+`trades` list of applied trade ids; `rev` = max). The client then `pc_put`s. `pc_put` is refused with `pc_trades`
+(the unacked deltas) while the uploaded store doesn't list every inbox trade id; the client applies them and uploads
+again. `pc_get` is answered with `pc_data` followed by `pc_trades` for any inbox deltas. When a game's PC opens, an
+entry in the store's `gone` list that the game still shows is dropped, never re-imported (no duplicates). Only
+committed entries (already uploaded) can be offered, and never while the in-game PC is open; the trade window blocks
+game input, so the PC can't be opened during a trade.
 Server persists party snapshots (by uid) + names to `data/players.json` (atomic write) so offline friends can be battled.
 
 ### Server config (`config.json`, path via `--config`, env overrides `YL_KEY`, `YL_PORT`)

@@ -20,6 +20,7 @@ from .diag import Diagnostics, send_report_sync, show_report_window
 from .game import GameMemory
 from . import crystal
 from .challenge import ChallengeMixin
+from .trades import TradeMixin
 from .net import NetClient
 
 log = logging.getLogger("yellowlink")
@@ -74,31 +75,6 @@ class Friend:
 
 
 @dataclass
-class TradeSession:
-    trade_id: str
-    partner_uid: str
-    partner_name: str
-    my_slot: int | None = None
-    my_mon: object = None
-    their_mon: object = None
-    me_confirmed: bool = False
-    them_confirmed: bool = False
-    phase: str = "open"          # open | executing | applied | done
-    pending_receive: object = None
-    pending_since: float = 0.0
-    applied_backup: tuple | None = None  # (slot, original mon, received mon as written)
-
-    def status_text(self):
-        if self.phase == "executing":
-            return "Trading... close any menus and stand still."
-        if self.phase == "applied":
-            return "Waiting for your friend's game..."
-        if self.my_mon and self.their_mon and not self.me_confirmed:
-            return "Both offers are in. Press C to confirm."
-        return ""
-
-
-@dataclass
 class GhostBattle:
     opponent_uid: str
     opponent_name: str
@@ -110,7 +86,7 @@ class GhostBattle:
     result: int | None = None
 
 
-class App(ChallengeMixin):
+class App(ChallengeMixin, TradeMixin):
     def __init__(self, cfg: Config, diag: Diagnostics | None = None):
         self.cfg = cfg
         self.diag = diag
@@ -120,6 +96,7 @@ class App(ChallengeMixin):
             cfg.pop("active_challenge", None)
             cfg.save()
         self.init_challenges()
+        self.init_trades()
         # in a challenge: that run's own game + separate save (Config paths follow active_challenge)
         self.game_id = cfg.challenge["game"] if cfg.challenge else (self.lib.current or "yellow")
         self.save_tag = f"challenge-{cfg.challenge['id']}" if cfg.challenge else self.game_id
@@ -158,8 +135,6 @@ class App(ChallengeMixin):
         self.friends: dict[str, Friend] = {}
         self.roster: list = []
         self.menu_index = 0
-        self.trade: TradeSession | None = None
-        self.trade_cursor = 0
         self.prompt: dict | None = None
         self.battle_offer: dict | None = None
         self.battle: GhostBattle | None = None
@@ -168,8 +143,6 @@ class App(ChallengeMixin):
         self.restart_into = None
         self.quit_requested = False
         self.hooks: pvp.LinkHooks | None = None
-        self.unresolved_trade = None
-        self.unresolved_retry = 0.0
         self.pad_held: set = set()
         self.kb_held: set = set()
         self.update_available = None
@@ -455,31 +428,6 @@ class App(ChallengeMixin):
         self.last_state_sent = None
         self.last_sprite_sent = None
         self.last_party_sent = None
-        if self.unresolved_trade:
-            self.net.send({"type": "trade_status", "trade_id": self.unresolved_trade[0]})
-
-    def on_trade_status(self, msg):
-        if not self.unresolved_trade or msg.get("trade_id") != self.unresolved_trade[0]:
-            return
-        state = msg.get("state")
-        if state == "pending":
-            self.unresolved_retry = time.time() + 3  # server still finishing it; ask again shortly
-            return
-        tid, (slot, original, written) = self.unresolved_trade
-        self.unresolved_trade = None
-        if state == "complete":
-            self.sys_msg("The trade went through. Remember to SAVE in-game.", ui.GOOD)
-            return
-        self._rollback_trade(slot, original, written)
-
-    def _rollback_trade(self, slot, original, written):
-        party = self.game.party()
-        if slot < len(party) and party[slot].identity() == written.identity():
-            self.game.write_party_slot(slot, original)
-            self.last_party_sent = None
-            self.sys_msg("The trade didn't complete on your friend's side, so it was undone.", ui.BAD)
-        else:
-            self.sys_msg("The trade didn't complete and couldn't be undone automatically (party changed).", ui.BAD)
 
     def on_disconnected(self, msg):
         self.chal_on_disconnected()
@@ -487,14 +435,9 @@ class App(ChallengeMixin):
         if self.live:
             self._end_live("Battle ended: connection lost.", ui.BAD)
         self.friends.clear()
-        t = self.trade
-        if t:
-            if t.phase == "applied" and t.applied_backup:
-                # We swapped but never heard the result: ask the server after reconnecting.
-                self.unresolved_trade = (t.trade_id, t.applied_backup)
-                self._end_trade("Connection lost during the trade - checking with the server...", ui.ACCENT)
-            else:
-                self._end_trade("Trade cancelled (connection lost).", ui.BAD)
+        if self.trade:
+            # trades happen on the server in one step: a finished one arrives with pc_trades on reconnect
+            self._end_trade("Trade window closed (connection lost).", ui.BAD)
         if self.net.status == "rejected":
             self.sys_msg("Server refused connection: " + self.net.status_detail, ui.BAD)
 
@@ -579,114 +522,11 @@ class App(ChallengeMixin):
         f = self.friends.get(uid)
         return (f.state or {}).get("game", "yellow") if f else "yellow"
 
-    def on_trade_request(self, msg):
-        if (self.chal or not self.full or self.trade or self.battle or self.live or self.prompt
-                or self.friend_game(msg.get("from")) != self.game_id):
-            self.net.send({"type": "trade_respond", "trade_id": msg["trade_id"], "accept": False})
-            return
-        self.prompt = {"kind": "trade", "id": msg["trade_id"], "name": msg.get("name", "?"),
-                       "until": time.time() + 55, "shown": None}
-        self._maybe_show_prompt()
-
     def _maybe_show_prompt(self):
         if self.prompt and self.mode == "play" and self.prompt["shown"] is None:
             self.prompt["shown"] = time.time()
             self.mode = "prompt"
             self.release_all()
-
-    def on_trade_started(self, msg):
-        if self.battle or self.live:
-            self.net.send({"type": "trade_cancel", "trade_id": msg["trade_id"]})
-            self.toast("Trade cancelled: you're in a battle.", color=ui.BAD)
-            return
-        self.trade = TradeSession(msg["trade_id"], msg["with"], msg.get("name", "?"))
-        self.trade_cursor = 0
-        self.mode = "trade"
-        self.release_all()
-
-    def on_trade_offer(self, msg):
-        t = self.trade
-        if t and t.trade_id == msg["trade_id"]:
-            try:
-                t.their_mon = self.G.Mon.from_wire(msg["mon"])
-            except (ValueError, KeyError):
-                t.their_mon = None
-
-    def on_trade_confirm_state(self, msg):
-        t = self.trade
-        if t and t.trade_id == msg["trade_id"]:
-            t.me_confirmed, t.them_confirmed = bool(msg.get("you")), bool(msg.get("them"))
-
-    def on_trade_execute(self, msg):
-        t = self.trade
-        if not t or t.trade_id != msg["trade_id"]:
-            self.net.send({"type": "trade_done", "trade_id": msg["trade_id"], "ok": False})
-            return
-        try:
-            t.pending_receive = self.G.Mon.from_wire(msg["receive"])
-        except (ValueError, KeyError):
-            self.net.send({"type": "trade_done", "trade_id": t.trade_id, "ok": False})
-            return
-        if msg.get("give_slot") != t.my_slot:
-            self.net.send({"type": "trade_done", "trade_id": t.trade_id, "ok": False})
-            return
-        t.phase = "executing"
-        t.pending_since = time.time()
-        log.info("trade %s executing: give slot %s, receive species %s", t.trade_id, t.my_slot,
-                 t.pending_receive.species)
-
-    def _try_apply_trade(self):
-        t = self.trade
-        if not t or t.phase != "executing":
-            return
-        if time.time() - t.pending_since > 30:
-            self.net.send({"type": "trade_done", "trade_id": t.trade_id, "ok": False})
-            t.phase = "done"
-            self._end_trade("Trade failed: your game was busy.", ui.BAD)
-            return
-        if self.battle or self.net.status != "online" or not self.game.is_safe():
-            return
-        party = self.game.party()
-        if t.my_slot >= len(party) or party[t.my_slot].identity() != t.my_mon.identity():
-            self.net.send({"type": "trade_done", "trade_id": t.trade_id, "ok": False})
-            t.phase = "done"
-            self._end_trade("Trade failed: your party changed.", ui.BAD)
-            return
-        # Tell the server first; only write RAM if the message could be queued.
-        if not self.net.send({"type": "trade_done", "trade_id": t.trade_id, "ok": True}):
-            return
-        written = self.game.apply_trade(t.my_slot, t.my_mon, t.pending_receive)
-        t.applied_backup = (t.my_slot, t.my_mon, written)
-        t.phase = "applied"
-        if written.species != t.pending_receive.species:
-            self.toast(f"{self.rom.species_name(t.pending_receive.species)} evolved into "
-                       f"{self.rom.species_name(written.species)}!", 6, ui.ACCENT)
-
-    def on_trade_complete(self, msg):
-        t = self.trade
-        if t and t.trade_id == msg["trade_id"]:
-            got = t.applied_backup[2] if t.applied_backup else None
-            name = f"{got.nick_str()}" if got else "your new Pokémon"
-            self._end_trade(f"Trade complete! Say hi to {name}. Remember to SAVE in-game.", ui.GOOD)
-            self.last_party_sent = None
-
-    def on_trade_cancelled(self, msg):
-        t = self.trade
-        if not t or t.trade_id != msg.get("trade_id"):
-            if not t:
-                self.toast("Trade request ended: " + msg.get("reason", ""), 4, ui.DIM)
-            return
-        if t.applied_backup:
-            # Our side already swapped but the partner's failed: undo to avoid duplicates.
-            self._rollback_trade(*t.applied_backup)
-        self._end_trade("Trade cancelled: " + msg.get("reason", ""), ui.BAD)
-
-    def _end_trade(self, s, color):
-        self.trade = None
-        if self.mode == "trade":
-            self.mode = "play"
-        self.toast(s, 6, color)
-        self.sys_msg(s, color)
 
     # battles ------------------------------------------------------------
     def on_party_data(self, msg):
@@ -1052,24 +892,6 @@ class App(ChallengeMixin):
     def select_player(self, uid):
         self.panel_sel = None if self.panel_sel == uid else uid
 
-    def action_trade(self, e):
-        if self.chal:
-            self.toast("Not during a Soul Link - it's just you and your partner.", 4, ui.BAD)
-            return
-        if not e.get("online"):
-            self.toast("They need to be online to trade.", color=ui.BAD)
-        elif not self.full:
-            self.toast("Trading isn't available in this game.", color=ui.BAD)
-        elif self.friend_game(e["uid"]) != self.game_id:
-            self.toast(f"{e.get('name')} is playing another game - trades work within the same game for now.",
-                       5, ui.BAD)
-        elif not self.game.party():
-            self.toast("You need a Pokémon first!", color=ui.BAD)
-        else:
-            self.net.send({"type": "trade_request", "to": e["uid"]})
-            self.toast(f"Trade request sent to {e.get('name')}...")
-            self.close_panel()
-
     def action_battle(self, e):
         if self.chal:
             self.toast("Not during a Soul Link - it's just you and your partner.", 4, ui.BAD)
@@ -1203,6 +1025,8 @@ class App(ChallengeMixin):
                             break
                     if not hit and self.mode == "chat" and not (self.chat_rect and self.chat_rect.collidepoint(ev.pos)):
                         self.unfocus_chat()   # clicked away from the chat box
+            elif ev.type == pygame.MOUSEWHEEL and self.mode == "trade":
+                self.trade_scroll = max(0, self.trade_scroll - ev.y)
             elif ev.type == pygame.MOUSEWHEEL:
                 if self.chat_rect and self.chat_rect.collidepoint(pygame.mouse.get_pos()):
                     self.chat_scroll = max(0, self.chat_scroll + ev.y * 3)
@@ -1243,6 +1067,22 @@ class App(ChallengeMixin):
                 except pygame.error:
                     pass
         return True
+
+    def _answer_prompt(self, accept: bool):
+        """Accept/decline the open invite (trade, gift, battle or challenge) - keys or buttons."""
+        p = self.prompt
+        if not p or time.time() - (p.get("shown") or 0) < 0.5:
+            return
+        if p["kind"] == "challenge":
+            self.respond_challenge(accept)
+        elif p["kind"] == "battle":
+            self.net.send({"type": "battle_respond", "battle_id": p["id"], "accept": accept})
+        else:
+            self.net.send({"type": "trade_respond", "trade_id": p["id"], "accept": accept})
+        self.prompt = None
+        if self.mode == "prompt":
+            self.mode = "play"
+        self.release_all()
 
     def on_key(self, ev):
         k = ev.key
@@ -1295,14 +1135,7 @@ class App(ChallengeMixin):
             elif others and k in (pygame.K_r, pygame.K_b, pygame.K_p):
                 e = others[min(self.menu_index, len(others) - 1)]
                 if k == pygame.K_r:
-                    if not e.get("online"):
-                        self.toast("They need to be online to trade.", color=ui.BAD)
-                    elif not self.game.party():
-                        self.toast("You need a Pokémon first!", color=ui.BAD)
-                    else:
-                        self.net.send({"type": "trade_request", "to": e["uid"]})
-                        self.toast(f"Trade request sent to {e.get('name')}...")
-                        self.mode = "play"
+                    self.action_trade(e)
                 elif k == pygame.K_b:
                     if not e.get("online"):
                         self.toast("They need to be online for a live battle. Try P (practice).", color=ui.BAD)
@@ -1329,18 +1162,7 @@ class App(ChallengeMixin):
             if not p or time.time() - (p.get("shown") or 0) < 0.5:
                 return
             if k in (pygame.K_y, pygame.K_RETURN, pygame.K_n, pygame.K_ESCAPE):
-                accept = k in (pygame.K_y, pygame.K_RETURN)
-                if p["kind"] == "challenge":
-                    self.respond_challenge(accept)
-                    self.release_all()
-                    return
-                if p["kind"] == "battle":
-                    self.net.send({"type": "battle_respond", "battle_id": p["id"], "accept": accept})
-                else:
-                    self.net.send({"type": "trade_respond", "trade_id": p["id"], "accept": accept})
-                self.mode = "play"
-                self.prompt = None
-                self.release_all()
+                self._answer_prompt(k in (pygame.K_y, pygame.K_RETURN))
             return
         if self.mode == "update_confirm":
             if k in (pygame.K_RETURN, pygame.K_KP_ENTER):
@@ -1370,25 +1192,7 @@ class App(ChallengeMixin):
                 self.mode = "play"
             return
         if self.mode == "trade":
-            t = self.trade
-            party = self.game.party()
-            if t.phase != "open":
-                return
-            if k == pygame.K_UP:
-                self.trade_cursor = max(0, self.trade_cursor - 1)
-            elif k == pygame.K_DOWN:
-                self.trade_cursor = min(max(0, len(party) - 1), self.trade_cursor + 1)
-            elif k in (pygame.K_RETURN, pygame.K_KP_ENTER) and party and self.game.party_checked():
-                slot = min(self.trade_cursor, len(party) - 1)
-                t.my_slot, t.my_mon = slot, party[slot]
-                t.me_confirmed = t.them_confirmed = False
-                self.net.send({"type": "trade_offer", "trade_id": t.trade_id, "slot": slot,
-                               "mon": party[slot].to_wire()})
-            elif k == pygame.K_c and t.my_mon and t.their_mon:
-                self.net.send({"type": "trade_confirm", "trade_id": t.trade_id})
-            elif k == pygame.K_ESCAPE:
-                self.net.send({"type": "trade_cancel", "trade_id": t.trade_id})
-                self._end_trade("Trade cancelled.", ui.DIM)
+            self.trade_key(k)
             return
 
         # play mode
@@ -1594,7 +1398,7 @@ class App(ChallengeMixin):
         elif self.mode == "menu":
             ui.draw_link_menu(sub, self.fonts, self, self.game_w, self.game_h)
         elif self.mode == "trade" and self.trade:
-            ui.draw_trade(sub, self.fonts, self, self.game_w, self.game_h)
+            panels.draw_trade(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
         elif self.mode == "prompt" and self.prompt:
             left = max(0, int(self.prompt["until"] - time.time()))
             if self.prompt["kind"] == "challenge":
@@ -1625,9 +1429,18 @@ class App(ChallengeMixin):
                           (f"({left}s)", ui.DIM)],
                          "[Y] accept    [N] decline")
             else:
-                ui.modal(sub, self.fonts, self.game_w, self.game_h, "Trade request",
-                         [f"{self.prompt['name']} wants to trade with you!", (f"({left}s)", ui.DIM)],
-                         "[Y] accept    [N] decline")
+                gift = self.prompt["kind"] == "gift"
+                lines = ([f"{self.prompt['name']} wants to give you a Pokémon!",
+                          ("It goes straight into your PC.", ui.DIM)] if gift else
+                         [f"{self.prompt['name']} wants to trade with you!",
+                          ("You both pick a Pokémon from your PC (works across games).", ui.DIM)])
+                r = ui.modal(sub, self.fonts, self.game_w, self.game_h, "Gift!" if gift else "Trade request",
+                             lines + [(f"({left}s)", ui.DIM), ""], "[Y] accept    [N] decline")
+                off = (0, self.game_y)
+                panels.button(sub, self, self.fonts, pygame.Rect(r.right - 250, r.bottom - 52, 110, 36), "Accept",
+                              lambda: self._answer_prompt(True), offset=off, primary=True)
+                panels.button(sub, self, self.fonts, pygame.Rect(r.right - 128, r.bottom - 52, 110, 36), "Decline",
+                              lambda: self._answer_prompt(False), offset=off)
         elif self.mode == "battle_confirm" and self.battle_offer:
             o = self.battle_offer
             lines = [f"{self.rom.species_name(m.species)}  Lv {m.level}" for m in o["mons"]]
@@ -1683,7 +1496,6 @@ class App(ChallengeMixin):
                 self.audio.push(self.pyboy.sound.ndarray)
             self.update_battle()
             self.update_live()
-        self._try_apply_trade()
         self.chal_step()
         if self.update_dl and self.update_dl.status != "downloading" and not getattr(self.update_dl, "announced", False):
             self.update_dl.announced = True
@@ -1694,9 +1506,6 @@ class App(ChallengeMixin):
                 self.toast("Update download failed - press U to try again.", 6, ui.BAD)
                 self.update_dl = None
         self._maybe_show_prompt()
-        if self.unresolved_trade and self.unresolved_retry and time.time() > self.unresolved_retry:
-            self.unresolved_retry = 0.0
-            self.net.send({"type": "trade_status", "trade_id": self.unresolved_trade[0]})
         if self.prompt and time.time() > self.prompt["until"]:
             if self.mode == "prompt":
                 self.mode = "play"

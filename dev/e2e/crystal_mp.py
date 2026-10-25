@@ -1,8 +1,7 @@
 """Crystal multiplayer e2e: two Crystal players + one Yellow player on a local server (real ROMs).
 
-Checks: Crystal players see each other walk (and the Yellow player doesn't see them), sprites arrive,
-a Crystal<->Crystal trade with a trade evolution (Kadabra -> Alakazam), and that cross-game trades
-are refused. Needs dev/states/{crystal.gbc,crystal_party.state,yellow.gb,room.state}.
+Checks: Crystal players see each other walk (and the Yellow player doesn't see them), sprites arrive.
+(Trades are PC-database based since 0.6.1: dev/e2e/pctrade_e2e.py.) Needs dev/states/{crystal.gbc,crystal_party.state,yellow.gb,room.state}.
 Run: python dev/e2e/crystal_mp.py
 """
 import os, sys, time, subprocess, tempfile, pathlib, atexit
@@ -12,7 +11,7 @@ sys.path.insert(0, os.path.join(_REPO, "client"))
 os.environ["SDL_VIDEODRIVER"] = "dummy"; os.environ["SDL_AUDIODRIVER"] = "dummy"
 import pygame
 from yellowlink.config import Config
-from yellowlink import app as appmod, crystal
+from yellowlink import app as appmod
 
 PORT = 8796
 tmp = pathlib.Path(tempfile.mkdtemp())
@@ -89,40 +88,7 @@ Y.render()
 check("Misty (Yellow) does not draw Crystal players", not any(t[0] in ("Ash", "Brock") for t in Y.draw_friends(Y.pyboy.screen.ndarray)))
 check("Misty (Yellow) is not 'nearby' for Ash", not A.is_nearby(Y.cfg["uid"]))
 
-# give Brock a Kadabra in slot 0
-kad = crystal.make_mon(B.rom, 64, 20, [93, 50], B.game.player_id(), "BROCK", nick=None)
-B.game.write_party_slot(0, kad)
-run(200)
-
-A.net.send({"type": "trade_request", "to": B.cfg["uid"]})
-run(150, lambda: B.mode == "prompt")
-check("Brock gets the trade prompt", B.mode == "prompt")
-time.sleep(0.6)
-B.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_y))
-run(150, lambda: A.mode == "trade" and B.mode == "trade")
-A.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN))   # offer slot 0 (Cyndaquil)
-B.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN))   # offer slot 0 (Kadabra)
-run(80)
-check("Ash sees Brock's offer as KADABRA", A.trade and A.trade.their_mon and A.trade.their_mon.species == 64)
-A.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_c)); B.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_c))
-run(400, lambda: A.trade is None and B.trade is None)
-pa = A.game.party(); pb = B.game.party()
-print("Ash party", [(A.rom.species_name(m.species), m.level, m.max_hp) for m in pa])
-print("Brock party", [(B.rom.species_name(m.species), m.level) for m in pb])
-check("Ash received Kadabra and it evolved into Alakazam", pa[0].species == 65)
-base = A.rom.base_stats(65)
-check("Alakazam's stats were recalculated", crystal.calc_stats(pa[0].data, base)[0] == pa[0].max_hp)
-check("Brock received Cyndaquil", pb[0].species == 155)
-check("Ash's game accepted the party (checked read)", A.game.party_checked() is not None)
-
-# cross-game: Misty (Yellow) asks Ash (Crystal) to trade -> refused automatically
-Y.net.send({"type": "trade_request", "to": A.cfg["uid"]})
-run(150)
-check("cross-game trade request is declined", A.mode != "prompt" and Y.trade is None)
-e = next(r for r in A.roster if r["uid"] == Y.cfg["uid"])
-A.action_trade(e)
-check("Trade button explains the game mismatch", any("another game" in t[0] for t in A.toasts))
-
+# trades/gifts are PC-database based and work across games now: see dev/e2e/pctrade_e2e.py
 for a in apps:
     a.shutdown()
 print("\nfiles in", tmp)

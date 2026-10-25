@@ -149,3 +149,24 @@ def test_adopt_remote_only_when_idle(tmp_path):
     assert not sync.adopt_remote(remote)
     sync.pending = False
     assert sync.adopt_remote(remote) and sync.committed["rev"] == 5
+
+
+def test_trade_delta_applies_once_and_traded_mon_cannot_come_back(tmp_path):
+    mem, pc = setup_game([[rec(0x54, "PIKA"), rec(0xA5, "RATTY")]])
+    sync = pcdb.PCSync(tmp_path / "s.json")
+    pc.write_boxes(sync.open_session("yellow", pc, True))
+    sync.close_session("yellow", pc)
+    sync.commit()
+    ratty = next(e for e in sync.committed["boxes"][0] if e["nick"] == "RATTY")
+    assert [e["nick"] for _, e in sync.offerable()] == ["PIKA", "RATTY"]
+    got = {"id": "new1", "origin": "crystal", "dex": 152, "level": 9, "nick": "LEAFY", "ot": "KRIS", "otid": 5,
+           "gen1": None, "gen2": None}
+    delta = {"trade_id": "t1", "remove": [ratty["id"]], "add": [got], "rev": 7}
+    assert sync.apply_trade(delta) and not sync.apply_trade(delta)
+    assert sync.committed["rev"] == 8 and "t1" in sync.committed["trades"]
+    assert [e["nick"] for e in sync.working["boxes"][0]] == ["PIKA", "LEAFY"]
+    # the game still shows RATTY (it hasn't opened the PC since): opening the PC must not re-import it
+    view = sync.open_session("yellow", pc, True)
+    names = [text.decode(r[44:]) for r in view[0]]
+    assert "RATTY" not in names and sync.count() == 2
+    assert not sync.offerable()                     # PC open in-game: nothing can be traded

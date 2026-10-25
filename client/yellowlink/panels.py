@@ -49,8 +49,8 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
     others = [e for e in app.sorted_roster() if e.get("uid") != app.cfg["uid"]]
     y = r.y + 56
     if not app.full:
-        text(surf, f.small, f"Trades and battles are Yellow-only for now (you're in {app.game_info.title}).",
-             (r.x + 18, y), BAD)
+        text(surf, f.small, f"Battles don't work in {app.game_info.title} - trades and gifts do (they use your PC).",
+             (r.x + 18, y), DIM)
         y += 22
     if not others:
         text(surf, f.body, "No other trainers yet - invite your friends!", (r.x + 18, y + 10), DIM)
@@ -80,26 +80,30 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
         app.click_targets.append((row.move(offset), lambda u=uid: app.select_player(u), "player:" + e.get("name", "?")))
         y += row_h
         if selected:
-            bx = row.x + 32
-            bw = 122
+            bx = row.x + 24
+            bw = 106
             same_game = app.friend_game(uid) == app.game_id if online else True
             can_live = online and same_game and app.full and app.hooks is not None and not app.chal
-            button(surf, app, f, pygame.Rect(bx, y, bw, 34), "Battle", lambda e=e: app.action_battle(e),
-                   enabled=can_live, offset=offset, primary=True,
-                   tip="They need to be online, and you both in Yellow.")
-            button(surf, app, f, pygame.Rect(bx + bw + 10, y, bw, 34), "Trade", lambda e=e: app.action_trade(e),
-                   enabled=online and same_game and app.full, offset=offset,
-                   tip="They need to be online and playing the same game as you.")
-            button(surf, app, f, pygame.Rect(bx + 2 * (bw + 10), y, bw, 34), "Practice",
-                   lambda e=e: app.action_practice(e),
-                   enabled=app.full and not app.gen2 and same_game and bool(lv), offset=offset,
-                   tip="Practice battles work in Yellow vs a trainer with Pokémon.")
+            buttons = [
+                ("Battle", lambda e=e: app.action_battle(e), can_live, True,
+                 "They need to be online, and you both in Yellow."),
+                ("Trade", lambda e=e: app.action_trade(e), online and not app.chal, False,
+                 "They need to be online (trades use your PC and work across games)."),
+                ("Gift", lambda e=e: app.action_gift(e), online and not app.chal, False,
+                 "Give them a Pokémon from your PC - they need to be online."),
+                ("Practice", lambda e=e: app.action_practice(e),
+                 app.full and not app.gen2 and same_game and bool(lv) and not app.chal, False,
+                 "Practice battles work in Yellow vs a trainer with Pokémon."),
+            ]
+            for i, (label, cb, enabled, primary, tip) in enumerate(buttons):
+                button(surf, app, f, pygame.Rect(bx + i * (bw + 8), y, bw, 34), label, cb, enabled=enabled,
+                       offset=offset, primary=primary, tip=tip)
             done = sum(1 for c in app.challenges_with(uid) if c["status"] == "completed")
-            button(surf, app, f, pygame.Rect(bx + 3 * (bw + 10), y, bw, 34),
+            button(surf, app, f, pygame.Rect(bx + 4 * (bw + 8), y, bw + 14, 34),
                    "Challenges" + (f" ({done})" if done else ""), lambda u=uid: app.open_challenges(u),
                    offset=offset)
             y += 44
-    text(surf, f.small, "Battle: live vs them  ·  Practice: their team played by the AI (works offline)",
+    text(surf, f.small, "Trade/Gift: Pokémon from your PC, any game  ·  Practice: their team vs the AI",
          (r.x + 18, r.bottom - 26), DIM)
 
 
@@ -385,3 +389,107 @@ def draw_soullink(surf, f, app, game_w, game_h, offset):
            lambda: app.leave_to_main("paused"), offset=offset, primary=True)
     text(surf, f.small, "Your run is saved. Continue it together any time", (r.x + 240, r.bottom - 48), DIM)
     text(surf, f.small, "from Multiplayer > Challenges.", (r.x + 240, r.bottom - 30), DIM)
+
+
+# --- trades / gifts (PC database) --------------------------------------------------------------------------
+def draw_trade(surf, f, app, game_w, game_h, offset):
+    t = app.trade
+    if t is None:
+        return
+    title = (f"Gift for {t.partner_name}" if t.giving else f"Gift from {t.partner_name}") if t.gift \
+        else f"Trade with {t.partner_name}"
+    shade = pygame.Surface((game_w, game_h), pygame.SRCALPHA)
+    shade.fill((0, 0, 0, 150))
+    surf.blit(shade, (0, 0))
+    w, h = min(game_w - 30, 640), min(game_h - 30, 540)
+    r = pygame.Rect(0, 0, w, h)
+    r.center = (game_w // 2, game_h // 2)
+    box(surf, r, PANEL, ACCENT, 10)
+    app.click_targets.append((r.move(offset), lambda: None, "trade window"))
+    text(surf, f.title, title, (r.x + 18, r.y + 14), ACCENT)
+    col_w = (r.w - 48) // 2
+    left = pygame.Rect(r.x + 16, r.y + 54, col_w, r.h - 140)
+    right = pygame.Rect(left.right + 16, left.y, col_w, left.h)
+
+    # left: your PC (the giver / both traders pick from here)
+    if t.receiving_only:
+        text(surf, f.body, "You're receiving a gift", (left.x, left.y), TEXT)
+        text(surf, f.small, "Nothing leaves your PC.", (left.x, left.y + 28), DIM)
+        text(surf, f.small, "Accept when you've seen it.", (left.x, left.y + 48), DIM)
+    else:
+        rows = app.trade_entries()
+        text(surf, f.body, "Your PC", (left.x, left.y), TEXT)
+        text(surf, f.small, f"{len(rows)} Pokémon", (left.right, left.y + 4), DIM, anchor="topright")
+        row_h = 34
+        per = max(1, (left.h - 34) // row_h)
+        app.trade_per = per
+        app.trade_scroll = max(0, min(app.trade_scroll, max(0, len(rows) - per)))
+        app.trade_sel = max(app.trade_scroll, min(app.trade_sel, app.trade_scroll + per - 1, len(rows) - 1))
+        y = left.y + 30
+        if not rows:
+            text(surf, f.small, "Your PC is empty. Deposit Pokémon in the", (left.x, y), DIM)
+            text(surf, f.small, "game's PC first (they're saved within ~30 s).", (left.x, y + 18), DIM)
+        for i in range(app.trade_scroll, min(len(rows), app.trade_scroll + per)):
+            bi, e = rows[i]
+            rr = pygame.Rect(left.x, y, left.w, row_h - 4)
+            offered = t.my_entry is not None and t.my_entry.get("id") == e["id"]
+            hover = rr.move(offset).collidepoint(pygame.mouse.get_pos())
+            pygame.draw.rect(surf, ACCENT if offered else (PANEL_HI if (hover or i == app.trade_sel) else PANEL),
+                             rr, border_radius=6)
+            fg = (30, 28, 20) if offered else TEXT
+            text(surf, f.small, app.entry_label(e), (rr.x + 8, rr.y + 2), fg)
+            note = app.entry_note(e)
+            sub = f"Box {bi + 1}" + (f" · from {e.get('origin', '').title()}" if e.get("origin") not in
+                                     (None, "", app.game_id) else "")
+            text(surf, f.small, sub, (rr.x + 8, rr.y + 15), (60, 55, 40) if offered else (note[1] if note else DIM))
+            app.click_targets.append((rr.move(offset), lambda e=e, i=i: (setattr(app, "trade_sel", i),
+                                                                         app.offer_entry(e)), "offer"))
+            y += row_h
+        if len(rows) > per:
+            button(surf, app, f, pygame.Rect(left.right - 66, left.y - 2, 30, 26), "^",
+                   lambda: setattr(app, "trade_scroll", max(0, app.trade_scroll - per)), offset=offset)
+            button(surf, app, f, pygame.Rect(left.right - 32, left.y - 2, 30, 26), "v",
+                   lambda: setattr(app, "trade_scroll", app.trade_scroll + per), offset=offset)
+
+    # right: what you give / get
+    y = right.y
+    if t.gift and t.giving:
+        text(surf, f.body, "You're giving:", (right.x, y), TEXT)
+        shown = t.my_entry
+        empty = "Click a Pokémon on the left."
+    else:
+        text(surf, f.body, f"{t.partner_name} {'is giving you' if t.gift else 'offers'}:", (right.x, y), TEXT)
+        shown = t.their_entry
+        empty = "Waiting for them to choose..."
+    y += 32
+    if shown:
+        card = pygame.Rect(right.x, y, right.w, 86)
+        box(surf, card, PANEL_HI, PANEL_HI, 8)
+        text(surf, f.body, app.entry_label(shown), (card.x + 10, card.y + 8), TEXT)
+        origin = shown.get("origin")
+        text(surf, f.small, f"OT {shown.get('ot', '?')}" + (f" · from {origin.title()}" if origin else ""),
+             (card.x + 10, card.y + 36), DIM)
+        note = app.entry_note(shown)
+        if note:
+            text(surf, f.small, note[0], (card.x + 10, card.y + 58), note[1])
+        y = card.bottom + 10
+    else:
+        text(surf, f.small, empty, (right.x, y), DIM)
+        y += 30
+    if not t.gift and t.my_entry:
+        text(surf, f.small, "You offer: " + app.entry_label(t.my_entry), (right.x, y), ACCENT)
+        y += 22
+    text(surf, f.small, "Trade evolutions happen on arrival.", (right.x, right.bottom - 20), DIM)
+
+    # bottom: confirmations + buttons
+    by = r.bottom - 76
+    me = "You confirmed" if t.me_confirmed else "You haven't confirmed"
+    them = f"{t.partner_name} confirmed" if t.them_confirmed else f"{t.partner_name} hasn't confirmed"
+    text(surf, f.small, me, (r.x + 18, by), GOOD if t.me_confirmed else DIM)
+    text(surf, f.small, them, (r.x + 18, by + 18), GOOD if t.them_confirmed else DIM)
+    label = "Accept gift" if t.receiving_only else ("Give it" if t.gift else "Confirm trade")
+    button(surf, app, f, pygame.Rect(r.right - 300, r.bottom - 54, 160, 38), label, app.confirm_trade,
+           enabled=t.can_confirm() and not t.me_confirmed, offset=offset, primary=True,
+           tip="Pick a Pokémon first." if not t.can_confirm() else "")
+    button(surf, app, f, pygame.Rect(r.right - 128, r.bottom - 54, 110, 38), "Cancel", app.cancel_trade,
+           offset=offset)

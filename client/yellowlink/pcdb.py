@@ -267,6 +267,45 @@ class PCSync:
         log.info("adopted PC store rev %d from server", store["rev"])
         return True
 
+    # trades (applied by the server to the stored PCs; SPEC.md "Trade state machine") ------------------
+    def apply_trade(self, delta: dict) -> bool:
+        """Apply a server trade delta to the committed and the working store (idempotent). True if new."""
+        tid = delta.get("trade_id")
+        if not tid or tid in self.committed.get("trades", []):
+            return False
+        for st in (self.committed, self.working):
+            for eid in delta.get("remove", []):
+                for box in st["boxes"]:
+                    box[:] = [e for e in box if e.get("id") != eid]
+                gone = st.setdefault("gone", [])
+                gone.append(eid)
+                del gone[:-500]
+            have = {e["id"] for b in st["boxes"] for e in b}
+            for entry in delta.get("add", []):
+                if entry.get("id") in have:
+                    continue
+                box = next((b for b in st["boxes"] if len(b) < MONS_PER_BOX), None)
+                if box is None:
+                    log.warning("PC full: traded Pokémon %s kept in the last box", entry.get("nick"))
+                    box = st["boxes"][-1]
+                box.append(copy.deepcopy(entry))
+            trades = st.setdefault("trades", [])
+            trades.append(tid)
+            del trades[:-200]
+        # newer than anything the server has, so the next upload is accepted
+        self.committed["rev"] = max(self.committed.get("rev", 0), int(delta.get("rev", 0))) + 1
+        self.working["rev"] = self.committed["rev"]
+        self.save()
+        log.info("applied trade %s: -%s +%s", tid, delta.get("remove"), [e.get("nick") for e in delta.get("add", [])])
+        return True
+
+    def offerable(self) -> list:
+        """[(box index, entry)] that can be traded: saved (committed) and not being changed right now."""
+        if self.session_open:
+            return []
+        working = {e["id"] for b in self.working["boxes"] for e in b}
+        return [(bi, e) for bi, box in enumerate(self.committed["boxes"]) for e in box if e["id"] in working]
+
     def count(self, store=None) -> int:
         return sum(len(b) for b in (store or self.working)["boxes"])
 
@@ -328,6 +367,7 @@ class PCSync:
         if before is None:
             return report
         entries = self._entries()
+        gone = set(self.working.get("gone", []))
         pool = {}                                   # record bytes -> [(box, entry_id), ...]
         for bi, box in enumerate(before):
             for eid, rb in box:
@@ -342,6 +382,8 @@ class PCSync:
                 if pick and pick[1] in entries:
                     used.add(pick[1])
                     new_boxes[bi].append(entries[pick[1]])
+                elif pick and pick[1] in gone:
+                    continue                        # traded away while this game still showed it: drop
                 elif codec.is_standin(rec):
                     continue                        # an unknown stand-in copy: never create entries from it
                 else:

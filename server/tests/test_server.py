@@ -7,6 +7,7 @@ import pytest
 from websockets.asyncio.client import connect
 
 from conftest import KEY, make_mon
+from yellowlink_server import PROTOCOL_VERSION
 from yellowlink_server.config import Config, load_config
 from yellowlink_server.server import YellowLinkServer
 
@@ -177,7 +178,7 @@ async def test_roster_and_get_party_offline_after_restart(tmp_path, connect_clie
     try:
         async with connect(f"ws://127.0.0.1:{srv2.port}") as ws:
             await ws.send(json.dumps({"type": "hello", "name": "Sam", "uid": "sam",
-                                      "key": KEY, "version": "0.1.0", "protocol": 1}))
+                                      "key": KEY, "version": "0.1.0", "protocol": PROTOCOL_VERSION}))
             welcome = json.loads(await ws.recv())
             entry = next(e for e in welcome["roster"] if e["uid"] == "alex-uid")
             assert entry["online"] is False and entry["party_size"] == 2
@@ -232,71 +233,6 @@ async def open_trade(a, b):
     return tid
 
 
-async def test_trade_happy_path(connect_client):
-    a = await connect_client("Ilias")
-    b = await connect_client("Alex")
-    tid = await open_trade(a, b)
-    mon_a, mon_b = make_mon(0x54, 10), make_mon(0x26, 20)  # PIKACHU-ish, KADABRA
-    await a.send(type="trade_offer", trade_id=tid, slot=2, mon=mon_a)
-    off = await b.expect("trade_offer")
-    assert off == {"type": "trade_offer", "trade_id": tid, "from": a.uid, "slot": 2, "mon": mon_a}
-    await a.expect_none("trade_offer")
-    await b.send(type="trade_offer", trade_id=tid, slot=0, mon=mon_b)
-    await a.expect("trade_offer", **{"from": b.uid})
-
-    await a.send(type="trade_confirm", trade_id=tid)
-    cs = await a.expect("trade_confirm_state")
-    assert (cs["you"], cs["them"]) == (True, False)
-    cs = await b.expect("trade_confirm_state")
-    assert (cs["you"], cs["them"]) == (False, True)
-    await b.send(type="trade_confirm", trade_id=tid)
-
-    ea = await a.expect("trade_execute")
-    eb = await b.expect("trade_execute")
-    assert ea == {"type": "trade_execute", "trade_id": tid, "give_slot": 2, "receive": mon_b}
-    assert eb == {"type": "trade_execute", "trade_id": tid, "give_slot": 0, "receive": mon_a}
-
-    # cancel no longer allowed while executing
-    await a.send(type="trade_cancel", trade_id=tid)
-    await a.expect("error")
-
-    await a.send(type="trade_done", trade_id=tid, ok=True)
-    await a.expect_none("trade_complete")
-    await b.send(type="trade_done", trade_id=tid, ok=True)
-    await a.expect("trade_complete", trade_id=tid)
-    await b.expect("trade_complete", trade_id=tid)
-    sysmsg = await a.expect("system", text="Ilias traded PIKACHU with Alex for PIKACHU!")
-    assert sysmsg
-
-    # both are free to trade again
-    tid2 = await open_trade(b, a)
-    assert tid2 != tid
-
-
-async def test_reoffer_resets_confirmation(connect_client):
-    a = await connect_client("Ilias")
-    b = await connect_client("Alex")
-    tid = await open_trade(a, b)
-    await a.send(type="trade_offer", trade_id=tid, slot=0, mon=make_mon(0x54))
-    await b.expect("trade_offer")
-    await b.send(type="trade_offer", trade_id=tid, slot=1, mon=make_mon(0x99))
-    await a.expect("trade_offer")
-    await a.send(type="trade_confirm", trade_id=tid)
-    await a.expect("trade_confirm_state", you=True, them=False)
-    await b.expect("trade_confirm_state", you=False, them=True)
-
-    await b.send(type="trade_offer", trade_id=tid, slot=3, mon=make_mon(0x55))
-    off = await a.expect("trade_offer", slot=3)
-    assert off["from"] == b.uid
-    await a.expect("trade_confirm_state", you=False, them=False)
-    await b.expect("trade_confirm_state", you=False, them=False)
-
-    # a single confirm no longer executes
-    await b.send(type="trade_confirm", trade_id=tid)
-    await a.expect("trade_confirm_state", you=False, them=True)
-    await a.expect_none("trade_execute")
-
-
 async def test_confirm_requires_both_offers(connect_client):
     a = await connect_client("Ilias")
     b = await connect_client("Alex")
@@ -314,7 +250,7 @@ async def test_trade_cancel(connect_client):
     ca = await a.expect("trade_cancelled", trade_id=tid)
     cb = await b.expect("trade_cancelled", trade_id=tid)
     assert ca["reason"] == cb["reason"] == "cancelled"
-    await a.send(type="trade_offer", trade_id=tid, slot=0, mon=make_mon())
+    await a.send(type="trade_offer", trade_id=tid, entry_id="x")
     await a.expect("error")
 
 
@@ -336,54 +272,9 @@ async def test_trade_busy_and_non_participant(connect_client):
     assert "busy" in (await c.expect("error"))["message"]
     await c.send(type="trade_cancel", trade_id=tid)
     await c.expect("error")
-    await c.send(type="trade_offer", trade_id=tid, slot=0, mon=make_mon())
+    await c.send(type="trade_offer", trade_id=tid, entry_id="x")
     await c.expect("error")
     await a.expect_none("trade_cancelled")
-
-
-async def test_partner_disconnect_mid_trade(connect_client):
-    a = await connect_client("Ilias")
-    b = await connect_client("Alex")
-    tid = await open_trade(a, b)
-    await a.send(type="trade_offer", trade_id=tid, slot=0, mon=make_mon())
-    await b.close()
-    c = await a.expect("trade_cancelled", trade_id=tid)
-    assert c["reason"] == "partner left"
-
-
-async def test_partner_disconnect_during_execute(connect_client):
-    a = await connect_client("Ilias")
-    b = await connect_client("Alex")
-    tid = await open_trade(a, b)
-    await a.send(type="trade_offer", trade_id=tid, slot=0, mon=make_mon())
-    await b.expect("trade_offer")
-    await b.send(type="trade_offer", trade_id=tid, slot=0, mon=make_mon())
-    await a.expect("trade_offer")
-    await a.send(type="trade_confirm", trade_id=tid)
-    await b.expect("trade_confirm_state", them=True)
-    await b.send(type="trade_confirm", trade_id=tid)
-    await a.expect("trade_execute")
-    await a.send(type="trade_done", trade_id=tid, ok=True)
-    await b.close()
-    c = await a.expect("trade_cancelled", trade_id=tid)
-    assert c["reason"] == "execution failed"
-
-
-async def test_trade_done_failure(connect_client):
-    a = await connect_client("Ilias")
-    b = await connect_client("Alex")
-    tid = await open_trade(a, b)
-    await a.send(type="trade_offer", trade_id=tid, slot=0, mon=make_mon())
-    await b.expect("trade_offer")
-    await b.send(type="trade_offer", trade_id=tid, slot=0, mon=make_mon())
-    await a.expect("trade_offer")
-    await a.send(type="trade_confirm", trade_id=tid)
-    await b.expect("trade_confirm_state", them=True)
-    await b.send(type="trade_confirm", trade_id=tid)
-    await b.expect("trade_execute")
-    await b.send(type="trade_done", trade_id=tid, ok=False)
-    c = await a.expect("trade_cancelled", trade_id=tid)
-    assert c["reason"] == "execution failed"
 
 
 @pytest.mark.parametrize("mon,slot", [
@@ -456,33 +347,6 @@ async def _execute(a, b):
     return tid
 
 
-async def test_trade_status_after_disconnect_is_failed(connect_client):
-    a = await connect_client("Ilias")
-    b = await connect_client("Alex")
-    tid = await _execute(a, b)
-    await b.send(type="trade_done", trade_id=tid, ok=True)
-    await a.send(type="trade_status", trade_id=tid)
-    assert (await a.expect("trade_status", trade_id=tid))["state"] == "pending"
-    await a.close()  # A drops after possibly applying
-    await b.expect("trade_cancelled", trade_id=tid)
-    a2 = await connect_client("Ilias", uid=a.uid)
-    await a2.send(type="trade_status", trade_id=tid)
-    assert (await a2.expect("trade_status", trade_id=tid))["state"] == "failed"
-
-
-async def test_trade_status_complete_and_unknown(connect_client):
-    a = await connect_client("Ilias")
-    b = await connect_client("Alex")
-    tid = await _execute(a, b)
-    await a.send(type="trade_done", trade_id=tid, ok=True)
-    await b.send(type="trade_done", trade_id=tid, ok=True)
-    await a.expect("trade_complete", trade_id=tid)
-    await a.send(type="trade_status", trade_id=tid)
-    assert (await a.expect("trade_status", trade_id=tid))["state"] == "complete"
-    await a.send(type="trade_status", trade_id="nope")
-    assert (await a.expect("trade_status", trade_id="nope"))["state"] == "unknown"
-
-
 async def test_bug_report_saved(connect_client, server):
     a = await connect_client("Ilias")
     await a.send(type="bug_report", text="Traceback: boom", reason="crash")
@@ -498,7 +362,7 @@ async def test_report_only_connection_does_not_join(connect_client, server):
     watcher = await connect_client("Ilias")
     async with connect(f"ws://127.0.0.1:{server.port}") as ws:
         await ws.send(json.dumps({"type": "hello", "name": "Alex", "uid": "report-x", "key": KEY,
-                                  "version": "0.1.1", "protocol": 1, "mode": "report"}))
+                                  "version": "0.1.1", "protocol": PROTOCOL_VERSION, "mode": "report"}))
         await ws.send(json.dumps({"type": "bug_report", "text": "crash log", "reason": "crash"}))
         reply = json.loads(await ws.recv())
         assert reply["type"] == "report_saved"
@@ -547,19 +411,6 @@ async def test_crystal_party_levels_in_roster(connect_client):
         r = await a.expect("roster")
     me = next(e for e in r["roster"] if e["uid"] == a.uid)
     assert me["levels"] == [7, 4] and me["species"] == [155, 16]
-
-
-async def test_cross_game_trade_cannot_be_confirmed(connect_client):
-    a = await connect_client("Ilias")
-    b = await connect_client("Alex")
-    tid = await open_trade(a, b)
-    await a.send(type="trade_offer", trade_id=tid, slot=0, mon=make_mon(0x54, 10))
-    await b.expect("trade_offer")
-    await b.send(type="trade_offer", trade_id=tid, slot=0, mon=make_crystal_mon())
-    await a.expect("trade_offer")
-    await a.send(type="trade_confirm", trade_id=tid)
-    err = await a.expect("error")
-    assert "same game" in err["message"]
 
 
 async def test_chat_and_roster_carry_region(connect_client):
