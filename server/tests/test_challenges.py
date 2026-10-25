@@ -216,3 +216,46 @@ async def test_state_with_challenge_does_not_change_main_region(server, connect_
     await asyncio.sleep(0.1)
     assert server.store.get(a.uid)["game"] == "yellow"
     assert server.clients[a.uid].state["challenge"] == "abc123"
+
+
+async def test_shiny_area_and_resend_dedupe(server, connect_client):
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    c = await start_challenge(a, b)
+    await join_both(a, b, c["id"])
+    ev = {"t": "enc", "area": "ROUTE_22*1", "dex": 21, "status": "caught", "key": "abc", "shiny": True, "cid": "x1"}
+    await a.send(type="challenge_event", challenge_id=c["id"], event=ev)
+    first = await a.expect("challenge_event")
+    assert first["event"]["area"] == "ROUTE_22*1" and first["event"]["cid"] == "x1"
+    await b.expect("challenge_event")
+    await a.send(type="challenge_event", challenge_id=c["id"], event=ev)        # resend after a blip
+    again = await a.expect("challenge_event")
+    assert again["event"]["seq"] == first["event"]["seq"]
+    await b.expect_none("challenge_event", wait=0.2)
+    assert len(server.challenges.records[c["id"]]["ledger"]) == 1
+
+
+async def test_disconnect_while_loading_is_not_lost(server, connect_client, monkeypatch):
+    monkeypatch.setattr(chal, "GRACE", 0.2)
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    c = await start_challenge(a, b)
+    await a.close()                       # the app restarts to load the run
+    await b.send(type="challenge_join", challenge_id=c["id"])
+    await b.expect("challenge_state")
+    await b.expect_none("challenge_partner_lost", wait=0.2)
+    await b.expect_none("challenge_partner_left", wait=0.3)
+    a2 = await connect_client("Ilias", uid=a.uid)
+    await a2.send(type="challenge_join", challenge_id=c["id"])
+    await b.expect("challenge_ready")
+
+
+async def test_damaged_record_is_skipped(tmp_path):
+    from yellowlink_server.challenges import ChallengeHub
+    d = tmp_path / "data"
+    d.mkdir()
+    (d / "challenges.json").write_text(json.dumps({"challenges": [{"id": "bad"}, {
+        "id": "ok", "kind": "soul_link", "game": "yellow", "status": "active", "players": ["a", "b"],
+        "names": {}, "rules": {}, "progress": {}, "ledger": []}]}))
+    hub = ChallengeHub(None, str(d))
+    assert list(hub.records) == ["ok"]

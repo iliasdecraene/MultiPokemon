@@ -21,6 +21,10 @@ class FakeView:
         self.badge_bits = 0
         self.unreadable = False
         self.box_full = False
+        self.contest = False
+
+    def hold(self):
+        return self.contest
 
     def ready(self):
         return True
@@ -329,3 +333,75 @@ def test_pending_events_are_not_resent():
     assert sl.status("k1") == "dead"
     sl.add({"t": "dead", "key": "k1", "why": "fainted", "p": "A", "seq": 1})
     assert not sl.pending and sl.status("k1") == "dead"
+
+
+def test_contest_hides_party_without_killing_anyone():
+    w = World()
+    started(w)
+    wild_catch(w.a, "a1", 16, area="ROUTE_35")
+    wild_catch(w.b, "b1", 19, area="ROUTE_35")
+    hidden = w.a.view.party_mons[1:]
+    w.a.view.contest = True
+    w.a.view.party_mons = w.a.view.party_mons[:1]          # the contest gate keeps only the lead
+    w.a.view.in_battle = {"kind": "wild", "dex": 123, "shiny": False, "safari": False, "contest": True}
+    w.a.run(3)
+    w.a.view.slot = (0, 0)
+    w.a.run(3)                                              # the lead faints in a contest battle
+    w.a.view.in_battle, w.a.view.slot = None, None
+    w.a.view.party_mons[0] = mon("a0", 25, hp=0)
+    w.a.run(40)
+    w.a.view.contest = False                                # the timer flag clears before the judging...
+    w.a.run(Referee.HOLD_AFTER * 3)
+    assert not [e for e in w.events("dead", "A") if e["why"] != "fainted"]
+    w.a.view.party_mons = [mon("a0", 25, hp=0)] + hidden   # ...and the gate gives the party back later
+    w.a.run(Referee.HOLD_AFTER + 60)
+    w.run(3)
+    assert not w.events("blackout")
+    dead = {e["key"]: e["why"] for e in w.events("dead", "A")}
+    assert dead == {"a0": "fainted"}, dead                  # the hidden mons were never "lost"
+
+
+def test_resume_inside_a_battle_keeps_rules_straight():
+    w = World()
+    started(w)
+    wild_catch(w.a, "a1", 16)
+    wild_catch(w.b, "b1", 19)
+    # A meets a second Route 1 mon, pauses, and the run resumes inside that battle with a new referee
+    w.a.view.in_battle = {"kind": "wild", "dex": 16, "shiny": False, "safari": False}
+    new_ref = Referee(w.a.sl, w.a.view, w.a.ref._send, w.a.ref.notify)
+    w.a.ref = new_ref
+    w.a.run(3)
+    w.a.view.in_battle = None                               # ran away
+    w.a.run()
+    w.run(2)
+    assert not w.events("dead"), w.events("dead")
+    # paused during a first encounter (open), resumed, then caught: it counts
+    w.a.view.cur_area = "ROUTE_2"
+    w.a.view.in_battle = {"kind": "wild", "dex": 10, "shiny": False, "safari": False}
+    w.a.run(3)
+    assert w.a.sl.mine()["enc"]["ROUTE_2"]["status"] == "open"
+    w.a.ref = Referee(w.a.sl, w.a.view, w.a.ref._send, w.a.ref.notify)
+    w.a.run(3)
+    w.a.view.in_battle = None
+    w.a.view.party_mons.append(mon("a2", 10))
+    w.a.run()
+    assert w.a.sl.mine()["enc"]["ROUTE_2"]["status"] == "caught" and w.a.sl.usable("a2")
+
+
+def test_partner_box_follow_with_full_box_tells_and_continues():
+    w = World()
+    started(w)
+    wild_catch(w.a, "a1", 16)
+    wild_catch(w.b, "b1", 19)
+    w.run()
+    w.b.view.box_full = True
+    w.a.view.box_mons.append(w.a.view.party_mons.pop(1))
+    w.run(3)
+    assert [m.key for m in w.b.view.party_mons] == ["b0", "b1"]
+    assert any("box is full" in m for m in w.b.msgs)
+
+
+def test_events_carry_ids_for_resend():
+    w = World()
+    started(w)
+    assert all(e.get("cid") for e in w.ledger)

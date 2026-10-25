@@ -44,7 +44,13 @@ class ChallengeView:
         return self.G.area_name(area.split("*")[0])
 
     def hof(self) -> bool:
-        return self.g.in_hall_of_fame()
+        """Entered the Hall of Fame at least once (saved flags, so a short safe window can't be missed)."""
+        if self.gen2:
+            return self.g.entered_hall_of_fame() or self.g.in_hall_of_fame()
+        return self.g.hall_of_fame_count() > 0 or self.g.in_hall_of_fame()
+
+    def hold(self) -> bool:
+        return self.gen2 and self.g.in_bug_contest()
 
     def badges(self) -> int:
         return self.g.badges()

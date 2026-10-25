@@ -25,6 +25,8 @@ LOAD_TIMEOUT = 90.0          # both players must load into the challenge within 
 GRACE = 30.0                 # a dropped connection may come back within this
 LEDGER_MAX = 5000
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+AREA_RE = re.compile(r"^[A-Za-z0-9_*-]{1,40}$")   # "*" marks a shiny-clause bonus catch ("ROUTE_1*1")
+CID_RE = re.compile(r"^[A-Za-z0-9]{1,16}$")
 EVENT_TYPES = {"enc", "dead", "loc", "swap", "hof", "blackout", "balls"}
 ENC_STATUS = {"open", "caught", "failed", "skipped"}
 
@@ -47,8 +49,10 @@ def validate_event(ev) -> dict:
     if t not in EVENT_TYPES:
         raise ChallengeError("unknown event type")
     out = {"t": t}
+    if ev.get("cid") is not None:
+        out["cid"] = _str(ev.get("cid"), "cid", 16, CID_RE)
     if t == "enc":
-        out["area"] = _str(ev.get("area"), "area")
+        out["area"] = _str(ev.get("area"), "area", pattern=AREA_RE)
         dex = ev.get("dex", 0)
         if isinstance(dex, bool) or not isinstance(dex, int) or not 0 <= dex <= 255:
             raise ChallengeError("dex is invalid")
@@ -119,8 +123,10 @@ class ChallengeHub:
             with open(self.path, encoding="utf-8") as fh:
                 raw = json.load(fh)
             for rec in raw.get("challenges", []):
-                if isinstance(rec, dict) and isinstance(rec.get("id"), str):
+                if self._valid_record(rec):
                     self.records[rec["id"]] = rec
+                else:
+                    log.warning("skipping a damaged challenge record: %.200r", rec)
             log.info("loaded %d challenges", len(self.records))
         except FileNotFoundError:
             pass
@@ -130,6 +136,18 @@ class ChallengeHub:
                 os.replace(self.path, self.path + f".bad-{int(time.time())}")
             except OSError:
                 pass
+
+    @staticmethod
+    def _valid_record(rec) -> bool:
+        try:
+            return (isinstance(rec, dict) and isinstance(rec["id"], str) and rec["kind"] in KINDS
+                    and rec["game"] in GAMES and rec["status"] in ("active", "completed", "failed", "abandoned")
+                    and isinstance(rec["players"], list) and len(rec["players"]) == 2
+                    and all(isinstance(p, str) for p in rec["players"]) and isinstance(rec["names"], dict)
+                    and isinstance(rec["rules"], dict) and isinstance(rec["progress"], dict)
+                    and isinstance(rec["ledger"], list))
+        except (KeyError, TypeError):
+            return False
 
     def save_now(self):
         os.makedirs(self.data_dir, exist_ok=True)
@@ -248,6 +266,10 @@ class ChallengeHub:
             if target.uid not in rec["players"]:
                 raise ChallengeError("that challenge is with someone else")
             kind, game, rules = rec["kind"], rec["game"], rec["rules"]
+            for c in (client, target):
+                if c.games is not None and game not in c.games:
+                    who = "You don't" if c is client else f"{c.name} doesn't"
+                    raise ChallengeError(f"{who} have {GAMES[game]} (v1.0 for Crystal) added anymore")
         else:
             kind, game = msg.get("kind"), msg.get("game")
             if kind not in KINDS:
@@ -417,6 +439,8 @@ class ChallengeHub:
             return
         rec = self.records[cid]
         s.present.discard(client.uid)
+        if not s.ready:
+            return            # still loading in (the app restarts to enter a run): the load deadline covers it
         if client.uid in s.lost:
             return
         s.lost[client.uid] = asyncio.get_running_loop().create_task(self._grace(rec, s, client.uid))
@@ -435,6 +459,11 @@ class ChallengeHub:
         if rec["status"] != "active":
             return                                   # late event after the end: ignore quietly
         ev = validate_event(msg.get("event"))
+        if ev.get("cid"):
+            dup = next((e for e in reversed(rec["ledger"]) if e.get("cid") == ev["cid"] and e["p"] == client.uid), None)
+            if dup is not None:                       # a resend after a connection blip: echo the original again
+                await self.server.send(client, {"type": "challenge_event", "challenge_id": rec["id"], "event": dup})
+                return
         if len(rec["ledger"]) >= LEDGER_MAX:
             raise ChallengeError("challenge log is full")
         ev = {"seq": len(rec["ledger"]) + 1, "p": client.uid, "ts": round(time.time(), 1), **ev}

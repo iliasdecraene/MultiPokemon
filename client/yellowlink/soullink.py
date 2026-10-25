@@ -16,6 +16,7 @@ Unusable mons are moved to the PC automatically and moved back there if withdraw
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 
 log = logging.getLogger("yellowlink.soullink")
@@ -57,13 +58,13 @@ class SoulLink:
     # --- input -----------------------------------------------------------------------------------------------
     def add(self, ev: dict):
         """An event echoed by the server (ours or the partner's)."""
-        if any(e.get("seq") == ev.get("seq") for e in self.ledger[-5:]):
+        if any(e.get("seq") == ev.get("seq") for e in self.ledger[-20:]):
             return
         self.ledger.append(ev)
         if ev.get("p") == self.me:
-            sig = self._sig(ev)
+            cid, sig = ev.get("cid"), self._sig(ev)
             for i, p in enumerate(self.pending):
-                if self._sig(p) == sig:
+                if (cid and p.get("cid") == cid) or (not cid and self._sig(p) == sig):
                     del self.pending[i]
                     break
         self._cache = None
@@ -71,6 +72,7 @@ class SoulLink:
     def local(self, ev: dict) -> dict:
         """Record one of our own events before the server echoes it; returns the event to send."""
         ev = dict(ev)
+        ev.setdefault("cid", uuid.uuid4().hex[:10])     # lets the server drop a resend after a connection blip
         self.pending.append({**ev, "p": self.me, "seq": None})
         self._cache = None
         return ev
@@ -218,7 +220,9 @@ class Referee:
 
     view interface (implemented per game in challenge_view.py):
       ready() safe() battle() battle_slot() has_balls() area() area_name(area) party() box()
-      all_keys() boxes_ok() to_box(slot) to_party(box_index) hof() badges()
+      all_keys() boxes_ok() to_box(slot) to_party(box_index) hof() badges() hold()
+    hold() is True while the game hides part of the party (Crystal's Bug-Catching Contest): no scans, no forced
+    moves, no blackout/gift checks until a while after it ends.
     party()/box() return lists of MonInfo (party() None while the game is mid-update).
     send(event) sends a ledger event; notify(text, kind) shows a message ("info" | "good" | "bad").
     """
@@ -226,6 +230,7 @@ class Referee:
     SAFE_EVERY = 6            # frames between light checks while standing in the overworld
     SCAN_EVERY = 600          # frames between full PC scans (release/rollback detection)
     END_FRAMES = 8            # frames without battle data before a battle counts as over
+    HOLD_AFTER = 300          # frames to keep checks off after a party-hiding event (contest) ends
 
     def __init__(self, sl: SoulLink, view, send, notify):
         self.sl, self.view, self._send, self.notify = sl, view, send, notify
@@ -241,6 +246,9 @@ class Referee:
         self.last_badges = None
         self.progress = None          # callback(badges) set by the app
         self.ended = False
+        self.hold_until = 0
+        self.holding = False
+        self.hold_n = 0
 
     def send(self, ev):
         self._send(self.sl.local(ev))
@@ -255,9 +263,22 @@ class Referee:
         self.frame += 1
         if self.ended or not self.view.ready():
             return
+        # Crystal's Bug-Catching Contest hides all but the lead from the gate until the judging is over: stay on
+        # hold until the party is back to its size from before (the contest flag clears earlier than that).
+        if self.view.hold():
+            if not self.holding:
+                self.holding, self.hold_n = True, len(self.last_party)
+            self.hold_until = self.frame + self.HOLD_AFTER
+        elif self.holding:
+            p = self.view.party()
+            if p is not None and len(p) >= self.hold_n:
+                self.holding = False
+            else:
+                self.hold_until = self.frame + self.HOLD_AFTER
+        held = self.frame < self.hold_until
         info = self.view.battle()
         if info is not None and self.battle is None:
-            self._battle_start(info)
+            self._battle_start(info, resumed=self.fresh_load)
         if self.battle is not None:
             if info is not None:
                 self.battle["gone"] = 0
@@ -266,10 +287,10 @@ class Referee:
                 self.battle["gone"] = self.battle.get("gone", 0) + 1
                 if self.battle["gone"] >= self.END_FRAMES:
                     self.battle["over"] = True
-            if self.battle.get("over") and self._battle_end():
+            if self.battle.get("over") and self._battle_end(held):
                 self.battle = None
             return
-        if self.pc_open or self.frame % self.SAFE_EVERY or not self.view.safe():
+        if held or self.pc_open or self.frame % self.SAFE_EVERY or not self.view.safe():
             return
         self._light_check()
         if self.scan_due or self.frame % self.SCAN_EVERY == 0:
@@ -284,12 +305,15 @@ class Referee:
         self.scan_due = True
 
     # --- battles ---------------------------------------------------------------------------------------------
-    def _battle_start(self, info):
+    def _battle_start(self, info, resumed=False):
         area = self.view.area()
         b = {"info": info, "area": area, "mode": "none", "fainted": set(), "party": None, "over": False,
              "before": self._present_keys()}
         self.battle = b
         if info.get("kind") != "wild":
+            return
+        if resumed and self.sl.mine()["enc"].get(area, {}).get("status") == "open":
+            b["mode"] = "count"                      # the run was paused/reloaded in this very encounter: go on
             return
         name = self.view.area_name(area)
         rules_on = self.sl.mine()["balls"] or self.view.has_balls()
@@ -342,7 +366,7 @@ class Referee:
             nick = mon.nick or "Your Pokémon"
             self.notify(f"{nick} fainted. Rest in peace - its partner is gone too.", "bad")
 
-    def _battle_end(self) -> bool:
+    def _battle_end(self, held=False) -> bool:
         """Settle the battle once the party is readable again. Returns True when done."""
         party = self.view.party()
         if party is None:
@@ -354,7 +378,7 @@ class Referee:
                 self._kill(m, "fainted")
         rules_on = self.sl.mine()["balls"] or self.view.has_balls()
         living = [m for m in party if not m.egg]
-        if rules_on and living and all(m.hp == 0 or m.key in b["fainted"] for m in living):
+        if rules_on and not held and living and all(m.hp == 0 or m.key in b["fainted"] for m in living):
             self.send({"t": "blackout"})
             self.notify("You blacked out. The Soul Link is over...", "bad")
             self.ended = True
@@ -384,7 +408,8 @@ class Referee:
 
     # --- overworld checks ------------------------------------------------------------------------------------
     def _present_keys(self) -> set:
-        keys = {m.key for m in self.last_party}
+        party = self.view.party()
+        keys = {m.key for m in (party if party is not None else self.last_party)}
         for m in self.view.box() or []:
             keys.add(m.key)
         return keys
@@ -492,17 +517,18 @@ class Referee:
                     self.forced.add(m.key)
                     self.notify(f"Your partner put {m.nick or 'a Pokémon'}'s partner in the PC, so it went to "
                                 f"yours too.")
-                return
+                    return
+                self.tell_once(f"follow:{m.key}", f"Your partner boxed {m.nick or 'a Pokémon'}'s partner - please "
+                                                  f"put it in the PC too (your box is full or it's your last one).")
         for j, m in enumerate(box):
             if sl.usable(m.key) and sl.partner_moved_last(m.key) and sl.desired_location(m.key) == "party":
                 if len(party) < 6 and self.view.to_party(j):
                     self.forced.add(m.key)
                     self.notify(f"Your partner took {m.nick or 'a Pokémon'}'s partner out of the PC, so it joined "
                                 f"your party too.")
-                else:
-                    self.tell_once(f"wd:{m.key}", f"Your partner withdrew {m.nick or 'a Pokémon'}'s partner - "
-                                                  f"make room in your party for it.")
-                return
+                    return
+                self.tell_once(f"wd:{m.key}", f"Your partner withdrew {m.nick or 'a Pokémon'}'s partner - "
+                                              f"make room in your party for it.")
 
     def _any_usable(self) -> bool:
         return any(self.sl.usable(k) for k in self.sl.mine()["keys"])

@@ -1775,6 +1775,9 @@ class App(ChallengeMixin):
             log.exception("shutdown save failed")
         self.chal_shutdown()
         self.net.stop()
+        thread = getattr(self.net, "_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.5)          # let the last messages (e.g. "left the challenge") go out
         pygame.quit()
 
 
@@ -1809,12 +1812,14 @@ def main(argv=None):
 
 
 def _main(argv, cfg, diag):
+    # Always start in the main game (crashed or closed inside a challenge), and before the settings window: an
+    # imported save must never land in a challenge's save folder.
+    if cfg.pop("active_challenge", None):
+        cfg.save()
     if "--setup" in argv or not cfg.is_complete():
         from .setup_dialog import run_setup
         if not run_setup(cfg, first_run=not cfg.is_complete()):
             return
-    if cfg.pop("active_challenge", None):      # crashed/closed inside a challenge: start in the main game
-        cfg.save()
     while True:
         errors_before = diag.errors
         app = App(cfg, diag)
@@ -1823,9 +1828,9 @@ def _main(argv, cfg, diag):
             cfg["active_challenge"] = app.enter_challenge
             cfg.save()
             continue
-        if app.leave_challenge:
-            cfg.pop("active_challenge", None)
+        if cfg.pop("active_challenge", None) is not None:   # any other way out of a challenge: main game next
             cfg.save()
+        if app.leave_challenge:
             if app.travel_to:
                 library.Library(cfg, app_dir()).set_current(app.travel_to)
             continue

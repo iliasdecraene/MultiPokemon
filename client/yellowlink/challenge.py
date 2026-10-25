@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 
 from . import library, ui
 from .soullink import Referee, SoulLink
@@ -26,7 +27,8 @@ class ChallengeMixin:
         self.chal_wait = "load" if self.chal else None    # None | "load" | "lost" | "offline"
         self.chal_wait_name = ""
         self.chal_popup = None               # {"title", "lines", "until", "then"}
-        self.chal_outbox: list = []          # events made while offline
+        self.chal_outbox: list = []          # our rule events not yet confirmed by the server (resent until echoed)
+        self.chal_sent: dict = {}            # cid -> time last sent
         self.enter_challenge = None          # set -> main loop restarts into that challenge
         self.leave_challenge = False         # set -> main loop restarts into the main game
         self.chal_form = None                # new-challenge form {"uid", "name", "game", "dupes", "shiny"}
@@ -136,9 +138,16 @@ class ChallengeMixin:
         if "id" not in c:
             return
         self.challenges[c["id"]] = c
-        if c.get("game") not in self.lib.games:
+        if not self._game_supported(c.get("game")):
             self.net.send({"type": "challenge_leave", "challenge_id": c["id"], "reason": "game missing"})
-            self.toast("You don't have that game added (Regions).", 6, ui.BAD)
+            self.toast("You don't have that game added (Regions; Crystal needs v1.0).", 6, ui.BAD)
+            return
+        if c.get("events", 0) > 0 and not self.has_challenge_save(c["id"]):
+            # continuing a run whose save isn't on this computer would start over and kill everything
+            self.net.send({"type": "challenge_leave", "challenge_id": c["id"], "reason": "save missing"})
+            self.chal_end_popup_home("Can't continue here", [
+                "The save for this Soul Link isn't on this computer.",
+                ("Continue it from the computer you started it on.", ui.DIM)])
             return
         if self.chal:
             return
@@ -157,7 +166,10 @@ class ChallengeMixin:
         self.challenges[rec["id"]] = {k: v for k, v in rec.items() if k != "ledger"}
         partner, _ = self.chal_partner(rec)
         sl = SoulLink(self.cfg["uid"], partner, rec.get("rules"), rec.get("ledger", []))
-        for ev in self.chal_outbox:                   # made while we were offline: still ours
+        logged = {e.get("cid") for e in rec.get("ledger", []) if e.get("p") == self.cfg["uid"]}
+        self.chal_outbox = [ev for ev in self.chal_outbox if ev.get("cid") not in logged]
+        self.chal_sent.clear()                         # resend everything not in the server's log yet
+        for ev in self.chal_outbox:
             sl.local(ev)
         self.sl = sl
         if self.referee:
@@ -197,7 +209,9 @@ class ChallengeMixin:
         reason = msg.get("reason", "left")
         why = {"disconnected": "lost their connection", "closed the game": "closed the game",
                "paused": "paused the challenge", "didn't load in": "didn't load in", "abandoned": "abandoned it",
-               "travelled": "went back to their adventure"}.get(reason, reason)
+               "travelled": "went back to their adventure",
+               "save missing": "doesn't have this run's save on their computer",
+               "game missing": "doesn't have the game for this run"}.get(reason, reason)
         self.chal_end_popup(f"{msg.get('name', 'Your partner')} left",
                             [f"{msg.get('name', 'Your partner')} {why}.",
                              ("Taking you back to where you left off in your main game.", ui.DIM),
@@ -209,6 +223,10 @@ class ChallengeMixin:
         ev = msg.get("event") or {}
         self.sl.add(ev)
         if ev.get("p") == self.cfg["uid"]:
+            cid = ev.get("cid")
+            if cid:
+                self.chal_outbox = [e for e in self.chal_outbox if e.get("cid") != cid]
+                self.chal_sent.pop(cid, None)
             return
         _, partner = self.chal_partner()
         area = self.referee.view.area_name(ev.get("area", "")) if self.referee and ev.get("area") else ""
@@ -222,17 +240,24 @@ class ChallengeMixin:
 
     # --- referee callbacks ---------------------------------------------------------------------------------
     def _chal_send(self, ev):
+        ev = dict(ev)
+        if not ev.get("cid"):
+            ev["cid"] = uuid.uuid4().hex[:10]          # every queued event needs its own id (resend/dedupe)
         self.chal_outbox.append(ev)
         self._chal_flush()
 
     def _chal_flush(self):
-        if not self.chal or self.net.status != "online" or self.chal_wait == "offline":
+        """Send rule events; keep each until the server echoes it (a silent connection drop loses the queue)."""
+        if not self.chal or self.net.status != "online" or self.chal_wait == "offline" or self.sl is None:
             return
-        while self.chal_outbox:
-            ev = self.chal_outbox[0]
+        now = time.time()
+        for ev in self.chal_outbox:
+            last = self.chal_sent.get(ev.get("cid"))
+            if last is not None and now - last < 10:
+                continue
             if not self.net.send({"type": "challenge_event", "challenge_id": self.chal["id"], "event": ev}):
                 return
-            self.chal_outbox.pop(0)
+            self.chal_sent[ev.get("cid")] = now
 
     def _chal_notify(self, text, kind="info"):
         color = {"good": ui.GOOD, "bad": ui.BAD}.get(kind, ui.ACCENT)
@@ -255,6 +280,8 @@ class ChallengeMixin:
     def chal_step(self):
         if self.chal_popup and time.time() > self.chal_popup["until"]:
             self.chal_close_popup()
+        if self.chal_outbox and self.frame % 120 == 0:
+            self._chal_flush()
         if self.chal and self.referee and not self.chal_wait and not self.chal_popup:
             try:
                 self.referee.step()
@@ -337,7 +364,25 @@ class ChallengeMixin:
         self.chal_form = None
         self.close_panel()
 
+    def has_challenge_save(self, cid) -> bool:
+        d = self.cfg.challenge_dir(cid)
+        return (d / "game.sav").exists() or (d / "resume.state").exists()
+
+    def chal_end_popup_home(self, title, lines):
+        """A pop-up shown in the main game (nothing to leave)."""
+        self.release_all()
+        self.close_panel()
+        self.chal_popup = {"title": title, "lines": lines, "until": time.time() + 12}
+        self.mode = "chal_popup"
+
     def continue_challenge(self, c):
+        if not self._game_supported(c.get("game")):
+            self.toast("You need that game added (Regions; Crystal needs v1.0).", 5, ui.BAD)
+            return
+        if not self.has_challenge_save(c["id"]):
+            self.toast("This run's save isn't on this computer - continue from the one you started on.", 6,
+                       ui.BAD)
+            return
         uid, name = self.chal_partner(c)
         self.net.send({"type": "challenge_request", "to": uid, "challenge_id": c["id"]})
         self.toast(f"Asked {name} to continue your Soul Link...", 4)
