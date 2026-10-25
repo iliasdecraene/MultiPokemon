@@ -28,3 +28,10 @@ venv/
 *.log
 .DS_Store
 Thumbs.db
+
+# --- Local AI-assistant notes (kept per machine, not shared) ---
+CLAUDE.md
+MEMORY.md
+
+# --- Dev harness inputs (ROM + save states, see dev/README.md) ---
+dev/states/
