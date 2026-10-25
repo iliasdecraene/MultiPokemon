@@ -536,7 +536,11 @@ class App:
         if self.chat_scroll:
             self.chat_scroll += 1
         mine = msg.get("uid") == self.cfg["uid"]
-        self.chat_log.append((msg.get("name", "?"), msg.get("text", ""), ui.CHAT_SELF if mine else ui.TEXT))
+        game_id = msg.get("game") or (self.game_id if mine else (self.friends.get(msg.get("uid")) and
+                                                                   self.friend_game(msg.get("uid"))))
+        region = library.region_name(game_id)
+        who = msg.get("name", "?") + (f" · {region}" if region else "")
+        self.chat_log.append((who, msg.get("text", ""), ui.CHAT_SELF if mine else ui.TEXT))
 
     def on_system(self, msg):
         self.sys_msg(msg.get("text", ""))
@@ -549,6 +553,13 @@ class App:
         self.sys_msg("Server: " + msg.get("message", "error"), ui.BAD)
 
     # trades -------------------------------------------------------------
+    def player_region(self, e) -> str:
+        """Region label for a roster entry (yourself: the game you're playing right now)."""
+        if e.get("uid") == self.cfg["uid"]:
+            return library.region_name(self.game_id)
+        f = self.friends.get(e.get("uid"))
+        return library.region_name((f.state or {}).get("game") if f and f.state else e.get("game"))
+
     def friend_game(self, uid) -> str:
         f = self.friends.get(uid)
         return (f.state or {}).get("game", "yellow") if f else "yellow"

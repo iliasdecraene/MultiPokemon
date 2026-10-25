@@ -69,6 +69,9 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
         text(surf, f.body, e.get("name", "?"), (row.x + 32, row.y + 9), TEXT if online else DIM)
         lv = e.get("levels") or []
         info = ("online" if online else "offline") + f" · {len(lv)} Pokémon" + (f" · Lv {max(lv)}" if lv else "")
+        region = app.player_region(e)
+        if region:
+            info = f"in {region} · " + info
         if app.is_nearby(uid):
             info = "nearby · " + info
         text(surf, f.small, info, (row.right - 12, row.y + 11), DIM, anchor="topright")

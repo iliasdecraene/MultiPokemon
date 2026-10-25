@@ -38,6 +38,12 @@ REGIONS = [
 ]
 
 
+def region_name(game_id) -> str:
+    """'Kanto' / 'Johto' for a game id, '' if unknown (e.g. still on the title screen)."""
+    info = GAMES_BY_ID.get(game_id or "")
+    return next((name for rid, name, _ in REGIONS if info and rid == info.region), "")
+
+
 def sha1_file(path) -> str:
     h = hashlib.sha1()
     with open(path, "rb") as f:

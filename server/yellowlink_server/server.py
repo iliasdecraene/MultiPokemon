@@ -279,6 +279,8 @@ class YellowLinkServer:
                 "uid": uid,
                 "name": self.clients[uid].name if online else p.get("name", "?"),
                 "trainer": p.get("trainer", ""),
+                "game": (self.clients[uid].state or {}).get("game") if online and self.clients[uid].state
+                else p.get("game"),
                 "online": online,
                 "party_size": len(species),
                 "levels": levels,
@@ -466,6 +468,8 @@ class YellowLinkServer:
         state["game"] = game
         client.state = state
         await self.broadcast({"type": "state", "uid": client.uid, **state}, exclude=client)
+        if self.store.set_game(client.uid, game):
+            await self.broadcast_roster()           # the trainer list shows everyone's region
 
     async def on_sprite(self, client: Client, msg: dict) -> None:
         _b64(msg.get("data"), SPRITE_BYTES, "sprite data")
@@ -482,7 +486,7 @@ class YellowLinkServer:
         if not isinstance(trainer, str):
             raise Invalid("trainer must be a string")
         trainer = clean_text(trainer, 20)
-        badges = _int(msg, "badges", 0, 255)
+        badges = _int(msg, "badges", 0, 0xFFFF)     # Crystal: Johto badges | Kanto badges << 8
         if self.store.set_party(client.uid, mons, trainer, badges):
             await self.broadcast_roster()
 
@@ -494,7 +498,9 @@ class YellowLinkServer:
         if not text:
             return
         log.info("chat <%s> %s", client.name, text)
-        await self.broadcast({"type": "chat", "uid": client.uid, "name": client.name, "text": text})
+        # chat goes to everyone, whatever game they're in; "game" lets clients show the sender's region
+        game = (client.state or {}).get("game") or (self.store.get(client.uid) or {}).get("game")
+        await self.broadcast({"type": "chat", "uid": client.uid, "name": client.name, "text": text, "game": game})
 
     async def on_get_party(self, client: Client, msg: dict) -> None:
         uid = msg.get("uid")

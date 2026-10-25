@@ -138,7 +138,10 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
         dot = GOOD if online else (90, 94, 110)
         pygame.draw.circle(surf, dot, (x + 5, y + 8), 4)
         nm = e.get("name", "?") + (" (you)" if e.get("uid") == app.cfg["uid"] else "")
-        text(surf, f.small, nm, (x + 16, y), TEXT if online else DIM)
+        nr = text(surf, f.small, nm, (x + 16, y), TEXT if online else DIM)
+        region = app.player_region(e)
+        if region:
+            text(surf, f.small, " · " + region, (nr.right, y), DIM)
         lv = e.get("levels") or []
         info = f"{len(lv)} mon" + (f" · Lv{max(lv)}" if lv else "")
         if app.is_nearby(e.get("uid")):
@@ -202,7 +205,9 @@ def draw_chat(surf, f: Fonts, app, r):
             prefix = who + ": "
             wrapped = wrap(f.small, prefix + msg, width)
             first = wrapped[0]
-            lines.append([(prefix, name_color(who)), (first[len(prefix):], color)] if first.startswith(prefix)
+            name, _, region = who.partition(" · ")      # "Ash · Kanto": name in its colour, region dimmed
+            head = [(name, name_color(name))] + ([(" · " + region, DIM)] if region else []) + [(": ", name_color(name))]
+            lines.append(head + [(first[len(prefix):], color)] if first.startswith(prefix)
                          else [(first, color)])
             lines.extend([[(ln, color)] for ln in wrapped[1:]])
         else:

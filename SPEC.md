@@ -74,7 +74,7 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `hello` | `name` (1-10 chars, A-Z a-z 0-9 space), `uid` (client-generated uuid4 string, persistent), `key` (room password), `version` (client semver), `protocol` (int) | must be first message. Wrong key -> `error` + close(4001). Duplicate uid already connected -> the old connection is kicked (close 4002). |
 | `state` | `map` int, `x` int, `y` int, `px` int, `py` int, `facing` int (0 down,4 up,8 left,12 right), `img` int (sprite image index byte 0..15), `visible` bool, `game` str (`yellow`/`crystal`, default `yellow`) | ~10/s, only when changed (plus a keepalive every 2 s). px/py = pixel position in map space (tile*16 + walk offset). |
 | `sprite` | `data` b64 (384 bytes: 12 tiles @VRAM 0x8000 + 12 tiles @0x8800) | send on change only |
-| `party` | `mons` list[Mon] (0..6), `trainer` str (player's in-game name, decoded), `badges` int (bitfield) | send on change (client checks every ~3 s) |
+| `party` | `mons` list[Mon] (0..6), `trainer` str (player's in-game name, decoded), `badges` int (bitfield, 0..65535: Crystal sends johto \| kanto << 8) | send on change (client checks every ~3 s) |
 | `chat` | `text` (<=200 chars) | |
 | `get_party` | `uid` | ask for someone's latest party snapshot (online or offline) |
 | `battle_result` | `opponent_uid`, `won` bool | server broadcasts a system message |
@@ -96,9 +96,9 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `player_leave` | `uid` |
 | `state` | `uid` + all state fields (relayed to everyone else) |
 | `sprite` | `uid`, `data` (also replayed to newly joined clients for all online players) |
-| `chat` | `uid`, `name`, `text` |
+| `chat` | `uid`, `name`, `text`, `game` (sender's current game id or null; chat goes to everyone, all regions) |
 | `system` | `text` (join/leave/battle results/trade completed) |
-| `roster` | `roster` list[RosterEntry] (re-sent whenever any party snapshot changes or someone joins/leaves) |
+| `roster` | `roster` list[RosterEntry] (re-sent whenever any party snapshot changes, someone changes game, or someone joins/leaves). RosterEntry includes `game` (current game if online, else last known; may be null) |
 | `party_data` | `uid`, `name`, `trainer`, `mons` list[Mon] (or `error` if unknown) |
 | `trade_request` | `trade_id`, `from` uid, `name` |
 | `trade_started` | `trade_id`, `with` uid, `name` (sent to both after accept) |

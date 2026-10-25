@@ -560,3 +560,23 @@ async def test_cross_game_trade_cannot_be_confirmed(connect_client):
     await a.send(type="trade_confirm", trade_id=tid)
     err = await a.expect("error")
     assert "same game" in err["message"]
+
+
+async def test_chat_and_roster_carry_region(connect_client):
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    await b.send(**state_msg(game="crystal", map=6148))
+    r = await a.expect("roster", timeout=3)
+    while not any(e["uid"] == b.uid and e.get("game") == "crystal" for e in r["roster"]):
+        r = await a.expect("roster")
+    await b.send(type="chat", text="hello from johto")
+    msg = await a.expect("chat", text="hello from johto")
+    assert msg["game"] == "crystal" and msg["name"] == "Alex"
+    await a.send(type="chat", text="no state yet")
+    assert (await b.expect("chat", text="no state yet"))["game"] is None
+
+
+async def test_crystal_badges_above_255(connect_client):
+    a = await connect_client("Ilias")
+    await a.send(type="party", mons=[make_crystal_mon()], trainer="CHRIS", badges=0x01FF)
+    await a.expect_none("error")

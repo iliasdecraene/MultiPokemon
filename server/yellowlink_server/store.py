@@ -96,6 +96,15 @@ class PlayerStore:
         p["last_seen"] = time.time()
         self.schedule_save()
 
+    def set_game(self, uid: str, game: str) -> bool:
+        """Remember which game (region) a player is in. Returns True if it changed."""
+        p = self.players.get(uid)
+        if p is None or p.get("game") == game:
+            return False
+        p["game"] = game
+        self.schedule_save()
+        return True
+
     def set_party(self, uid: str, mons: list, trainer: str, badges: int) -> bool:
         """Store a party snapshot. Returns True if anything changed."""
         p = self.players.get(uid)
