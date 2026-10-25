@@ -105,7 +105,7 @@ def _region_game(app, region_id, installed_here):
 def draw_regions(surf, f, app, game_w, game_h, offset):
     r = _panel_frame(surf, app, f, game_w, game_h, "Regions", offset)
     y = r.y + 56
-    text(surf, f.small, "One game per region is enough. Each region keeps its own progress.", (r.x + 18, y), DIM)
+    text(surf, f.small, "Kanto = Pokémon Yellow, Johto = Pokémon Crystal. Each keeps its own progress.", (r.x + 18, y), DIM)
     y += 30
     installed = app.lib.games
     for region_id, region_name, game_ids in library.REGIONS:
@@ -118,8 +118,8 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
         text(surf, f.title, region_name, (card.x + 14, card.y + 8), ACCENT if here else TEXT)
         br = pygame.Rect(card.right - 140, card.y + 12, 126, 36)
         if not have:
-            names = [library.GAMES_BY_ID[g].title.replace("Pokémon ", "") for g in game_ids]
-            text(surf, f.small, "Add any one of: " + ", ".join(names[:-1]) + " or " + names[-1],
+            names = [library.GAMES_BY_ID[g].title for g in game_ids]
+            text(surf, f.small, "Add your " + " / ".join(names) + " game file to unlock this region",
                  (card.x + 14, card.y + 40), DIM)
         else:
             gid = _region_game(app, region_id, have)
@@ -151,5 +151,5 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
         y = card.bottom + 10
     button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 48, 200, 36), "Add a game file...", app.add_rom_dialog,
            offset=offset)
-    text(surf, f.small, "Kanto: Red/Blue/Yellow  ·  Johto: Gold/Silver/Crystal",
+    text(surf, f.small, "Kanto: Pokémon Yellow  ·  Johto: Pokémon Crystal",
          (r.x + 230, r.bottom - 40), DIM)

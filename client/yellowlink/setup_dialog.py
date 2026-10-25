@@ -76,8 +76,8 @@ def run_setup(cfg, first_run: bool) -> bool:
             return
         info = library.identify(rom)
         if info is None:
-            messagebox.showerror("YellowLink", "That file isn't a supported English Pokémon Red, Blue, Yellow,\n"
-                                               "Gold, Silver or Crystal game file.")
+            messagebox.showerror("YellowLink", "That file isn't English Pokémon Yellow or Crystal.\n"
+                                               "Those are the two games YellowLink supports.")
             return
         sav = sav_var.get().strip().strip('"')
         if sav:

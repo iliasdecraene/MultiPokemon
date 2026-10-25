@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pygame
 
-from . import __version__, game, library, panels, pvp, sprites, ui, updater, worldview
+from . import __version__, game, library, panels, pcdb, pvp, sprites, ui, updater, worldview
 from .audio import AudioOut
 from .config import Config, app_dir
 from .diag import Diagnostics, send_report_sync, show_report_window
@@ -116,6 +116,9 @@ class App:
         self.game_id = self.lib.current or "yellow"
         self.game_info = self.lib.info(self.game_id)
         self.travel_to = None
+        self.pcsync = pcdb.PCSync(app_dir() / "pc" / f"{cfg['uid']}.json")
+        self.pc_codec = None
+        self.pc_trust = False        # True once the game's boxes are known to match our last view
         self.panel = None            # None | "multiplayer" | "regions"
         self.panel_sel = None        # selected uid in the multiplayer panel
         self.click_targets = []      # [(screen Rect, callback, label)] rebuilt every frame
@@ -249,6 +252,9 @@ class App:
         if self.full:
             self.hooks = pvp.LinkHooks(self.pyboy, self._send_battle_move)
             self.wv = worldview.WorldView(self.rom.rom, margin_x=WIDE_MX, margin_y=WIDE_MY)
+            self.pc_codec = pcdb.Gen1PC(self.pyboy.memory, self.rom)
+            self.pyboy.hook_register(0x08, 0x546F, self._hook_safe(self.on_pc_open), None)    # BillsPC_
+            self.pyboy.hook_register(0x08, 0x553E, self._hook_safe(self.on_pc_close), None)   # ExitBillsPC
         else:
             log.info("%s: multiplayer features, live battles and wide view are Yellow-only for now", self.game_id)
             if self.wide:
@@ -277,6 +283,7 @@ class App:
             with open(path, "rb") as f:
                 self.pyboy.load_state(f)
             self.last_sram = self._read_sram()
+            self.pc_trust = True     # snapshots are always taken together with a PC commit
             log.info("resumed %s from snapshot (%s)", self.game_id, time.ctime(path.stat().st_mtime))
             return True
         except Exception:  # noqa: BLE001 - corrupt/old snapshot: fall back to the normal save
@@ -304,6 +311,9 @@ class App:
         ok = write_atomic(self.cfg.resume_path, buf.getvalue())
         if ok:
             self.flush_sram()
+            store = self.pcsync.commit()
+            if store:
+                self.net.send({"type": "pc_put", "store": store})
         return ok
 
     def _loading_screen(self, msg):
@@ -386,7 +396,7 @@ class App:
             return False
         f = self.friends.get(uid)
         return bool(f and f.state and self.game.in_game() and f.state.get("map") == self.game.m[game.CUR_MAP]
-                    and f.state.get("visible"))
+                    and f.state.get("visible") and f.state.get("game", "yellow") == self.game_id)
 
     # -------------------------------------------------------------- network
     def handle_net(self):
@@ -401,6 +411,7 @@ class App:
 
     def on_connected(self, msg):
         log.info("connected to %s", self.cfg["server_url"])
+        self.net.send({"type": "pc_get"})
         self.last_state_sent = None
         self.last_sprite_sent = None
         self.last_party_sent = None
@@ -834,6 +845,7 @@ class App:
         if self.frame % STATE_SEND_EVERY == 0:
             st = g.position()
             st["visible"] = g.in_game()  # stay visible (at your last spot) in menus and battles too
+            st["game"] = self.game_id
             st["type"] = "state"
             now = time.time()
             if st != self.last_state_sent or now - self.last_state_time > 2:
@@ -860,6 +872,55 @@ class App:
                     self.last_party_sent = key
 
     # ---------------------------------------------------------------- input
+    # PC database ---------------------------------------------------------------
+    def _hook_safe(self, fn):
+        def wrapped(_ctx):
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 - never break the emulator from a hook
+                log.exception("PC hook failed")
+        return wrapped
+
+    def on_pc_open(self):
+        if not self.pc_codec:
+            return
+        boxes = self.pcsync.open_session(self.game_id, self.pc_codec, trust_game=self.pc_trust)
+        self.pc_codec.write_boxes(boxes)
+        self.pc_trust = True
+        log.info("PC opened: %d mons in the database", self.pcsync.count())
+
+    def on_pc_close(self):
+        if not self.pc_codec or not self.pcsync.session_open:
+            return
+        report = self.pcsync.close_session(self.game_id, self.pc_codec, game.party_records(self.game))
+        for slot in sorted(report["standin_party_slots"], reverse=True):
+            game.remove_party_slot(self.game, slot)
+        if report["standins_returned"]:
+            names = ", ".join(n.title() for n in report["standins_returned"][:3])
+            self.toast(f"{names} can't leave the PC here - they live in another region.", 6, ui.ACCENT)
+        log.info("PC closed: +%d -%d (pending=%s)", report["added"], report["removed"], self.pcsync.pending)
+
+    def on_pc_data(self, msg):
+        store = msg.get("store")
+        local = self.pcsync.committed
+        if store is None or store.get("rev", 0) < local.get("rev", 0):
+            if local.get("rev", 0) > 0:
+                self.net.send({"type": "pc_put", "store": local})     # server is behind: catch it up
+        elif store.get("rev", 0) > local.get("rev", 0):
+            if self.pcsync.adopt_remote(store):
+                self.pc_trust = False                                 # boxes in this game are now stale
+                self.sys_msg("Your PC boxes were updated from the server.", ui.GOOD)
+
+    def on_pc_conflict(self, msg):
+        if self.pcsync.adopt_remote(msg.get("store")):
+            self.pc_trust = False
+            self.sys_msg("Your PC boxes were updated from the server.", ui.GOOD)
+        else:
+            log.warning("PC store conflict could not be resolved yet (pending changes)")
+
+    def on_pc_saved(self, msg):
+        log.info("PC store saved on the server (rev %s)", msg.get("rev"))
+
     # chat / view --------------------------------------------------------------
     def focus_chat(self):
         if self.mode not in ("play", "panel", "chat"):
@@ -1348,7 +1409,7 @@ class App:
         layer.fill((0, 0, 0, 0))
         for f in self.friends.values():
             st = f.state
-            if not st or not f.sprite or not st.get("visible"):
+            if not st or not f.sprite or not st.get("visible") or st.get("game", "yellow") != self.game_id:
                 continue
             shift = (0, 0)
             if st.get("map") != me["map"]:

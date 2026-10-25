@@ -434,3 +434,23 @@ def fast_continue(pyboy, max_frames: int = 3000, on_progress=None) -> str:
             f += 3
             last_press = f
     return "timeout"
+
+
+def remove_party_slot(gm: "GameMemory", slot: int):
+    """Remove one Pokémon from the party, shifting the rest up (like the game does)."""
+    n = gm.m[PARTY_COUNT]
+    if not 0 <= slot < n:
+        return
+    party = gm.party()
+    del party[slot]
+    gm.m[PARTY_COUNT] = n - 1
+    for i in range(6):
+        gm.m[PARTY_SPECIES + i] = party[i].species if i < len(party) else 0xFF
+    gm.m[PARTY_SPECIES + 6] = 0xFF
+    for i, mon in enumerate(party):
+        gm.write_party_slot(i, mon)
+
+
+def party_records(gm: "GameMemory") -> list:
+    """Party as 55-byte box-style records (first 33 struct bytes + OT + nickname) for the PC database."""
+    return [m.data[:33] + m.ot + m.nick for m in gm.party()]

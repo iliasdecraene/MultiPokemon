@@ -70,7 +70,7 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | type | fields | notes |
 |---|---|---|
 | `hello` | `name` (1-10 chars, A-Z a-z 0-9 space), `uid` (client-generated uuid4 string, persistent), `key` (room password), `version` (client semver), `protocol` (int) | must be first message. Wrong key -> `error` + close(4001). Duplicate uid already connected -> the old connection is kicked (close 4002). |
-| `state` | `map` int, `x` int, `y` int, `px` int, `py` int, `facing` int (0 down,4 up,8 left,12 right), `img` int (sprite image index byte 0..15), `visible` bool | ~10/s, only when changed (plus a keepalive every 2 s). px/py = pixel position in map space (tile*16 + walk offset). |
+| `state` | `map` int, `x` int, `y` int, `px` int, `py` int, `facing` int (0 down,4 up,8 left,12 right), `img` int (sprite image index byte 0..15), `visible` bool, `game` str (`yellow`/`crystal`, default `yellow`) | ~10/s, only when changed (plus a keepalive every 2 s). px/py = pixel position in map space (tile*16 + walk offset). |
 | `sprite` | `data` b64 (384 bytes: 12 tiles @VRAM 0x8000 + 12 tiles @0x8800) | send on change only |
 | `party` | `mons` list[Mon] (0..6), `trainer` str (player's in-game name, decoded), `badges` int (bitfield) | send on change (client checks every ~3 s) |
 | `chat` | `text` (<=200 chars) | |
@@ -247,3 +247,49 @@ silently — **no error message**. A player can be in at most one trade or battl
    - `00:2149 Serial_SendZeroByte`: emulate `ret`.
 4. Battle over when `wIsInBattle` returns to 0: result from `wBattleResult` (CF0B: 0 win, 1 lose, 2 draw); wait ~3 s
    (result screen), send `battle_end`, restore the snapshot.
+
+---------------------------------------------------------------------------------------------------
+## 5. PC database ("live HOME") — added in 0.5.0
+
+Each player's stored Pokémon live in **one database per player**, not in the games. A game's PC boxes are a *view*
+of it, refreshed whenever the player opens Bill's PC and harvested when they leave it.
+
+### Data model (JSON)
+```
+PCStore = {"version": 1, "rev": int, "boxes": [[Entry, ...] x 14], "linked": ["yellow", ...]}
+Entry   = {"id": "<uuid4 hex>", "origin": "yellow"|"crystal", "dex": int, "level": int, "nick": str, "ot": str,
+           "otid": int, "gen1": "<b64 33+11+11 bytes>" | null, "gen2": "<b64 ...>" | null}
+```
+- 14 boxes of up to 20 (Crystal has 14; Yellow shows boxes 1-12 — 13/14 are only visible in Crystal).
+- `gen1`/`gen2` hold the exact game bytes (box_struct + OT name + nickname) of the last version seen in that
+  generation, so a Pokémon that never leaves its game round-trips byte-identically. Readable fields (dex, level, names)
+  are for UI/conversion only.
+- A Pokémon that can't exist in a game (e.g. Johto species/moves in Yellow) is shown there as a **stand-in**:
+  Ditto with nickname `?NAME` (first 9 letters), OT name `YLINK`, OT ID 0. Stand-ins can't be withdrawn or released:
+  if one shows up in the party, or disappears from the boxes, YellowLink puts it back. The real data is never touched.
+
+### Sync rules (client)
+- Open (hook `BillsPC_` 08:546F): (1) **reconcile** — diff the game's current boxes against `last_view` (what we
+  last wrote/saw) and apply any changes to the store; (2) **materialise** — write the store's view into all 12 boxes
+  (current box → WRAM `wBoxDataStart`, others → SRAM bank 2/3 slots with per-box + per-bank checksums; set
+  `wCurrentBoxNum` bit 7); (3) remember that as `last_view`.
+- Close (hook `ExitBillsPC` 08:553E): diff the game's boxes against `last_view` → **pending** changes:
+  appear = new Entry (deposit), vanish = removed (withdraw/release), identical bytes = same Entry (moves).
+  Stand-in rules applied. `last_view` := game's boxes.
+- **Commit** happens only when an auto-resume snapshot is written (overworld, idle): pending → committed store +
+  `last_view` saved together to `%APPDATA%/YellowLink/pc/store.json` (atomic), then pushed to the server. A crash rolls
+  the game back to the previous snapshot *and* the store back to the previous commit, so they always agree.
+- First contact of a game (not in `linked`): its existing boxes are imported (appended into free box space), then
+  the game is added to `linked`.
+
+### Protocol
+| dir | type | fields |
+|---|---|---|
+| C→S | `pc_get` | — |
+| S→C | `pc_data` | `store` (PCStore or null if none yet) |
+| C→S | `pc_put` | `store` (full PCStore, `rev` = previous rev + 1) |
+| S→C | `pc_saved` | `rev` |
+| S→C | `pc_conflict` | `store` (server's newer copy) — sent if `store.rev` <= server rev |
+Server keeps `<data_dir>/pc/<uid>.json` (atomic writes, last 5 revisions kept as backups). Max message 256 KB.
+Client: on connect sends `pc_get`; if the server copy has a higher `rev` than the local one (played on another PC),
+it replaces the local store **only while no PC session is open and nothing is pending**.

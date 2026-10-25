@@ -34,13 +34,13 @@ def test_known_games_cover_regions():
 def test_add_and_switch(tmp_path, monkeypatch):
     rom = tmp_path / "game.gb"
     rom.write_bytes(b"\x00" * 64)
-    monkeypatch.setitem(library.KNOWN_GAMES, library.sha1_file(rom), library.GAMES_BY_ID["red"])
+    monkeypatch.setitem(library.KNOWN_GAMES, library.sha1_file(rom), library.GAMES_BY_ID["crystal"])
     cfg = FakeCfg()
     lib = library.Library(cfg, tmp_path / "app")
     info = lib.add_rom(str(rom))
-    assert info.id == "red" and "red" in lib.games
-    assert (tmp_path / "app" / "roms" / "red.gb").exists()
-    lib.set_current("red")
-    assert lib.current == "red" and cfg["rom_path"].endswith("red.gb")
-    assert lib.save_path().name == "red.sav" and lib.resume_path().name == "red.state"
+    assert info.id == "crystal" and "crystal" in lib.games
+    assert (tmp_path / "app" / "roms" / "crystal.gbc").exists()
+    lib.set_current("crystal")
+    assert lib.current == "crystal" and cfg["rom_path"].endswith("crystal.gbc")
+    assert lib.save_path().name == "crystal.sav" and lib.resume_path().name == "crystal.state"
     json.dumps(cfg)  # config stays serialisable

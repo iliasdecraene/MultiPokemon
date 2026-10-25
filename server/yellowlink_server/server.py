@@ -24,7 +24,7 @@ from .store import PlayerStore
 
 log = logging.getLogger("yellowlink.server")
 
-MAX_MESSAGE_BYTES = 64 * 1024
+MAX_MESSAGE_BYTES = 256 * 1024   # a full PC store is ~100-150 KB
 RATE_LIMIT_PER_SEC = 30
 HELLO_TIMEOUT = 10.0
 TRADE_REQUEST_TIMEOUT = 60.0
@@ -456,6 +456,10 @@ class YellowLinkServer:
         if not isinstance(vis, bool):
             raise Invalid("visible must be a boolean")
         state["visible"] = vis
+        game = msg.get("game", "yellow")       # older clients only ever play Yellow
+        if not isinstance(game, str) or not re.fullmatch(r"[a-z0-9]{1,16}", game):
+            raise Invalid("game must be a short lowercase id")
+        state["game"] = game
         client.state = state
         await self.broadcast({"type": "state", "uid": client.uid, **state}, exclude=client)
 
@@ -864,7 +868,65 @@ class YellowLinkServer:
             return  # nothing to leave: ignore silently
         await self._abort_battle_of(client, disconnected=False)
 
+    # ------------------------------------------------------- PC database (SPEC section 5)
+    def _pc_path(self, uid: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9_-]", "", uid)[:64] or "unknown"
+        folder = os.path.join(self.config.data_dir, "pc")
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, f"{safe}.json")
+
+    def _pc_load(self, uid: str):
+        try:
+            with open(self._pc_path(uid), encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _pc_valid(store) -> bool:
+        if not isinstance(store, dict) or not isinstance(store.get("rev"), int) or store["rev"] < 1:
+            return False
+        boxes = store.get("boxes")
+        if not isinstance(boxes, list) or len(boxes) != 14:
+            return False
+        for box in boxes:
+            if not isinstance(box, list) or len(box) > 20:
+                return False
+            for e in box:
+                if not isinstance(e, dict) or not isinstance(e.get("id"), str):
+                    return False
+        return isinstance(store.get("linked", []), list)
+
+    async def on_pc_get(self, client: Client, msg: dict) -> None:
+        await self.send(client, {"type": "pc_data", "store": self._pc_load(client.uid)})
+
+    async def on_pc_put(self, client: Client, msg: dict) -> None:
+        store = msg.get("store")
+        if not self._pc_valid(store):
+            raise Invalid("invalid PC store")
+        current = self._pc_load(client.uid)
+        if current and isinstance(current.get("rev"), int) and store["rev"] <= current["rev"]:
+            await self.send(client, {"type": "pc_conflict", "store": current})
+            return
+        path = self._pc_path(client.uid)
+        # keep the last 5 revisions as backups
+        if os.path.exists(path):
+            for i in range(4, 0, -1):
+                older = f"{path}.{i}"
+                if os.path.exists(older):
+                    os.replace(older, f"{path}.{i + 1}")
+            os.replace(path, f"{path}.1")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(store, fh)
+        os.replace(tmp, path)
+        count = sum(len(b) for b in store["boxes"])
+        log.info("PC store of %s saved: rev %d, %d mons", client.name, store["rev"], count)
+        await self.send(client, {"type": "pc_saved", "rev": store["rev"]})
+
     _handlers = {
+        "pc_get": on_pc_get,
+        "pc_put": on_pc_put,
         "hello": on_hello,
         "ping": on_ping,
         "trade_status": on_trade_status,

@@ -144,7 +144,7 @@ async def test_rate_limit_drops_excess(connect_client):
 
 async def test_oversize_message_closes(connect_client):
     a = await connect_client("Ilias")
-    await a.send(type="chat", text="x" * 70000)
+    await a.send(type="chat", text="x" * 300000)
     assert await asyncio.wait_for(a.closed, 3) == 1009
 
 
@@ -504,3 +504,28 @@ async def test_report_only_connection_does_not_join(connect_client, server):
         assert reply["type"] == "report_saved"
     await watcher.expect_none("player_join")
     assert all(e["name"] != "Alex" for e in server.roster())
+
+
+def _store(rev, n=1):
+    boxes = [[] for _ in range(14)]
+    boxes[0] = [{"id": f"m{i}", "origin": "yellow", "dex": 25, "level": 5, "nick": "PIKA", "ot": "ASH",
+                 "otid": 1, "gen1": "AAAA", "gen2": None} for i in range(n)]
+    return {"version": 1, "rev": rev, "boxes": boxes, "linked": ["yellow"]}
+
+
+async def test_pc_store_roundtrip_and_conflict(connect_client):
+    a = await connect_client("Ilias")
+    await a.send(type="pc_get")
+    assert (await a.expect("pc_data"))["store"] is None
+    await a.send(type="pc_put", store=_store(1, 3))
+    assert (await a.expect("pc_saved"))["rev"] == 1
+    await a.send(type="pc_put", store=_store(1, 1))          # stale revision
+    conflict = await a.expect("pc_conflict")
+    assert conflict["store"]["rev"] == 1 and len(conflict["store"]["boxes"][0]) == 3
+    await a.send(type="pc_put", store=_store(2, 20))
+    await a.expect("pc_saved", rev=2)
+    await a.send(type="pc_get")
+    got = (await a.expect("pc_data"))["store"]
+    assert got["rev"] == 2 and len(got["boxes"][0]) == 20
+    await a.send(type="pc_put", store={"rev": 3, "boxes": [[]]})
+    await a.expect("error")
