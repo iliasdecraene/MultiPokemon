@@ -8,6 +8,7 @@ import binascii
 import hmac
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -122,6 +123,7 @@ class Client:
     state: dict | None = None
     sprite: str | None = None
     trade_id: str | None = None
+    last_report: float = 0.0
     _rate_window: float = 0.0
     _rate_count: int = 0
     _rate_warned: bool = False
@@ -308,6 +310,20 @@ class YellowLinkServer:
             return None
         version = msg.get("version") if isinstance(msg.get("version"), str) else ""
 
+        if msg.get("mode") == "report":
+            # Report-only connection (client couldn't stay connected): save one report, don't log in.
+            try:
+                raw = await asyncio.wait_for(ws.recv(), HELLO_TIMEOUT)
+                rep_msg = json.loads(raw)
+                text = rep_msg.get("text") if isinstance(rep_msg, dict) else None
+                if isinstance(text, str) and text.strip():
+                    fname = self._save_report(name.strip(), uid, text, str(rep_msg.get("reason", "")))
+                    await ws.send(json.dumps({"type": "report_saved", "file": fname}))
+                await ws.close()
+            except (asyncio.TimeoutError, ConnectionClosed, ValueError, TypeError):
+                pass
+            return None
+
         client = Client(ws=ws, uid=uid, name=name.strip(), version=version[:32])
 
         old = self.clients.get(uid)
@@ -430,6 +446,37 @@ class YellowLinkServer:
             return
         await self.send(client, {"type": "party_data", "uid": uid, "name": p["name"],
                                  "trainer": p["trainer"], "mons": p["party"]})
+
+    async def on_bug_report(self, client: Client, msg: dict) -> None:
+        text = msg.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise Invalid("text must be a non-empty string")
+        now = time.time()
+        if now - client.last_report < 20:
+            raise Invalid("please wait a moment before sending another report")
+        client.last_report = now
+        fname = self._save_report(client.name, client.uid, text, str(msg.get("reason", "")))
+        await self.send(client, {"type": "report_saved", "file": fname})
+
+    def _save_report(self, name: str, uid: str, text: str, reason: str) -> str:
+        reason = clean_text(reason, 60) or "report"
+        folder = os.path.join(self.config.data_dir, "reports")
+        os.makedirs(folder, exist_ok=True)
+        safe_name = re.sub(r"[^A-Za-z0-9]", "", name) or "player"
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(folder, f"{stamp}-{safe_name}-{uuid.uuid4().hex[:4]}.txt")
+        with open(path, "w", encoding="utf-8", errors="replace") as fh:
+            fh.write(f"From: {name} ({uid})  reason: {reason}\n\n")
+            fh.write(text[:60000])
+        # keep the newest 200 reports
+        files = sorted(f for f in os.listdir(folder) if f.endswith(".txt"))
+        for old in files[:-200]:
+            try:
+                os.remove(os.path.join(folder, old))
+            except OSError:
+                pass
+        log.info("bug report from %s saved to %s", name, path)
+        return os.path.basename(path)
 
     async def on_battle_result(self, client: Client, msg: dict) -> None:
         opp_uid = msg.get("opponent_uid")
@@ -616,6 +663,7 @@ class YellowLinkServer:
         "hello": on_hello,
         "ping": on_ping,
         "trade_status": on_trade_status,
+        "bug_report": on_bug_report,
         "state": on_state,
         "sprite": on_sprite,
         "party": on_party,

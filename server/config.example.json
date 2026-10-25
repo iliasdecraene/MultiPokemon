@@ -2,8 +2,8 @@
   "host": "0.0.0.0",
   "port": 8765,
   "key": "change-me",
-  "latest_client": "0.1.0",
-  "download_url": "https://github.com/<owner>/<repo>/releases/latest",
+  "latest_client": "0.1.1",
+  "download_url": "https://github.com/iliasdecraene/MultiPokemon/releases/latest",
   "motd": "Welcome!",
   "data_dir": "data"
 }

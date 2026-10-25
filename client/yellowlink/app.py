@@ -15,6 +15,7 @@ import pygame
 from . import __version__, game, sprites, ui
 from .audio import AudioOut
 from .config import Config, app_dir
+from .diag import Diagnostics, send_report_sync, show_report_window
 from .game import GameMemory, Mon, RomData
 from .net import NetClient
 
@@ -27,7 +28,8 @@ SRAM_FLUSH_EVERY = 600      # frames (~10 s)
 
 KEYMAP = {
     pygame.K_UP: "up", pygame.K_DOWN: "down", pygame.K_LEFT: "left", pygame.K_RIGHT: "right",
-    pygame.K_x: "a", pygame.K_z: "b", pygame.K_RETURN: "start", pygame.K_KP_ENTER: "start",
+    pygame.K_x: "a", pygame.K_z: "b", pygame.K_a: "a", pygame.K_s: "b",
+    pygame.K_RETURN: "start", pygame.K_KP_ENTER: "start",
     pygame.K_BACKSPACE: "select", pygame.K_RSHIFT: "select",
 }
 PAD_BUTTONS = {0: "a", 1: "b", 6: "select", 7: "start", 4: "select", 9: "start"}
@@ -104,8 +106,13 @@ class GhostBattle:
 
 
 class App:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, diag: Diagnostics | None = None):
         self.cfg = cfg
+        self.diag = diag
+        self._last_mode = "play"
+        self._err_times: list = []
+        self._last_err_toast = 0.0
+        self.fps = 0.0
         self.rom = RomData.from_file(cfg["rom_path"])
         self.scale = int(cfg.get("scale", 4))
         self.mode = "play"           # play | chat | menu | trade | prompt | battle_confirm | help
@@ -160,7 +167,12 @@ class App:
         self.net = NetClient(cfg["server_url"], {
             "name": cfg["name"], "uid": cfg["uid"], "key": cfg.get("room_key", ""), "version": __version__})
         self.net.start()
-        self.sys_msg(f"Welcome, {cfg['name']}! Press F1 for help.")
+        self.sys_msg(f"Welcome, {cfg['name']}! Press F1 for help, F3 to report a problem.")
+        log.info("config: name=%s server=%s rom=%s", cfg["name"], cfg["server_url"], cfg["rom_path"])
+        if not cfg.get("seen_help"):
+            self.mode = "help"  # show the controls once on first launch
+            cfg["seen_help"] = True
+            cfg.save()
 
     # ------------------------------------------------------------------ setup
     def _make_window(self):
@@ -211,10 +223,45 @@ class App:
             log.info("save file written")
 
     # ------------------------------------------------------------- messages
+    def debug_snapshot(self) -> str:
+        m = self.pyboy.memory
+        g = self.game
+        try:
+            gs = (f"in_game={g.in_game()} map={m[game.CUR_MAP]} xy=({m[game.X_COORD]},{m[game.Y_COORD]}) "
+                  f"battle={m[game.IS_IN_BATTLE]} font={m[game.FONT_LOADED]} joyignore={m[game.JOY_IGNORE]} "
+                  f"walk={m[game.WALK_COUNTER]} opp={m[game.CUR_OPPONENT]} party={m[game.PARTY_COUNT]}")
+        except Exception as e:  # noqa: BLE001
+            gs = f"(game state unreadable: {e})"
+        return (f"mode={self.mode} net={self.net.status}/{self.net.status_detail} rtt={self.net.rtt_ms} "
+                f"fps={self.fps:.1f} frame={self.frame} held={sorted(self.held)} fast={self.fast} "
+                f"trade={self.trade.phase if self.trade else None} "
+                f"battle={self.battle.phase if self.battle else None} friends={len(self.friends)} | {gs}")
+
+    def open_report(self, reason="player report (F3)"):
+        self.release_all()
+        if not self.diag:
+            return
+        text = self.diag.report_text(reason, "state: " + self.debug_snapshot())
+
+        def send():
+            if self.net.status == "online":
+                self.net.send({"type": "bug_report", "text": text, "reason": reason})
+                return "Sent! The host can find it on the server."
+            return send_report_sync(self.cfg, text, reason)
+
+        show_report_window(text, "YellowLink – report a problem",
+                           "This is the game's log. Click \"Send to host\" (or Copy and paste it in a message) "
+                           "and say what you were doing when it went wrong.", send, self.diag.dir)
+
+    def on_report_saved(self, msg):
+        self.toast("Report received by the server. Thanks!", 4, ui.GOOD)
+
     def sys_msg(self, s, color=ui.ACCENT):
+        log.info("msg: %s", s)
         self.chat_log.append(("", s, color))
 
     def toast(self, s, secs=4.0, color=ui.TEXT):
+        log.info("toast: %s", s)
         self.toasts = [t for t in self.toasts if t[1] > time.time()][-3:]
         self.toasts.append((s, time.time() + secs, color))
 
@@ -238,6 +285,7 @@ class App:
                     log.exception("handler %s failed", t)
 
     def on_connected(self, msg):
+        log.info("connected to %s", self.cfg["server_url"])
         self.last_state_sent = None
         self.last_sprite_sent = None
         self.last_party_sent = None
@@ -268,6 +316,7 @@ class App:
             self.sys_msg("The trade didn't complete and couldn't be undone automatically (party changed).", ui.BAD)
 
     def on_disconnected(self, msg):
+        log.warning("disconnected: %s (%s)", self.net.status, msg.get("reason"))
         self.friends.clear()
         t = self.trade
         if t:
@@ -393,6 +442,8 @@ class App:
             return
         t.phase = "executing"
         t.pending_since = time.time()
+        log.info("trade %s executing: give slot %s, receive species %s", t.trade_id, t.my_slot,
+                 t.pending_receive.species)
 
     def _try_apply_trade(self):
         t = self.trade
@@ -497,12 +548,14 @@ class App:
             if g.m[game.IS_IN_BATTLE] == 2:
                 g.inject_enemy(b.mons, b.opponent_name)
                 b.phase = "running"
+                log.info("ghost battle vs %s running (%d mons)", b.opponent_name, len(b.mons))
             elif time.time() - b.started > 15:
                 self._restore_battle()
                 self.toast("Battle failed to start.", color=ui.BAD)
         elif b.phase == "running":
             if g.m[game.IS_IN_BATTLE] == 0:
                 b.result = g.m[game.BATTLE_RESULT]
+                log.info("ghost battle ended, result=%s", b.result)
                 b.phase = "ending"
                 b.end_frames = 20
         elif b.phase == "ending":
@@ -598,6 +651,7 @@ class App:
                 if len(self.chat_input) < 200:
                     self.chat_input += ev.text
             elif ev.type == pygame.JOYBUTTONDOWN and ev.button in PAD_BUTTONS:
+                log.info("pad button %s", ev.button)
                 self.press(PAD_BUTTONS[ev.button], True, "pad")
             elif ev.type == pygame.JOYBUTTONUP and ev.button in PAD_BUTTONS:
                 self.press(PAD_BUTTONS[ev.button], False, "pad")
@@ -624,6 +678,11 @@ class App:
 
     def on_key(self, ev):
         k = ev.key
+        if self.mode != "chat":
+            log.info("key %s (mode %s)", pygame.key.name(k), self.mode)
+        if k == pygame.K_F3:
+            self.open_report()
+            return
         if self.mode == "chat":
             if k == pygame.K_RETURN or k == pygame.K_KP_ENTER:
                 msg = self.chat_input.strip()
@@ -844,6 +903,11 @@ class App:
                 self.mode = "play"
             self.prompt = None
         self.update_friends()
+        if self.mode != self._last_mode:
+            log.info("mode %s -> %s", self._last_mode, self.mode)
+            self._last_mode = self.mode
+        if self.frame % 1800 == 0:
+            log.info("status: %s", self.debug_snapshot())
         self.frame += 1
         self.publish()
         if self.frame % SRAM_FLUSH_EVERY == 0:
@@ -852,11 +916,20 @@ class App:
     def run(self):
         next_t = time.perf_counter()
         running = True
+        fps_t, fps_n = time.perf_counter(), 0
         try:
             while running:
-                running = self.handle_events()
-                self.step()
-                self.render()
+                try:
+                    running = self.handle_events()
+                    self.step()
+                    self.render()
+                except Exception:  # noqa: BLE001
+                    self._loop_error()
+                fps_n += 1
+                if fps_n == 120:
+                    now = time.perf_counter()
+                    self.fps = 120 / max(1e-6, now - fps_t)
+                    fps_t, fps_n = now, 0
                 next_t += FRAME_TIME
                 delay = next_t - time.perf_counter()
                 if delay > 0:
@@ -865,6 +938,20 @@ class App:
                     next_t = time.perf_counter()
         finally:
             self.shutdown()
+
+    def _loop_error(self):
+        """Log and survive occasional errors; give up if they keep happening."""
+        log.exception("error in main loop (%s)", self.debug_snapshot())
+        now = time.time()
+        self._err_times = [t for t in self._err_times if now - t < 5] + [now]
+        if len(self._err_times) >= 20:
+            raise RuntimeError("too many errors in a row - stopping")
+        if now - self._last_err_toast > 10:
+            self._last_err_toast = now
+            try:
+                self.toast("Something went wrong (logged). Press F3 to send a report.", 6, ui.BAD)
+            except Exception:  # noqa: BLE001
+                pass
 
     def shutdown(self):
         try:
@@ -884,40 +971,49 @@ class App:
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    log_path = app_dir() / "yellowlink.log"
-    logging.basicConfig(level=logging.INFO, filename=str(log_path), filemode="w",
-                        format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    if sys.stdout is None or sys.stderr is None:  # windowed exe: no console
-        stream = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
-        sys.stdout = sys.stdout or stream
-        sys.stderr = sys.stderr or stream
+    diag = Diagnostics(app_dir())
+    cfg = None
     try:
-        _main(argv)
-    except Exception:  # noqa: BLE001
+        cfg = Config()
+        if diag.previous_crash_log:
+            log.warning("previous session did not exit cleanly: %s", diag.previous_crash_log)
+            text = diag.file_tail(diag.previous_crash_log, "previous session closed unexpectedly")
+            show_report_window(
+                text, "YellowLink – it closed unexpectedly last time",
+                "YellowLink didn't shut down properly last time (crash, freeze, or closed from Task Manager). "
+                "If that wasn't you, please send this log to the host.",
+                (lambda: send_report_sync(cfg, text, "previous crash")) if cfg.is_complete() else None,
+                diag.dir)
+        _main(argv, cfg, diag)
+    except Exception as e:  # noqa: BLE001
         log.exception("fatal error")
-        try:
-            import tkinter
-            from tkinter import messagebox
-            root = tkinter.Tk()
-            root.withdraw()
-            messagebox.showerror("YellowLink crashed",
-                                 f"Something went wrong. Details are in:\n{log_path}\n\n"
-                                 "Your last in-game save is safe.")
-            root.destroy()
-        except Exception:  # noqa: BLE001
-            pass
-        raise
+        text = diag.report_text(f"crash: {e.__class__.__name__}: {e}")
+        show_report_window(
+            text, "YellowLink crashed",
+            "Sorry - YellowLink crashed. Your last in-game save is safe. Please click \"Send to host\" "
+            "(or Copy and paste it to the host) and say what you were doing.",
+            (lambda: send_report_sync(cfg, text, "crash")) if cfg and cfg.is_complete() else None,
+            diag.dir)
+    finally:
+        diag.clean_exit()
 
 
-def _main(argv):
-    cfg = Config()
+def _main(argv, cfg, diag):
     if "--setup" in argv or not cfg.is_complete():
         from .setup_dialog import run_setup
         if not run_setup(cfg, first_run=not cfg.is_complete()):
             return
     while True:
-        app = App(cfg)
+        errors_before = diag.errors
+        app = App(cfg, diag)
         app.run()
+        if diag.errors > errors_before:
+            text = diag.report_text(f"{diag.errors - errors_before} error(s) during the session")
+            show_report_window(
+                text, "YellowLink – problems during this session",
+                "Some errors happened while you were playing (the game kept running). "
+                "Please send this to the host so they can be fixed.",
+                lambda: send_report_sync(cfg, text, "session errors"), diag.dir)
         if cfg.pop("_open_setup", False):
             cfg.save()
             from .setup_dialog import run_setup

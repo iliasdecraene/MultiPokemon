@@ -29,7 +29,8 @@ Everyone plays their **own** game with their own save and story. On top of that:
 | Key | What it does |
 |---|---|
 | Arrow keys | D-pad |
-| X / Z | A / B |
+| **X** or **A** | A button (talk, confirm, next text) |
+| **Z** or **S** | B button (back) |
 | Enter / Backspace | Start / Select |
 | **Tab** | Link menu: pick a trainer, then **R** to trade or **B** to battle their team |
 | **T** | Chat |
@@ -37,6 +38,7 @@ Everyone plays their **own** game with their own save and story. On top of that:
 | M | Mute |
 | F5 / F6 | Smaller / bigger window |
 | F1 | Help |
+| **F3** | Report a problem (shows the log with Copy / Send to host) |
 | F2 | Settings (opens after you close the game) |
 
 Gamepads work too.
@@ -46,6 +48,9 @@ The save file lives in `%APPDATA%\YellowLink\saves\yellow.sav`. A backup is made
 in the `backups` folder next to it, and the last 15 are kept. It's a standard 32 KB save, so it also works in other emulators.
 
 **After a trade, save in-game.**
+
+**Something broke?** Press **F3**, or use the window that pops up after a crash, and click **Send to host**.
+The report lands on the server in `server/data/reports/`. Logs are also kept in `%APPDATA%\YellowLink\logs`.
 
 Windows SmartScreen may warn about the exe because it isn't code-signed. Click *More info → Run anyway*.
 

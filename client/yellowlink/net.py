@@ -79,6 +79,7 @@ class NetClient:
                     await ws.send(json.dumps(self.hello))
                     self.status = "online"
                     self.status_detail = ""
+                    log.info("websocket connected")
                     self.inbox.put({"type": "_connected"})
                     delay = 1.0
                     await self._pump(ws)
@@ -105,6 +106,7 @@ class NetClient:
             delay = min(delay * 2, 30)
 
     def _closed(self, code, reason):
+        log.info("websocket closed: code=%s reason=%s", code, reason)
         if code == 4001:
             self.status = "rejected"
             self.status_detail = "wrong room password"

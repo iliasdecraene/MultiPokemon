@@ -6,14 +6,16 @@ import json
 import os
 from dataclasses import dataclass, fields
 
+from . import __version__
+
 
 @dataclass
 class Config:
     host: str = "0.0.0.0"
     port: int = 8765
     key: str = "change-me"
-    latest_client: str = "0.1.0"
-    download_url: str = "https://github.com/<owner>/<repo>/releases/latest"
+    latest_client: str = __version__  # server and client are released together
+    download_url: str = "https://github.com/iliasdecraene/MultiPokemon/releases/latest"
     motd: str = "Welcome!"
     data_dir: str = "data"
 
