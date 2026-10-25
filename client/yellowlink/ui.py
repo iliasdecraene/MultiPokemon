@@ -156,7 +156,8 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
 
     # big clickable buttons
     bw = (SIDEBAR_W - 34) // 2
-    for i, (label, panel) in enumerate((("Multiplayer", "multiplayer"), ("Regions", "regions"))):
+    second = ("Soul Link", "soullink") if app.chal else ("Regions", "regions")
+    for i, (label, panel) in enumerate((("Multiplayer", "multiplayer"), second)):
         br = pygame.Rect(x0 + 12 + i * (bw + 10), h - hint_h - btn_h + 4, bw, 40)
         active = app.panel == panel
         hover = br.collidepoint(pygame.mouse.get_pos())
@@ -254,20 +255,21 @@ def draw_chat(surf, f: Fonts, app, r):
         app.click_targets.append((inp, app.focus_chat, "chat input"))
 
 
-def draw_toasts(surf, f: Fonts, toasts, game_w):
-    y = 10
+def draw_toasts(surf, f: Fonts, toasts, game_w, bottom=False):
+    """Short messages at the top of the game area (at the bottom while a panel/dialog covers the top)."""
     now = time.time()
-    for msg, until, color in toasts:
-        if until < now:
-            continue
+    live = [t for t in toasts if t[1] >= now]
+    step = f.body.get_height() + 16
+    y = surf.get_height() - 12 - step * len(live) if bottom else 10
+    for msg, until, color in live:
         img = f.body.render(msg, True, color)
-        r = img.get_rect(midtop=(game_w // 2, y))
+        r = img.get_rect(midtop=(game_w // 2, y + 5))
         bg = r.inflate(20, 10)
         s = pygame.Surface(bg.size, pygame.SRCALPHA)
-        s.fill((10, 12, 20, 210))
+        s.fill((10, 12, 20, 230))
         surf.blit(s, bg)
         surf.blit(img, r)
-        y += bg.h + 6
+        y += step
 
 
 def modal(surf, f: Fonts, game_w, game_h, title, lines, footer, w=None, h=None):

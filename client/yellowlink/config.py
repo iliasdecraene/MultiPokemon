@@ -59,15 +59,33 @@ class Config(dict):
                     and self.get("server_url") and "YOUR-SERVER" not in self["server_url"])
 
     @property
+    def challenge(self) -> dict | None:
+        """{"id", "game"} while playing a challenge (separate save), else None. See SPEC.md section 7."""
+        c = self.get("active_challenge")
+        return c if isinstance(c, dict) and c.get("id") and c.get("game") else None
+
+    def challenge_dir(self, cid: str) -> Path:
+        d = app_dir() / "challenges" / "".join(ch for ch in cid if ch.isalnum() or ch in "-_")[:40]
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @property
     def game_id(self) -> str:
-        return self.get("current_game") or "yellow"
+        c = self.challenge
+        return c["game"] if c else (self.get("current_game") or "yellow")
 
     @property
     def save_path(self) -> Path:
+        c = self.challenge
+        if c:
+            return self.challenge_dir(c["id"]) / "game.sav"
         return app_dir() / "saves" / f"{self.game_id}.sav"
 
     @property
     def resume_path(self) -> Path:
+        c = self.challenge
+        if c:
+            return self.challenge_dir(c["id"]) / "resume.state"
         d = app_dir() / "resume"
         d.mkdir(exist_ok=True)
         return d / f"{self.game_id}.state"

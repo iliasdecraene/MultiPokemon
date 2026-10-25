@@ -142,6 +142,8 @@ class NetClient:
                 except asyncio.TimeoutError:
                     pass
                 if self._stop:
+                    while not self._out.empty():          # flush last words (e.g. challenge_leave)
+                        await ws.send(json.dumps(self._out.get_nowait()))
                     await ws.close()
                     return
                 if time.time() - last_ping > 5:
