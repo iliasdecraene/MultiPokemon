@@ -324,6 +324,17 @@ class GameMemory:
                            self.read(PARTY_NICKS + i * NAME_SIZE, NAME_SIZE)))
         return out
 
+    def party_checked(self):
+        """Party, or None if it looks half-written (the game updates it over several frames)."""
+        n = self.m[PARTY_COUNT]
+        if n > 6 or self.m[PARTY_SPECIES + n] != 0xFF:
+            return None
+        party = self.party()
+        for i, mon in enumerate(party):
+            if mon.species == 0 or self.m[PARTY_SPECIES + i] != mon.species or not 1 <= mon.level <= 100:
+                return None
+        return party
+
     def write_party_slot(self, slot: int, mon: Mon):
         self.m[PARTY_SPECIES + slot] = mon.species
         self.write(PARTY_MONS + slot * MON_SIZE, mon.data)
