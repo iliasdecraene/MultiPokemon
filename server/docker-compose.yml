@@ -1,10 +1,12 @@
 services:
   yellowlink:
     build: .
-    container_name: yellowlink
+    # A second server (another group of friends) on the same machine: copy the repo to another folder and set
+    # YL_NAME, YL_HOST_PORT and COMPOSE_PROJECT_NAME in its .env (see DEPLOY.md "A second group").
+    container_name: ${YL_NAME:-yellowlink}
     restart: unless-stopped
     ports:
-      - "8765:8765"
+      - "${YL_HOST_PORT:-8765}:8765"
     environment:
       # Room password every player types into the client. Set it in a .env file
       # next to this file (YL_KEY=something-secret) or replace the default below.

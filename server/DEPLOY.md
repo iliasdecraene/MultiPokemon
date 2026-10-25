@@ -146,3 +146,23 @@ When a player presses F3 (or after a crash) and clicks **Send to host**, the rep
 ls -lt /opt/yellowlink/server/data/reports | head      # newest first
 cat /opt/yellowlink/server/data/reports/<file>.txt
 ```
+
+
+## A second group of friends (another server on the same machine)
+
+Each group gets its own server: its own port, room password, players, PC databases and challenges. The groups don't
+see each other. Example for a second group on port 8766:
+
+```bash
+sudo git clone https://github.com/iliasdecraene/MultiPokemon.git /opt/yellowlink2
+cd /opt/yellowlink2/server
+sudo tee .env > /dev/null <<'ENV'
+YL_KEY=pick-a-different-password
+YL_NAME=yellowlink2
+YL_HOST_PORT=8766
+COMPOSE_PROJECT_NAME=yellowlink2
+ENV
+sudo docker compose up -d --build
+```
+Players of that group use `ws://<server-ip>:8766` and that password. Open port 8766 if a firewall is on.
+Update it like the first one: `cd /opt/yellowlink2 && git pull && cd server && docker compose up -d --build`.
