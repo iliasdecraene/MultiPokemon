@@ -160,7 +160,7 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
     hints = ["A button: X or A  ·  B button: Z or S",
              "Start: Enter · Select: Bksp · Space: fast",
              "Tab: trade/battle menu · T: chat",
-             "F1: help · F3: report · -/+: volume"]
+             "F1: help · F3: report · V: wide view"]
     for hline in hints:
         text(surf, f.small, hline, (x, hy), DIM)
         hy += 19
@@ -284,7 +284,8 @@ def draw_help(surf, f, game_w, game_h):
         ("YellowLink", ACCENT),
         "  Tab: link menu - battle (B), trade (R), practice (P)",
         "  T: chat     Space (hold): fast-forward     M: mute",
-        "  F3: report a problem     F5/F6: window size     F2: settings",
+        "  V: wide view     F5/F6: window size     -/+: volume",
+        "  F3: report a problem     F2: settings",
         "",
         ("Battles are exhibition matches - nothing is won or lost.", DIM),
         ("F4 leaves a live battle. Practice = their team played by the game AI.", DIM),
