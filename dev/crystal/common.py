@@ -66,6 +66,8 @@ def screen_text(pb) -> list:
 
 
 def _ch(v):
+    if v == 0xED:
+        return ">"                                  # menu cursor
     if v == 0x7F or v == 0x50:
         return " "
     s = text.decode(bytes([v]))

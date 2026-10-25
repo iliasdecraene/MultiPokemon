@@ -10,6 +10,8 @@ save states, which are **not in git** (`dev/states/` is ignored). Put these in `
 | `room.state` | `python dev/e2e/make_room_state.py` (auto-plays the intro; player ends in the bedroom, map 0x26) |
 | `yellow.sav` | `python dev/e2e/make_save.py` (saves in-game from `room.state`; used by `boottest.py`) |
 | `pallet_after_lab.state` | made with `dev/worldview/progress.py` (player in Pallet Town after Oak's lab) |
+| `crystal.gbc` | your Pokémon Crystal (USA v1.0) ROM, SHA1 `f4cd194bdee0d04ca4eac29e09b8e4e9d818c133` |
+| `crystal_room.state`, `crystal_party.state`, `crystal.sav`, `crystal.rtc` | `python dev/crystal/make_states.py` (plays the intro, gets Cyndaquil, adds Pidgey + Sentret, saves in-game) |
 
 Run with `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` on a headless machine (the scripts set it themselves).
 
@@ -29,6 +31,7 @@ Run with `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` on a headless machine (th
 | `e2e/diagtest.py` | logging, error tolerance, bug reports (live + report-only connection), crash marker |
 | `e2e/pvp_proto.py` | two emulators linked in-process (no server) — the original link-battle sync proof |
 | `worldview/verify.py` | wide-view renderer vs real screen, pixel agreement report |
+| `crystal/verify.py` | Crystal memory map + `crystal.py`: walking px/py vs camera, sprite pixel match, party/box writes accepted by the game through SAVE/CONTINUE/CHANGE BOX, Bill's PC hooks, RTC |
 
 Expected output: see the `print` lines; screenshots go to a temp dir printed at the end.
 - `pc_actions.py` — scripted Bill's PC button presses (deposit/withdraw/release/change box) from `pokecenter_pc.state`.

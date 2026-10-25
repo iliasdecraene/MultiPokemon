@@ -293,3 +293,56 @@ Entry   = {"id": "<uuid4 hex>", "origin": "yellow"|"crystal", "dex": int, "level
 Server keeps `<data_dir>/pc/<uid>.json` (atomic writes, last 5 revisions kept as backups). Max message 256 KB.
 Client: on connect sends `pc_get`; if the server copy has a higher `rev` than the local one (played on another PC),
 it replaces the local store **only while no PC session is open and nothing is pending**.
+
+---------------------------------------------------------------------------------------------------
+## 6. Pokémon Crystal facts (verified) — `client/yellowlink/crystal.py`
+
+Crystal v1.0 USA, SHA1 `f4cd194bdee0d04ca4eac29e09b8e4e9d818c133` (CGB-only, MBC3 + RTC). Symbols: pret/pokecrystal
+`symbols` branch. Every entry below is asserted by `dev/crystal/verify.py` against the running ROM (fixtures from
+`dev/crystal/make_states.py`). **WRAM banking:** Crystal switches SVBK; at the end of a `tick()` the D000-DFFF window
+is often bank 5 or 6 (seen ~60 % of battle frames). All D000-DFFF variables are bank 1 → always `mem[1, addr]`.
+`mem[bank, addr]` must not be used for C000-CFFF (PyBoy maps `[1, C4A0]` to D4A0).
+
+| name | addr | notes |
+|---|---|---|
+| wShadowOAM | C400 | player = 4 entries at y 76/84, x 72/80; attr bit 3 (VRAM bank 1) set, palette = wPlayerPalette & 7 |
+| wTilemap | C4A0 | 20×18; menu cursor tile 0xED; Bill's PC lists use a sprite cursor (selected species name on row 14) |
+| wWindowStackSize | CF78 | > 0 while a menu window is open |
+| wGameTimerPaused | CFBC | bit 0 = game clock running → "in game" (0 on title, main menu, CONTINUE card) |
+| wJoypadDisable | CFBE | |
+| wSaveFileExists | CFCD | main menu: 0 none, 1 save ok, 2 backup ok |
+| wStateFlags | 1:D0ED | bit 6 text state (= Yellow wFontLoaded), bit 7 scripted movement |
+| wPlayerStepVectorX/Y | 1:D14E/F | signed; px the camera still trails the step logic (2 walking) |
+| wBattleMode | 1:D22D | 0 none, 1 wild, 2 trainer |
+| wScriptFlags / wScriptMode | 1:D434 / 1:D437 | bit 2 / non-zero = script running |
+| wPlayerID / wPlayerName | 1:D47B (BE) / 1:D47D | |
+| wSavedAtLeastOnce | 1:D4B4 | 1 once the first save erased/initialised the 14 SRAM boxes |
+| wPlayerStruct | 1:D4D6 | +0 sprite, +2 sprite tile (0), +6 palette, +7 walking (FF or speed*4+dir), +8 direction (0/4/8/12), +A step duration, +D facing (FACING_STEP 0-15 = Yellow img), +10 map X (= wXCoord+4) |
+| wJohtoBadges / wKantoBadges | 1:D857 / 1:D858 | `badges()` = johto \| kanto << 8 |
+| wCurBox | 1:DB72 | 0-13 |
+| wMapGroup / wMapNumber | 1:DCB5 / 1:DCB6 | map id = group << 8 \| number |
+| wYCoord / wXCoord | 1:DCB7 / 1:DCB8 | update when a step ends |
+| wPartyCount / Species / Mons / OTs / Nicks | 1:DCD7 / DCD8 / DCDF (6×48) / DDFF / DE41 | species list 0xFD = egg |
+| wPokedexCaught / Seen | 1:DE99 / 1:DEB9 | 32 bytes each, bit = dex − 1 |
+| wOBPals2 | 5:D0C0 | OBJ palettes, RGB555 LE; PyBoy renders `c << 3` per channel |
+
+Position: a step is 8 logic updates of 2 px (bike 4×4, slow 16×1), one update per 2 frames. `px = x*16 + dir_x*per*(total
+− duration) − stepVectorX` while walking; this equals the camera (px − SCX constant on every frame) and is x*16 at rest.
+Sprite: VRAM **bank 1**, tiles 0x00-0x0B + 0x80-0x8B → same 384-byte blob and same `compose()` as Yellow (verified
+pixel-exact for all 16 images; the screen shows the facing value from 3 frames earlier).
+Party struct 48 bytes: 0 species · 1 item · 2-5 moves · 6-7 OT ID · 8-10 exp · 11-20 stat exp (HP,Atk,Def,Spd,Spc) · 21-22 DVs ·
+23-26 PP · 27 happiness · 28 pokérus · 29-30 caught data · 31 level · 32 status · 33 unused · 34-35 HP · 36-37 max HP · 38-47 Atk,
+Def, Spd, SpAtk, SpDef. Stats: Gen-1 formula, SpAtk and SpDef both use the Special DV and Special stat exp.
+ROM: BaseData 14:5424 (0x51424, 32 B, growth rate at +22), PokemonNames 14:7384, Moves 10:5AFB (7 B, PP +5), MoveNames 72:5F29.
+
+PC: box i at SRAM bank 2 (i < 7) / 3, `A000 + (i%7)*0x450`; 0x44E bytes (count, 21 species, 20×32 box_struct, 20×11 OT,
+20×11 nick) + 2 padding bytes FF 00. The current box is used live from **sBox 1:AD10** (deposit/withdraw write there);
+saving copies sBox → slot, CONTINUE and CHANGE BOX copy slot → sBox. CHANGE BOX (and MOVE PKMN between boxes) runs a
+full save. No box checksums exist; the main checksum (16-bit sum of 1:A009-AB82 at 1:AD0D LE, backup 0:B209/0:BF0D)
+does not cover boxes. Before the first save, slots are garbage and the first save erases them → don't materialise.
+Records in the PC store: 32 + 11 + 11 + 1 egg-flag byte (55). Hooks: open `_BillsPC.LogIn` 03:641C, close
+`_BillsPC.LogOut` 03:643F.
+
+RTC: PyBoy's RTC advances with emulated frames while running (not wall time) and adds the wall time elapsed since it
+was saved when a `.rtc` file or save state is loaded. Keep a `.rtc` next to each `.sav` (`stop(rtc_file=...)`), or
+PyBoy silently reads/writes `<rom>.rtc` next to the ROM. `rtc_file=io.BytesIO()` (empty) raises "No data".
