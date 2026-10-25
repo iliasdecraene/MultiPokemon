@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import pygame
 
-from . import __version__, game, sprites, ui
+from . import __version__, game, pvp, sprites, ui
 from .audio import AudioOut
 from .config import Config, app_dir
 from .diag import Diagnostics, send_report_sync, show_report_window
@@ -127,6 +127,8 @@ class App:
         self.prompt: dict | None = None
         self.battle_offer: dict | None = None
         self.battle: GhostBattle | None = None
+        self.live: pvp.LiveBattle | None = None
+        self.hooks: pvp.LinkHooks | None = None
         self.unresolved_trade = None
         self.unresolved_retry = 0.0
         self.pad_held: set = set()
@@ -196,6 +198,11 @@ class App:
                            sound_emulated=True, sound_sample_rate=48000, log_level="ERROR")
         self.pyboy.set_emulation_speed(0)
         self.game = GameMemory(self.pyboy.memory, self.rom)
+        # Live battles hook ROM addresses, so only enable them on the exact ROM they were verified on.
+        if game.sha1_of(self.cfg["rom_path"]) == game.YELLOW_SHA1:
+            self.hooks = pvp.LinkHooks(self.pyboy, self._send_battle_move)
+        else:
+            log.warning("ROM is not USA/Europe Yellow: live battles disabled")
         self.last_sram = self._read_sram()
         dev_state = os.environ.get("YL_DEV_LOAD_STATE")
         if dev_state:
@@ -215,7 +222,7 @@ class App:
         return b"".join(bytes(m[b, 0xA000:0xBFFF]) + bytes([m[b, 0xBFFF]]) for b in range(4))
 
     def flush_sram(self, force=False):
-        if self.battle and not force:
+        if (self.battle or self.live) and not force:
             return
         data = self._read_sram()
         if data != self.last_sram and write_atomic(self.cfg.save_path, data):
@@ -235,7 +242,8 @@ class App:
         return (f"mode={self.mode} net={self.net.status}/{self.net.status_detail} rtt={self.net.rtt_ms} "
                 f"fps={self.fps:.1f} frame={self.frame} held={sorted(self.held)} fast={self.fast} "
                 f"trade={self.trade.phase if self.trade else None} "
-                f"battle={self.battle.phase if self.battle else None} friends={len(self.friends)} | {gs}")
+                f"battle={self.battle.phase if self.battle else None} "
+                f"live={(self.live.phase, self.live.exchange) if self.live else None} friends={len(self.friends)} | {gs}")
 
     def open_report(self, reason="player report (F3)"):
         self.release_all()
@@ -317,6 +325,8 @@ class App:
 
     def on_disconnected(self, msg):
         log.warning("disconnected: %s (%s)", self.net.status, msg.get("reason"))
+        if self.live:
+            self._end_live("Battle ended: connection lost.", ui.BAD)
         self.friends.clear()
         t = self.trade
         if t:
@@ -391,10 +401,10 @@ class App:
 
     # trades -------------------------------------------------------------
     def on_trade_request(self, msg):
-        if self.trade or self.battle:
+        if self.trade or self.battle or self.live or self.prompt:
             self.net.send({"type": "trade_respond", "trade_id": msg["trade_id"], "accept": False})
             return
-        self.prompt = {"kind": "trade", "trade_id": msg["trade_id"], "name": msg.get("name", "?"),
+        self.prompt = {"kind": "trade", "id": msg["trade_id"], "name": msg.get("name", "?"),
                        "until": time.time() + 55, "shown": None}
         self._maybe_show_prompt()
 
@@ -405,7 +415,7 @@ class App:
             self.release_all()
 
     def on_trade_started(self, msg):
-        if self.battle:
+        if self.battle or self.live:
             self.net.send({"type": "trade_cancel", "trade_id": msg["trade_id"]})
             self.toast("Trade cancelled: you're in a battle.", color=ui.BAD)
             return
@@ -519,8 +529,8 @@ class App:
         if not self.game.party():
             self.toast("You need a Pokémon first!", color=ui.BAD)
             return
-        if self.trade:
-            self.toast("Finish your trade first.", color=ui.BAD)
+        if self.trade or self.live:
+            self.toast("Finish what you're doing first.", color=ui.BAD)
             return
         self.battle = GhostBattle(o["uid"], o["name"], o["mons"])
         self.toast(f"Get ready to battle {o['name']}! Stand still...", 4, ui.ACCENT)
@@ -576,6 +586,133 @@ class App:
             self.pyboy.load_state(io.BytesIO(b.snapshot))
         self.release_all()
 
+    # live PvP battles -------------------------------------------------------
+    def _send_battle_move(self, s, n, v, check):
+        self.net.send({"type": "battle_move", "battle_id": s.battle_id, "n": n, "v": v, "check": check})
+
+    def on_battle_request(self, msg):
+        if self.trade or self.battle or self.live or self.prompt or not self.hooks or not self.game.party():
+            self.net.send({"type": "battle_respond", "battle_id": msg["battle_id"], "accept": False})
+            return
+        self.prompt = {"kind": "battle", "id": msg["battle_id"], "name": msg.get("name", "?"),
+                       "until": time.time() + 55, "shown": None}
+        self._maybe_show_prompt()
+
+    def on_battle_prepare(self, msg):
+        if self.live or self.battle or self.trade or not self.hooks:
+            self.net.send({"type": "battle_leave", "battle_id": msg["battle_id"]})
+            return
+        self.live = pvp.LiveBattle(msg["battle_id"], msg.get("with", ""), msg.get("name", "?"),
+                                   bool(msg.get("master")))
+        if self.mode in ("menu", "help", "battle_confirm"):
+            self.mode = "play"
+        self.toast(f"Battle vs {self.live.opponent_name}! Close any menus and stand still...", 5, ui.ACCENT)
+        log.info("live battle %s prepare vs %s (master=%s)", self.live.battle_id, self.live.opponent_name,
+                 self.live.master)
+
+    def on_battle_start(self, msg):
+        s = self.live
+        if not s or s.battle_id != msg.get("battle_id") or s.phase != "ready":
+            return
+        try:
+            mons = [Mon.from_wire(m) for m in msg.get("mons", [])][:6]
+        except (ValueError, KeyError):
+            mons = []
+        rns = msg.get("rns") or []
+        if not mons or len(rns) != 10:
+            self.net.send({"type": "battle_leave", "battle_id": s.battle_id})
+            self._end_live("Battle cancelled: bad data from the server.", ui.BAD)
+            return
+        s.master = bool(msg.get("master", s.master))
+        pvp.setup_battle(self.game, s, mons, msg.get("trainer") or s.opponent_name, rns)
+        self.hooks.session = s
+        s.phase = "starting"
+        s.started = time.time()
+        log.info("live battle %s starting: %d enemy mons", s.battle_id, len(mons))
+
+    def on_battle_move(self, msg):
+        s = self.live
+        if not s or s.battle_id != msg.get("battle_id"):
+            return
+        n, v = msg.get("n"), msg.get("v")
+        if isinstance(n, int) and isinstance(v, int):
+            s.inbox[n] = v & 0x0F
+            if isinstance(msg.get("check"), str):
+                s.their_checks[n] = msg["check"]
+                pvp.compare_checks(s, n)
+
+    def on_battle_aborted(self, msg):
+        s = self.live
+        reason = msg.get("reason", "")
+        if s and s.battle_id == msg.get("battle_id"):
+            texts = {"opponent left": f"{s.opponent_name} left the battle.",
+                     "opponent disconnected": f"{s.opponent_name} disconnected.",
+                     "timeout": "The battle didn't start in time.",
+                     "declined": f"{s.opponent_name} declined."}
+            self._end_live(texts.get(reason, "Battle cancelled."), ui.BAD)
+        elif not s and reason == "declined":
+            self.toast("Your battle challenge was declined.", 4, ui.DIM)
+        elif not s and reason == "timeout":
+            self.toast("Your battle challenge got no answer.", 4, ui.DIM)
+
+    def update_live(self):
+        s = self.live
+        if not s:
+            return
+        g = self.game
+        if s.phase == "preparing":
+            if time.time() - s.started > 40:
+                self.net.send({"type": "battle_leave", "battle_id": s.battle_id})
+                self._end_live("Battle cancelled: close menus and stand still in the overworld.", ui.BAD)
+                return
+            if g.is_safe() and not self.trade and not self.battle:
+                party = g.party_checked()
+                if not party:
+                    return
+                buf = io.BytesIO()
+                self.pyboy.save_state(buf)
+                s.snapshot = buf.getvalue()
+                self.release_all()
+                g.heal_party()
+                party = g.party()
+                self.net.send({"type": "battle_ready", "battle_id": s.battle_id,
+                               "mons": [m.to_wire() for m in party], "trainer": g.player_name()})
+                s.phase = "ready"
+                s.started = time.time()
+        elif s.phase == "starting":
+            if g.m[game.IS_IN_BATTLE]:
+                s.phase = "running"
+                log.info("live battle %s running", s.battle_id)
+            elif time.time() - s.started > 15:
+                self.net.send({"type": "battle_leave", "battle_id": s.battle_id})
+                self._end_live("Battle failed to start.", ui.BAD)
+        elif s.phase == "running":
+            if g.m[game.IS_IN_BATTLE] == 0:
+                s.result = g.m[game.BATTLE_RESULT]
+                s.phase = "ending"
+                s.end_frames = 200  # let the result screen show
+                log.info("live battle %s finished, result=%s", s.battle_id, s.result)
+        elif s.phase == "ending":
+            s.end_frames -= 1
+            if s.end_frames <= 0:
+                self.net.send({"type": "battle_end", "battle_id": s.battle_id, "result": int(s.result or 0)})
+                msg = {0: f"You beat {s.opponent_name}!", 1: f"{s.opponent_name} won this time.",
+                       2: f"It's a draw with {s.opponent_name}!"}.get(s.result, "Battle over.")
+                self._end_live(msg, ui.GOOD if s.result == 0 else ui.TEXT)
+
+    def _end_live(self, message, color):
+        s = self.live
+        self.live = None
+        if self.hooks:
+            self.hooks.session = None
+        if s and s.snapshot:
+            self.pyboy.load_state(io.BytesIO(s.snapshot))
+        pvp.clear_link_state(self.game)
+        self.release_all()
+        if message:
+            self.toast(message, 6, color)
+            self.sys_msg(message, color)
+
     # ---------------------------------------------------------- publishing
     def publish(self):
         if self.net.status != "online":
@@ -585,7 +722,7 @@ class App:
             return
         if self.frame % STATE_SEND_EVERY == 0:
             st = g.position()
-            st["visible"] = g.overworld_visible() and not self.battle
+            st["visible"] = g.overworld_visible() and not self.battle and not self.live
             st["type"] = "state"
             now = time.time()
             if st != self.last_state_sent or now - self.last_state_time > 2:
@@ -601,7 +738,7 @@ class App:
                 if tiles != self.last_sprite_sent:
                     if self.net.send({"type": "sprite", "data": game.b64(tiles)}):
                         self.last_sprite_sent = tiles
-        if self.frame % PARTY_CHECK_EVERY == 0 and g.is_safe() and not self.battle:
+        if self.frame % PARTY_CHECK_EVERY == 0 and g.is_safe() and not self.battle and not self.live:
             party = g.party_checked()
             if party is None:
                 return
@@ -621,6 +758,8 @@ class App:
 
     def press(self, b, down, source="kb"):
         if self.mode != "play" or (self.battle and self.battle.phase == "triggered"):
+            return
+        if self.live and self.live.phase in ("ready", "starting"):
             return
         src = self.pad_held if source == "pad" else self.kb_held
         if down:
@@ -685,6 +824,10 @@ class App:
         if k == pygame.K_F3:
             self.open_report()
             return
+        if k == pygame.K_F4 and self.live:
+            self.net.send({"type": "battle_leave", "battle_id": self.live.battle_id})
+            self._end_live("You left the battle.", ui.DIM)
+            return
         if self.mode == "chat":
             if k == pygame.K_RETURN or k == pygame.K_KP_ENTER:
                 msg = self.chat_input.strip()
@@ -713,7 +856,7 @@ class App:
                 self.menu_index = max(0, self.menu_index - 1)
             elif k == pygame.K_DOWN:
                 self.menu_index = min(max(0, len(others) - 1), self.menu_index + 1)
-            elif others and k in (pygame.K_r, pygame.K_b):
+            elif others and k in (pygame.K_r, pygame.K_b, pygame.K_p):
                 e = others[min(self.menu_index, len(others) - 1)]
                 if k == pygame.K_r:
                     if not e.get("online"):
@@ -724,6 +867,19 @@ class App:
                         self.net.send({"type": "trade_request", "to": e["uid"]})
                         self.toast(f"Trade request sent to {e.get('name')}...")
                         self.mode = "play"
+                elif k == pygame.K_b:
+                    if not e.get("online"):
+                        self.toast("They need to be online for a live battle. Try P (practice).", color=ui.BAD)
+                    elif not self.hooks:
+                        self.toast("Live battles need the USA/Europe ROM.", color=ui.BAD)
+                    elif not self.game.party():
+                        self.toast("You need a Pokémon first!", color=ui.BAD)
+                    elif self.trade or self.battle or self.live:
+                        self.toast("Finish what you're doing first.", color=ui.BAD)
+                    else:
+                        self.net.send({"type": "battle_request", "to": e["uid"]})
+                        self.toast(f"Battle request sent to {e.get('name')}...")
+                        self.mode = "play"
                 else:
                     self.net.send({"type": "get_party", "uid": e["uid"]})
                     self.mode = "play"
@@ -732,15 +888,15 @@ class App:
             p = self.prompt
             if not p or time.time() - (p.get("shown") or 0) < 0.5:
                 return
-            if k in (pygame.K_y, pygame.K_RETURN):
-                self.net.send({"type": "trade_respond", "trade_id": p["trade_id"], "accept": True})
+            if k in (pygame.K_y, pygame.K_RETURN, pygame.K_n, pygame.K_ESCAPE):
+                accept = k in (pygame.K_y, pygame.K_RETURN)
+                if p["kind"] == "battle":
+                    self.net.send({"type": "battle_respond", "battle_id": p["id"], "accept": accept})
+                else:
+                    self.net.send({"type": "trade_respond", "trade_id": p["id"], "accept": accept})
                 self.mode = "play"
                 self.prompt = None
                 self.release_all()
-            elif k in (pygame.K_n, pygame.K_ESCAPE):
-                self.net.send({"type": "trade_respond", "trade_id": p["trade_id"], "accept": False})
-                self.mode = "play"
-                self.prompt = None
             return
         if self.mode == "battle_confirm":
             if k in (pygame.K_RETURN, pygame.K_KP_ENTER):
@@ -867,9 +1023,16 @@ class App:
             ui.draw_trade(sub, self.fonts, self, self.game_w, self.game_h)
         elif self.mode == "prompt" and self.prompt:
             left = max(0, int(self.prompt["until"] - time.time()))
-            ui.modal(sub, self.fonts, self.game_w, self.game_h, "Trade request",
-                     [f"{self.prompt['name']} wants to trade with you!", (f"({left}s)", ui.DIM)],
-                     "[Y] accept    [N] decline")
+            if self.prompt["kind"] == "battle":
+                ui.modal(sub, self.fonts, self.game_w, self.game_h, "Battle challenge!",
+                         [f"{self.prompt['name']} challenges you to a live battle!",
+                          ("Exhibition match: teams fully healed, nothing is lost.", ui.DIM),
+                          (f"({left}s)", ui.DIM)],
+                         "[Y] accept    [N] decline")
+            else:
+                ui.modal(sub, self.fonts, self.game_w, self.game_h, "Trade request",
+                         [f"{self.prompt['name']} wants to trade with you!", (f"({left}s)", ui.DIM)],
+                         "[Y] accept    [N] decline")
         elif self.mode == "battle_confirm" and self.battle_offer:
             o = self.battle_offer
             lines = [f"{self.rom.species_name(m.species)}  Lv {m.level}" for m in o["mons"]]
@@ -895,6 +1058,7 @@ class App:
             if ticks == 1:
                 self.audio.push(self.pyboy.sound.ndarray)
             self.update_battle()
+            self.update_live()
         self._try_apply_trade()
         self._maybe_show_prompt()
         if self.unresolved_trade and self.unresolved_retry and time.time() > self.unresolved_retry:
@@ -959,6 +1123,9 @@ class App:
         try:
             if self.battle:
                 self._restore_battle()
+            if self.live:
+                self.net.send({"type": "battle_leave", "battle_id": self.live.battle_id})
+                self._end_live("", ui.DIM)
             self.flush_sram(force=True)
             ram = io.BytesIO()
             self.pyboy.stop(save=True, ram_file=ram)

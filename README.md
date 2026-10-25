@@ -6,7 +6,8 @@ Everyone plays their **own** game with their own save and story. On top of that:
 
 - **See each other.** Friends on the same map walk around in your world, with name tags.
 - **Trade.** Open the link menu, pick a friend, and both choose a Pokémon and confirm. Trade evolutions work (Kadabra → Alakazam and the others).
-- **Battle.** Fight a friend's *current* team, even while they're offline. These are exhibition matches: both teams are fully healed, and afterwards you're put back exactly where you were, so nothing is won or lost.
+- **Battle each other, live**: challenge a friend from anywhere in the world (Tab → B). They accept, both games jump into a real link battle and each of you picks your own moves. Exhibition match: teams are healed and you're put back where you were afterwards.
+- **Practice**: fight a copy of a friend's team played by the game's AI (Tab → P), even when they're offline.
 - **Chat.** You can also see who's online, and the app shows a notice when an update is available.
 
 > **No ROM is included, and none ever should be.** Each player needs their own copy of
@@ -32,7 +33,8 @@ Everyone plays their **own** game with their own save and story. On top of that:
 | **X** or **A** | A button (talk, confirm, next text) |
 | **Z** or **S** | B button (back) |
 | Enter / Backspace | Start / Select |
-| **Tab** | Link menu: pick a trainer, then **R** to trade or **B** to battle their team |
+| **Tab** | Link menu: pick a trainer, then **B** battle (live), **R** trade, **P** practice vs their team |
+| F4 | Leave a live battle |
 | **T** | Chat |
 | Space (hold) | Fast-forward |
 | M | Mute |
@@ -85,10 +87,10 @@ addresses in `SPEC.md`, which are taken from the pret/pokeyellow disassembly and
 
 - **Friends:** your map ID and pixel position are sent about 15 times a second. Your sprite's tiles are read from video memory, so bikes and surfing show up correctly. Friends are drawn over the game screen using your own map palette.
 - **Trades:** the server runs a two-step handshake. Each client writes the received 44-byte Pokémon record into its party, and undoes the write if the other side fails.
-- **Battles:** the client makes a save state, starts a trainer battle with the game's own engine, swaps in the friend's team, lets the game's AI play it, then restores the save state.
+- **Live battles:** both games run the game's own *link battle* engine (normally used with a link cable), started from the overworld with the same random-number list on both sides. Each turn's choice travels over the server instead of a cable, so both screens show the exact same battle. A save state taken before the battle is restored afterwards.
+- **Practice battles:** a normal trainer battle with the friend's team swapped in and the game's AI in control.
 
 ### Roadmap
 
-- Real-time PvP battles (both players choosing moves) through an emulated link cable over the network
 - Showing friends' following Pikachu
 - Dedicated trade room / meeting spots
