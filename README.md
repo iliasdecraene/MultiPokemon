@@ -18,7 +18,7 @@ Everyone plays their **own** game with their own save and story. On top of that:
 
 ## For players
 
-1. Download **YellowLink.exe** from the [Releases page](../../releases/latest).
+1. Download **YellowLink.exe** from the [Releases page](../../releases/latest). Put it in its own folder (e.g. `Documents\YellowLink`), not in Program Files.
 2. Run it. The first time, a setup window asks for:
    - **Your name.** Friends see this above your character.
    - **Server address**, e.g. `ws://123.45.67.89:8765`. Ask whoever hosts the server.
@@ -50,6 +50,8 @@ The save file lives in `%APPDATA%\YellowLink\saves\yellow.sav`. A backup is made
 in the `backups` folder next to it, and the last 15 are kept. It's a standard 32 KB save, so it also works in other emulators.
 
 **After a trade, save in-game.**
+
+**Updates:** when a new version is out, the sidebar says so. Press **U**: it downloads in the background while you play, then asks to restart. Save in-game before restarting.
 
 **Something broke?** Press **F3**, or use the window that pops up after a crash, and click **Send to host**.
 The report lands on the server in `server/data/reports/`. Logs are also kept in `%APPDATA%\YellowLink\logs`.

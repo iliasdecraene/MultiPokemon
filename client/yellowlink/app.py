@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import pygame
 
-from . import __version__, game, pvp, sprites, ui
+from . import __version__, game, pvp, sprites, ui, updater
 from .audio import AudioOut
 from .config import Config, app_dir
 from .diag import Diagnostics, send_report_sync, show_report_window
@@ -128,6 +128,9 @@ class App:
         self.battle_offer: dict | None = None
         self.battle: GhostBattle | None = None
         self.live: pvp.LiveBattle | None = None
+        self.update_dl: updater.Download | None = None
+        self.restart_into = None
+        self.quit_requested = False
         self.hooks: pvp.LinkHooks | None = None
         self.unresolved_trade = None
         self.unresolved_retry = 0.0
@@ -775,6 +778,8 @@ class App:
             self.held.discard(b)
 
     def handle_events(self):
+        if self.quit_requested:
+            return False
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 return False
@@ -898,6 +903,26 @@ class App:
                 self.prompt = None
                 self.release_all()
             return
+        if self.mode == "update_confirm":
+            if k in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                urls = updater.asset_urls(self.download_url, self.update_available)
+                self.update_dl = updater.Download(urls[0], urls[1], self.update_available)
+                self.toast("Downloading the update - keep playing!", 4)
+                self.mode = "play"
+            elif k == pygame.K_ESCAPE:
+                self.mode = "play"
+            return
+        if self.mode == "update_ready":
+            if k in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                if self.trade or self.battle or self.live:
+                    self.toast("Finish your trade/battle first.", 3, ui.BAD)
+                else:
+                    self.restart_into = self.update_dl.path
+                    self.quit_requested = True
+                self.mode = "play"
+            elif k == pygame.K_ESCAPE:
+                self.mode = "play"
+            return
         if self.mode == "battle_confirm":
             if k in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 self.start_battle()
@@ -958,7 +983,16 @@ class App:
             self.cfg.save()
             self._make_window()
         elif k == pygame.K_u and self.update_available:
-            webbrowser.open(self.download_url or "https://github.com")
+            self.release_all()
+            urls = updater.asset_urls(self.download_url, self.update_available)
+            if not updater.can_self_update() or not urls:
+                webbrowser.open(self.download_url or "https://github.com")
+            elif self.update_dl and self.update_dl.status == "ready":
+                self.mode = "update_ready"
+            elif self.update_dl and self.update_dl.status == "downloading":
+                self.toast("Update is downloading...", 2)
+            else:
+                self.mode = "update_confirm"
         elif k == pygame.K_F2:
             self.toast("Settings open after you close the game (run with --setup).", 4)
             self.cfg["_open_setup"] = True
@@ -1042,6 +1076,19 @@ class App:
                      "[Enter] fight!    [Esc] back")
         elif self.mode == "help":
             ui.draw_help(sub, self.fonts, self.game_w, self.game_h)
+        elif self.mode == "update_confirm":
+            ui.modal(sub, self.fonts, self.game_w, self.game_h, f"Update to {self.update_available}?",
+                     ["The new version downloads in the background",
+                      "while you keep playing. When it's ready you'll",
+                      "be asked to restart.", "",
+                      ("Tip: save in-game (Start > Save) before restarting.", ui.ACCENT)],
+                     "[Enter] download    [Esc] not now")
+        elif self.mode == "update_ready":
+            ui.modal(sub, self.fonts, self.game_w, self.game_h, "Update ready!",
+                     [f"Version {self.update_available} is downloaded.", "",
+                      ("SAVE IN-GAME FIRST (Start > Save)!", ui.BAD),
+                      ("Anything since your last save is lost on restart.", ui.DIM)],
+                     "[Enter] restart now    [Esc] later (press U)")
         ui.draw_toasts(sub, self.fonts, self.toasts, self.game_w)
         if self.fast:
             ui.text(sub, self.fonts.body, ">> fast", (self.game_w - 10, 10), ui.ACCENT, anchor="topright")
@@ -1060,6 +1107,14 @@ class App:
             self.update_battle()
             self.update_live()
         self._try_apply_trade()
+        if self.update_dl and self.update_dl.status != "downloading" and not getattr(self.update_dl, "announced", False):
+            self.update_dl.announced = True
+            if self.update_dl.status == "ready":
+                if self.mode == "play":
+                    self.mode = "update_ready"
+            else:
+                self.toast("Update download failed - press U to try again.", 6, ui.BAD)
+                self.update_dl = None
         self._maybe_show_prompt()
         if self.unresolved_trade and self.unresolved_retry and time.time() > self.unresolved_retry:
             self.unresolved_retry = 0.0
@@ -1141,6 +1196,7 @@ class App:
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     diag = Diagnostics(app_dir())
+    updater.cleanup_old()
     cfg = None
     try:
         cfg = Config()
@@ -1176,6 +1232,14 @@ def _main(argv, cfg, diag):
         errors_before = diag.errors
         app = App(cfg, diag)
         app.run()
+        if app.restart_into:
+            try:
+                updater.install_and_restart(app.restart_into)
+                return
+            except Exception:  # noqa: BLE001
+                log.exception("self-update failed; opening the download page instead")
+                webbrowser.open(app.download_url or "https://github.com")
+                return
         if diag.errors > errors_before:
             text = diag.report_text(f"{diag.errors - errors_before} error(s) during the session")
             show_report_window(

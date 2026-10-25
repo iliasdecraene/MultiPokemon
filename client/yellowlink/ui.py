@@ -88,7 +88,14 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
         r = pygame.Rect(x - 4, y, SIDEBAR_W - 20, 40)
         box(surf, r, (60, 52, 20), ACCENT)
         text(surf, f.small, f"Update {app.update_available} available", (x + 4, y + 4), ACCENT)
-        text(surf, f.small, "press U to download", (x + 4, y + 21), TEXT)
+        dl = app.update_dl
+        if dl and dl.status == "downloading":
+            label = f"downloading... {int(dl.fraction * 100)}%"
+        elif dl and dl.status == "ready":
+            label = "ready - press U to restart"
+        else:
+            label = "press U to update"
+        text(surf, f.small, label, (x + 4, y + 21), TEXT)
         y += 48
 
     text(surf, f.body, "Trainers", (x, y), TEXT)
