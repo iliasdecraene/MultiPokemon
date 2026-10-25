@@ -1116,6 +1116,20 @@ class App:
         diff = (arr[:, :, :3] != self.clean_frame[:, :, :3]).any(axis=2)
         return diff.reshape(18, 8, 20, 8).any(axis=(1, 3))
 
+    def _neighbor_shift(self, map_id):
+        if not self.wv or map_id is None:
+            return None
+        key = (self.game.m[game.CUR_MAP], map_id)
+        cache = self.__dict__.setdefault("_nb_cache", {})
+        if key not in cache:
+            try:
+                cache[key] = self.wv.neighbor_offset(self.pyboy.memory, map_id)
+            except Exception:  # noqa: BLE001
+                cache[key] = None
+            if len(cache) > 64:
+                cache.clear()
+        return cache[key]
+
     def draw_friends(self, arr):
         g = self.game
         if not g.in_game() or g.in_battle() or self.battle or self.live:
@@ -1130,11 +1144,17 @@ class App:
         layer.fill((0, 0, 0, 0))
         for f in self.friends.values():
             st = f.state
-            if not st or not f.sprite or not st.get("visible") or st.get("map") != me["map"]:
+            if not st or not f.sprite or not st.get("visible"):
                 continue
+            shift = (0, 0)
+            if st.get("map") != me["map"]:
+                # Friend on a connected map (e.g. Route 1 seen from the top of Pallet Town)?
+                shift = self._neighbor_shift(st.get("map"))
+                if shift is None:
+                    continue
             img = (st.get("facing", 0) & 0xC) | (int(f.anim // 8) % 4 if f.anim else 0)
-            sx = sprites.PLAYER_SCREEN_X + int(f.cur_px - me["px"])
-            sy = sprites.PLAYER_SCREEN_Y + int(f.cur_py - me["py"])
+            sx = sprites.PLAYER_SCREEN_X + int(f.cur_px + shift[0] * 16 - me["px"])
+            sy = sprites.PLAYER_SCREEN_Y + int(f.cur_py + shift[1] * 16 - me["py"])
             if -16 - self.off_x < sx < 160 + self.off_x and -16 - self.off_y < sy < 144 + self.off_y:
                 surf = self.sprite_cache.get(f.sprite, img, self.palette)
                 layer.blit(surf, (sx + self.off_x, sy + self.off_y))
