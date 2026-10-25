@@ -1,0 +1,15 @@
+services:
+  yellowlink:
+    build: .
+    container_name: yellowlink
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      # Room password every player types into the client. Set it in a .env file
+      # next to this file (YL_KEY=something-secret) or replace the default below.
+      YL_KEY: ${YL_KEY:-change-me}
+      YL_PORT: "8765"
+    volumes:
+      # players.json (and optionally config.json) live here on the host.
+      - ./data:/data
