@@ -134,6 +134,8 @@ class App:
         self._wv_errors = 0
         self.mode = "play"           # play | chat | menu | trade | prompt | battle_confirm | help
         self.chat_input = ""
+        self.chat_scroll = 0         # lines scrolled up from the newest message
+        self.chat_rect = None
         self.chat_log: list = []
         self.toasts: list = []
         self.friends: dict[str, Friend] = {}
@@ -491,6 +493,8 @@ class App:
                 pass
 
     def on_chat(self, msg):
+        if self.chat_scroll:
+            self.chat_scroll += 1
         mine = msg.get("uid") == self.cfg["uid"]
         self.chat_log.append((msg.get("name", "?"), msg.get("text", ""), ui.CHAT_SELF if mine else ui.TEXT))
 
@@ -856,6 +860,44 @@ class App:
                     self.last_party_sent = key
 
     # ---------------------------------------------------------------- input
+    # chat / view --------------------------------------------------------------
+    def focus_chat(self):
+        if self.mode not in ("play", "panel", "chat"):
+            return
+        self.close_panel()
+        self.release_all()
+        self.mode = "chat"
+        self._skip_text = False
+        pygame.key.start_text_input()
+
+    def unfocus_chat(self):
+        if self.mode == "chat":
+            self.mode = "play"
+            pygame.key.stop_text_input()
+
+    def send_chat(self):
+        msg = self.chat_input.strip()
+        if msg:
+            if not self.net.send({"type": "chat", "text": msg}):
+                self.sys_msg("(not connected - message not sent)", ui.BAD)
+        self.chat_input = ""
+        self.chat_scroll = 0
+        self.unfocus_chat()
+
+    def chat_to_bottom(self):
+        self.chat_scroll = 0
+
+    def toggle_wide(self):
+        if not self.wv:
+            self.toast("Wide view works in Yellow for now.", 3, ui.BAD)
+            return
+        self.wide = not self.wide
+        self.cfg["wide_view"] = self.wide
+        self.cfg.save()
+        self.last_wide = None
+        self._make_window()
+        self.toast("Wide view on" if self.wide else "Wide view off", 1.5)
+
     # panels ------------------------------------------------------------------
     def toggle_panel(self, name):
         if self.mode == "panel" and self.panel == name:
@@ -995,10 +1037,17 @@ class App:
                     self.dragging_volume = True
                     self._set_volume_from_x(ev.pos[0])
                 else:
+                    hit = False
                     for rect, cb, _label in reversed(self.click_targets):
                         if rect.collidepoint(ev.pos):
                             cb()
+                            hit = True
                             break
+                    if not hit and self.mode == "chat" and not (self.chat_rect and self.chat_rect.collidepoint(ev.pos)):
+                        self.unfocus_chat()   # clicked away from the chat box
+            elif ev.type == pygame.MOUSEWHEEL:
+                if self.chat_rect and self.chat_rect.collidepoint(pygame.mouse.get_pos()):
+                    self.chat_scroll = max(0, self.chat_scroll + ev.y * 3)
             elif ev.type == pygame.MOUSEMOTION and self.dragging_volume:
                 self._set_volume_from_x(ev.pos[0])
             elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1 and self.dragging_volume:
@@ -1065,13 +1114,7 @@ class App:
             return
         if self.mode == "chat":
             if k == pygame.K_RETURN or k == pygame.K_KP_ENTER:
-                msg = self.chat_input.strip()
-                if msg:
-                    if not self.net.send({"type": "chat", "text": msg}):
-                        self.sys_msg("(not connected)", ui.BAD)
-                self.chat_input = ""
-                self.mode = "play"
-                pygame.key.stop_text_input()
+                self.send_chat()
             elif k == pygame.K_ESCAPE:
                 self.chat_input = ""
                 self.mode = "play"
@@ -1186,10 +1229,8 @@ class App:
         if k in KEYMAP:
             self.press(KEYMAP[k], True)
         elif k == pygame.K_t:
-            self.release_all()
-            self.mode = "chat"
+            self.focus_chat()
             self._skip_text = True  # the "t" that opened chat arrives as TEXTINPUT next
-            pygame.key.start_text_input()
         elif k == pygame.K_TAB:
             if self.battle or self.live:
                 return
@@ -1206,15 +1247,7 @@ class App:
             self.cfg.save()
             self.toast(f"Volume {self.cfg['volume']}%", 1.2)
         elif k == pygame.K_v:
-            if not self.wv:
-                self.toast("Wide view needs the USA/Europe ROM.", 3, ui.BAD)
-            else:
-                self.wide = not self.wide
-                self.cfg["wide_view"] = self.wide
-                self.cfg.save()
-                self.last_wide = None
-                self._make_window()
-                self.toast("Wide view on" if self.wide else "Wide view off", 1.5)
+            self.toggle_wide()
         elif k == pygame.K_m:
             self.audio.set_muted(not self.audio.muted)
             self.toast("Sound off" if self.audio.muted else "Sound on", 1.5)
