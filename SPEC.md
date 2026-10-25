@@ -192,3 +192,58 @@ Image index → tiles: `dir = img & 0xC`, `f = img & 3`; `base = 8 if dir==12 el
 Tiles base..base+3 arranged TL, TR, BL, BR. Horizontal flip of the whole 16×16 when `dir==12` OR (`dir in (0,4)` and `f==3`).
 Color index 0 transparent. Tile data from the sender's VRAM (`sprite` message, 24 tiles: indices 0x00-0x0B then 0x80-0x8B).
 Cache own tiles only while `CFC3 & 1 == 0`.
+
+
+---------------------------------------------------------------------------------------------------
+## 4. Live PvP battles (protocol + game recipe) — added in 0.2.0
+
+Both players' games run the game's own **link battle** engine (`wLinkState = LINK_STATE_BATTLING`), started from the
+overworld (no Cable Club). Link battles are deterministic given: identical parties on both sides, the same 10-byte
+random list (`wLinkBattleRandomNumberList`), and opposite `hSerialConnectionStatus`. Each turn the game calls
+`LinkBattleExchangeData`, which exchanges one nybble (move slot 0-3, switch 4-9, D/E/F specials) via
+`Serial_ExchangeNybble`. The client hooks that routine and carries the nybble over the server instead of a cable.
+Verified: full 2-vs-1-mon battle incl. faint + switch stays HP-identical on both sides, both reach the link result screen.
+
+### Messages (client -> server)
+| type | fields | notes |
+|---|---|---|
+| `battle_request` | `to` uid | target must be online; neither side may be in a trade or battle (error otherwise) |
+| `battle_respond` | `battle_id`, `accept` bool | target only |
+| `battle_ready` | `battle_id`, `mons` list[Mon] (1-6), `trainer` str | sent once the client has frozen the player and snapshotted its game |
+| `battle_move` | `battle_id`, `n` int >= 1, `v` int 0-15, `check` str (optional, <= 64 chars) | relayed verbatim to the opponent |
+| `battle_end` | `battle_id`, `result` int: 0 = I won, 1 = I lost, 2 = draw | |
+| `battle_leave` | `battle_id` | forfeit / cancel at any stage (also valid with an empty/missing id: acts on own battle) |
+
+### Messages (server -> client)
+| type | fields |
+|---|---|
+| `battle_request` | `battle_id`, `from`, `name` (to target only; requester gets nothing back, like trades) |
+| `battle_prepare` | `battle_id`, `with`, `name`, `master` bool (to both after accept; requester is master) |
+| `battle_start` | `battle_id`, `with`, `name`, `master`, `rns` list of 10 ints 0..252, `mons` (opponent's Mon list), `trainer` (opponent's in-game name) |
+| `battle_move` | `battle_id`, `n`, `v`, `check` |
+| `battle_aborted` | `battle_id`, `reason`: `declined` / `timeout` / `cancelled` / `opponent left` / `opponent disconnected` |
+
+### Server state machine
+`requested` (60 s timeout) --accept--> `preparing` (60 s timeout for both `battle_ready`) --both ready--> `running`
+(server generates `rns`) --first `battle_end`--> closed (system broadcast: "A beat B in a link battle!" or "A and B drew!",
+written from the reporter's perspective). `battle_leave` or disconnect at any stage -> `battle_aborted` to the other side
+(reason `cancelled`/`declined` before running, `opponent left`/`opponent disconnected` while running).
+Messages for a battle that no longer exists (late `battle_move`, second `battle_end`, `battle_leave`) are ignored
+silently — **no error message**. A player can be in at most one trade or battle at a time.
+
+### Client recipe (verified)
+1. On `battle_prepare`: block input, wait until `is_safe()`, `save_state` snapshot, heal own party, send `battle_ready` with
+   own party (as read after healing).
+2. On `battle_start`: write opponent's mons (each passed through `full_heal`, same as they did) to the enemy party
+   (count, species list + FF padding, structs, OT, nicks), `wLinkEnemyTrainerName` (D886, 11 bytes) = opponent name,
+   `wLinkBattleRandomNumberList` (D147, 10 bytes) = rns, `wLinkBattleRandomNumberListIndex` (CCDE) = 0,
+   `hSerialConnectionStatus` (FFAA) = 2 if master else 1, `wLinkState` (D12A) = 4, `wLoneAttackNo` = 0,
+   `wCurOpponent` = 200 + 0x19 (OPP_RIVAL1). Unblock input.
+3. Hooks (registered once at startup, inactive unless a PvP battle runs):
+   - `0F:5777 LinkBattleExchangeData` entry: exchange counter n += 1.
+   - `00:211F Serial_ExchangeNybble`: on first call for exchange n send `wSerialExchangeNybbleSendData` (CC42) & 0x0F;
+     if the opponent's nybble for n has arrived write it to `wSerialExchangeNybbleReceiveData` (CC3E); then emulate `ret`
+     (PC = word at SP, SP += 2). The game's own loop polls once per frame, so waiting never blocks the emulator.
+   - `00:2149 Serial_SendZeroByte`: emulate `ret`.
+4. Battle over when `wIsInBattle` returns to 0: result from `wBattleResult` (CF0B: 0 win, 1 lose, 2 draw); wait ~3 s
+   (result screen), send `battle_end`, restore the snapshot.

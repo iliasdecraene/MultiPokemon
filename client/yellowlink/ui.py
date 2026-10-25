@@ -195,7 +195,7 @@ def draw_link_menu(surf, f, app, game_w, game_h):
         lv = e.get("levels") or []
         s = f"{'>' if sel else ' '} {e.get('name')}  ({online}, {len(lv)} Pokémon{', Lv ' + str(max(lv)) if lv else ''})"
         lines.append((s, ACCENT if sel else (TEXT if e.get("online") else DIM)))
-    footer = "[Up/Down] choose  [R] trade (online only)  [B] battle their team  [Esc] close"
+    footer = "[Up/Down] choose  [B] battle  [R] trade  [P] practice vs their team  [Esc] close"
     modal(surf, f, game_w, game_h, "Link menu", lines, footer)
 
 
@@ -261,11 +261,12 @@ def draw_help(surf, f, game_w, game_h):
         "  Start: Enter      Select: Backspace      D-pad: arrow keys",
         "",
         ("YellowLink", ACCENT),
-        "  Tab: link menu - trade (R) or battle (B) a friend",
+        "  Tab: link menu - battle (B), trade (R), practice (P)",
         "  T: chat     Space (hold): fast-forward     M: mute",
         "  F3: report a problem     F5/F6: window size     F2: settings",
         "",
         ("Battles are exhibition matches - nothing is won or lost.", DIM),
+        ("F4 leaves a live battle. Practice = their team played by the game AI.", DIM),
         ("After a trade, SAVE in-game (Start > Save).", DIM),
     ]
     modal(surf, f, game_w, game_h, "How to play", lines, "[Esc / Enter / F1] close")

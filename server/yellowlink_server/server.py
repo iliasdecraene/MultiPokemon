@@ -9,6 +9,7 @@ import hmac
 import json
 import logging
 import os
+import random
 import re
 import time
 import uuid
@@ -27,6 +28,14 @@ MAX_MESSAGE_BYTES = 64 * 1024
 RATE_LIMIT_PER_SEC = 30
 HELLO_TIMEOUT = 10.0
 TRADE_REQUEST_TIMEOUT = 60.0
+BATTLE_REQUEST_TIMEOUT = 60.0
+BATTLE_PREPARE_TIMEOUT = 60.0
+BATTLE_RNS_COUNT = 10
+BATTLE_RNS_MAX = 252
+BATTLE_CHECK_MAX = 64
+# Trade/battle messages get their own rate budget so position spam can never cause a
+# dropped battle_move (which would desync a link battle) or a dropped trade_done.
+CRITICAL_PREFIXES = ("trade_", "battle_")
 CHAT_MAX = 200
 SPRITE_BYTES = 384
 
@@ -123,17 +132,29 @@ class Client:
     state: dict | None = None
     sprite: str | None = None
     trade_id: str | None = None
+    battle_id: str | None = None
     last_report: float = 0.0
     _rate_window: float = 0.0
     _rate_count: int = 0
     _rate_warned: bool = False
+    _crit_count: int = 0
 
-    def allow(self) -> bool:
+    def allow(self, critical: bool = False) -> bool:
+        """Per-second budget: RATE_LIMIT_PER_SEC general messages plus the same number of
+        trade/battle messages, counted separately."""
         now = time.monotonic()
         if now - self._rate_window >= 1.0:
-            self._rate_window, self._rate_count, self._rate_warned = now, 0, False
+            self._rate_window, self._rate_count, self._crit_count = now, 0, 0
+            self._rate_warned = False
+        if critical:
+            self._crit_count += 1
+            return self._crit_count <= RATE_LIMIT_PER_SEC
         self._rate_count += 1
         return self._rate_count <= RATE_LIMIT_PER_SEC
+
+    @property
+    def busy(self) -> bool:
+        return bool(self.trade_id or self.battle_id)
 
     def info(self) -> dict:
         return {"uid": self.uid, "name": self.name, "state": self.state,
@@ -158,6 +179,22 @@ class Trade:
         return uid in (self.a, self.b)
 
 
+@dataclass(eq=False)
+class Battle:
+    id: str
+    a: str  # requester uid (master)
+    b: str  # target uid
+    status: str = "requested"  # requested | preparing | running
+    ready: dict = field(default_factory=dict)  # uid -> {"mons": [...], "trainer": str}
+    timer: asyncio.Task | None = None
+
+    def other(self, uid: str) -> str:
+        return self.b if uid == self.a else self.a
+
+    def has(self, uid: str) -> bool:
+        return uid in (self.a, self.b)
+
+
 # ------------------------------------------------------------------- server
 
 
@@ -170,6 +207,7 @@ class YellowLinkServer:
         # Final outcome of trades that reached "executing": trade_id -> "complete" | "failed".
         # Clients that lost their connection mid-trade ask for this on reconnect.
         self.trade_outcomes: dict[str, str] = {}
+        self.battles: dict[str, Battle] = {}
         self._server = None
 
     # ------------------------------------------------------------ lifecycle
@@ -188,7 +226,7 @@ class YellowLinkServer:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
-        for t in list(self.trades.values()):
+        for t in [*self.trades.values(), *self.battles.values()]:
             if t.timer:
                 t.timer.cancel()
         await self.store.flush()
@@ -260,12 +298,15 @@ class YellowLinkServer:
             async for raw in ws:
                 if self.clients.get(client.uid) is not client:
                     break  # replaced by a newer connection
-                if not client.allow():
+                msg = self._parse(raw)
+                mtype = msg.get("type") if isinstance(msg, dict) else None
+                critical = isinstance(mtype, str) and mtype.startswith(CRITICAL_PREFIXES)
+                if not client.allow(critical):
                     if not client._rate_warned:
                         client._rate_warned = True
                         log.warning("rate limit: dropping messages from %s", client.name)
                     continue
-                await self._dispatch(client, raw)
+                await self._dispatch(client, msg)
         except ConnectionClosed:
             pass
         finally:
@@ -330,6 +371,7 @@ class YellowLinkServer:
         if old is not None:
             log.info("uid %s reconnected; kicking old connection", uid)
             await self._cancel_trade_of(old, "partner left")
+            await self._abort_battle_of(old, disconnected=True)
             del self.clients[uid]
             await self.broadcast({"type": "player_leave", "uid": uid})
             asyncio.get_running_loop().create_task(
@@ -361,6 +403,7 @@ class YellowLinkServer:
             return  # already replaced; the replacement handled cleanup
         del self.clients[client.uid]
         await self._cancel_trade_of(client, "partner left")
+        await self._abort_battle_of(client, disconnected=True)
         self.store.touch(client.uid, client.name)
         log.info("%s (%s) disconnected", client.name, client.uid)
         await self.broadcast({"type": "player_leave", "uid": client.uid})
@@ -368,17 +411,24 @@ class YellowLinkServer:
         await self.broadcast_roster()
 
     # -------------------------------------------------------------- dispatch
-    async def _dispatch(self, client: Client, raw) -> None:
+    @staticmethod
+    def _parse(raw) -> dict | str:
+        """Decode a frame: the message dict, or an error string for the client."""
         if isinstance(raw, bytes):
-            await self.send(client, {"type": "error", "message": "text frames only"})
-            return
+            return "text frames only"
         try:
             msg = json.loads(raw)
         except ValueError:
-            await self.send(client, {"type": "error", "message": "invalid JSON"})
-            return
+            return "invalid JSON"
         if not isinstance(msg, dict):
-            await self.send(client, {"type": "error", "message": "message must be an object"})
+            return "message must be an object"
+        return msg
+
+    async def _dispatch(self, client: Client, msg) -> None:
+        if not isinstance(msg, dict):
+            msg = self._parse(msg)  # raw frame (kept for callers passing text)
+        if isinstance(msg, str):
+            await self.send(client, {"type": "error", "message": msg})
             return
         mtype = msg.get("type")
         fn = self._handlers.get(mtype) if isinstance(mtype, str) else None
@@ -555,10 +605,10 @@ class YellowLinkServer:
             raise Invalid("that player is not online")
         if target is client:
             raise Invalid("cannot trade with yourself")
-        if client.trade_id:
-            raise Invalid("you are already in a trade")
-        if target.trade_id:
-            raise Invalid(f"{target.name} is busy with another trade")
+        if client.busy:
+            raise Invalid("you are already in a trade or battle")
+        if target.busy:
+            raise Invalid(f"{target.name} is busy with another trade or battle")
         trade = Trade(id=uuid.uuid4().hex[:12], a=client.uid, b=target.uid)
         self.trades[trade.id] = trade
         client.trade_id = target.trade_id = trade.id
@@ -659,6 +709,161 @@ class YellowLinkServer:
             state = "pending" if tid in self.trades else "unknown"
         await self.send(client, {"type": "trade_status", "trade_id": tid, "state": state})
 
+    # --------------------------------------------------------------- battles
+    def _battle_for(self, client: Client, msg: dict) -> Battle | None:
+        """The client's battle named by battle_id (empty id = own battle), or None."""
+        bid = msg.get("battle_id")
+        if not bid and client.battle_id:
+            bid = client.battle_id
+        battle = self.battles.get(bid) if isinstance(bid, str) else None
+        if battle is None or not battle.has(client.uid):
+            return None
+        return battle
+
+    def _end_battle(self, battle: Battle) -> None:
+        self.battles.pop(battle.id, None)
+        if battle.timer is not None and battle.timer is not asyncio.current_task():
+            battle.timer.cancel()
+        battle.timer = None
+        for uid in (battle.a, battle.b):
+            c = self.clients.get(uid)
+            if c is not None and c.battle_id == battle.id:
+                c.battle_id = None
+
+    async def _abort_battle(self, battle: Battle, reason: str, notify: tuple[str, ...]) -> None:
+        log.info("battle %s aborted: %s", battle.id, reason)
+        self._end_battle(battle)
+        for uid in notify:
+            await self.send(self.clients.get(uid),
+                            {"type": "battle_aborted", "battle_id": battle.id, "reason": reason})
+
+    async def _abort_battle_of(self, client: Client, *, disconnected: bool) -> None:
+        battle = self.battles.get(client.battle_id) if client.battle_id else None
+        client.battle_id = None
+        if battle is None:
+            return
+        if battle.status == "running":
+            reason = "opponent disconnected" if disconnected else "opponent left"
+        else:
+            reason = "cancelled"
+        await self._abort_battle(battle, reason, (battle.other(client.uid),))
+
+    def _start_battle_timer(self, battle: Battle, status: str, timeout: float) -> None:
+        if battle.timer is not None:
+            battle.timer.cancel()
+
+        async def expire():
+            await asyncio.sleep(timeout)
+            if self.battles.get(battle.id) is battle and battle.status == status:
+                await self._abort_battle(battle, "timeout", (battle.a, battle.b))
+
+        battle.timer = asyncio.get_running_loop().create_task(expire())
+
+    async def on_battle_request(self, client: Client, msg: dict) -> None:
+        to = msg.get("to")
+        target = self.clients.get(to) if isinstance(to, str) else None
+        if target is None:
+            raise Invalid("that player is not online")
+        if target is client:
+            raise Invalid("cannot battle yourself")
+        if client.busy:
+            raise Invalid("you are already in a trade or battle")
+        if target.busy:
+            raise Invalid(f"{target.name} is busy with another trade or battle")
+        battle = Battle(id=uuid.uuid4().hex[:12], a=client.uid, b=target.uid)
+        self.battles[battle.id] = battle
+        client.battle_id = target.battle_id = battle.id
+        self._start_battle_timer(battle, "requested", BATTLE_REQUEST_TIMEOUT)
+        log.info("battle %s requested: %s -> %s", battle.id, client.name, target.name)
+        await self.send(target, {"type": "battle_request", "battle_id": battle.id,
+                                 "from": client.uid, "name": client.name})
+
+    async def on_battle_respond(self, client: Client, msg: dict) -> None:
+        battle = self._battle_for(client, msg)
+        if battle is None or battle.status != "requested" or client.uid != battle.b:
+            raise Invalid("cannot respond to this battle")
+        accept = msg.get("accept")
+        if not isinstance(accept, bool):
+            raise Invalid("accept must be a boolean")
+        if not accept:
+            await self._abort_battle(battle, "declined", (battle.a,))
+            return
+        battle.status = "preparing"
+        self._start_battle_timer(battle, "preparing", BATTLE_PREPARE_TIMEOUT)
+        log.info("battle %s preparing", battle.id)
+        for uid in (battle.a, battle.b):
+            other = self.clients.get(battle.other(uid))
+            await self.send(self.clients.get(uid), {
+                "type": "battle_prepare", "battle_id": battle.id, "with": battle.other(uid),
+                "name": other.name if other else "?", "master": uid == battle.a})
+
+    async def on_battle_ready(self, client: Client, msg: dict) -> None:
+        battle = self._battle_for(client, msg)
+        if battle is None or battle.status != "preparing":
+            raise Invalid("battle is not preparing")
+        mons = msg.get("mons")
+        if not isinstance(mons, list) or not 1 <= len(mons) <= 6:
+            raise Invalid("mons must be a list of 1..6 mons")
+        mons = [validate_mon(m) for m in mons]
+        trainer = msg.get("trainer", "")
+        if not isinstance(trainer, str):
+            raise Invalid("trainer must be a string")
+        battle.ready[client.uid] = {"mons": mons, "trainer": clean_text(trainer, 20)}
+        if len(battle.ready) < 2:
+            return
+        battle.status = "running"
+        if battle.timer is not None:
+            battle.timer.cancel()
+            battle.timer = None
+        rng = random.SystemRandom()
+        rns = [rng.randint(0, BATTLE_RNS_MAX) for _ in range(BATTLE_RNS_COUNT)]
+        log.info("battle %s running", battle.id)
+        sends = []
+        for uid in (battle.a, battle.b):
+            opp_uid = battle.other(uid)
+            opp = self.clients.get(opp_uid)
+            sends.append(self.send(self.clients.get(uid), {
+                "type": "battle_start", "battle_id": battle.id, "with": opp_uid,
+                "name": opp.name if opp else "?", "master": uid == battle.a, "rns": rns,
+                "mons": battle.ready[opp_uid]["mons"],
+                "trainer": battle.ready[opp_uid]["trainer"]}))
+        await asyncio.gather(*sends)
+
+    async def on_battle_move(self, client: Client, msg: dict) -> None:
+        battle = self._battle_for(client, msg)
+        if battle is None or battle.status != "running":
+            return  # late / stray move: ignore silently
+        n = _int(msg, "n", 1)
+        v = _int(msg, "v", 0, 15)
+        check = msg.get("check")
+        if check is not None and (not isinstance(check, str) or len(check) > BATTLE_CHECK_MAX):
+            raise Invalid(f"check must be a string of at most {BATTLE_CHECK_MAX} chars")
+        await self.send(self.clients.get(battle.other(client.uid)),
+                        {"type": "battle_move", "battle_id": battle.id, "n": n, "v": v,
+                         "check": check})
+
+    async def on_battle_end(self, client: Client, msg: dict) -> None:
+        battle = self._battle_for(client, msg)
+        if battle is None or battle.status != "running":
+            return  # second / late battle_end: ignore silently
+        result = _int(msg, "result", 0, 2)
+        self._end_battle(battle)
+        me = client.name
+        other = self.clients.get(battle.other(client.uid))
+        them = other.name if other else self.store.get(battle.other(client.uid))["name"]
+        log.info("battle %s ended (reported by %s: %d)", battle.id, me, result)
+        if result == 0:
+            await self.system(f"{me} beat {them} in a link battle!")
+        elif result == 1:
+            await self.system(f"{them} beat {me} in a link battle!")
+        else:
+            await self.system(f"{me} and {them} drew!")
+
+    async def on_battle_leave(self, client: Client, msg: dict) -> None:
+        if self._battle_for(client, msg) is None:
+            return  # nothing to leave: ignore silently
+        await self._abort_battle_of(client, disconnected=False)
+
     _handlers = {
         "hello": on_hello,
         "ping": on_ping,
@@ -676,4 +881,10 @@ class YellowLinkServer:
         "trade_confirm": on_trade_confirm,
         "trade_cancel": on_trade_cancel,
         "trade_done": on_trade_done,
+        "battle_request": on_battle_request,
+        "battle_respond": on_battle_respond,
+        "battle_ready": on_battle_ready,
+        "battle_move": on_battle_move,
+        "battle_end": on_battle_end,
+        "battle_leave": on_battle_leave,
     }
