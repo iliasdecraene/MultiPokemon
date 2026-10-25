@@ -24,6 +24,7 @@ Run with `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` on a headless machine (th
 | `e2e/walkdiag.py` | wide view while walking: counts frames with black margins (must be 0) |
 | `e2e/libtest.py` | auto-resume across restarts + mouse-driven Multiplayer/Regions panels (click → battle request) |
 | `e2e/traveltest.py` | travelling to another game and back (separate saves/snapshots, Yellow-only features off elsewhere) |
+| `e2e/regionstest.py` | Regions panel by region (one game per region; version chooser when several are added) |
 | `e2e/chattest.py` | chat box: click to type, Send, scrolling, click-away unfocus, wide-view toggle |
 | `e2e/diagtest.py` | logging, error tolerance, bug reports (live + report-only connection), crash marker |
 | `e2e/pvp_proto.py` | two emulators linked in-process (no server) — the original link-battle sync proof |

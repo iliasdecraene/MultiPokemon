@@ -91,39 +91,65 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
          (r.x + 18, r.bottom - 26), DIM)
 
 
+def _region_game(app, region_id, installed_here):
+    """The game used for a region: the player's pick, else the best-supported one they have."""
+    pick = app.cfg.get("region_game", {}).get(region_id)
+    if pick in installed_here:
+        return pick
+    if app.game_id in installed_here:
+        return app.game_id
+    return sorted(installed_here, key=lambda g: (not library.GAMES_BY_ID[g].full_support,
+                                                 installed_here.index(g)))[0]
+
+
 def draw_regions(surf, f, app, game_w, game_h, offset):
     r = _panel_frame(surf, app, f, game_w, game_h, "Regions", offset)
     y = r.y + 56
-    text(surf, f.small, "Add your game files, then travel. Each game keeps its own progress.",
-         (r.x + 18, y), DIM)
+    text(surf, f.small, "One game per region is enough. Each region keeps its own progress.", (r.x + 18, y), DIM)
     y += 30
     installed = app.lib.games
     for region_id, region_name, game_ids in library.REGIONS:
-        card = pygame.Rect(r.x + 12, y, r.w - 24, 30 + 40 * len(game_ids))
+        have = [g for g in game_ids if g in installed]
+        here = app.game_info.region == region_id
+        card = pygame.Rect(r.x + 12, y, r.w - 24, 92 if len(have) > 1 else 64)
         if card.bottom > r.bottom - 60:
             break
-        here = app.game_info.region == region_id
         box(surf, card, PANEL_HI if here else PANEL, ACCENT if here else PANEL_HI, 8)
-        text(surf, f.body, region_name + ("  (you are here)" if here else ""), (card.x + 14, card.y + 7),
-             ACCENT if here else TEXT)
-        gy = card.y + 34
-        for gid in game_ids:
+        text(surf, f.title, region_name, (card.x + 14, card.y + 8), ACCENT if here else TEXT)
+        br = pygame.Rect(card.right - 140, card.y + 12, 126, 36)
+        if not have:
+            names = [library.GAMES_BY_ID[g].title.replace("Pokémon ", "") for g in game_ids]
+            text(surf, f.small, "Add any one of: " + ", ".join(names[:-1]) + " or " + names[-1],
+                 (card.x + 14, card.y + 40), DIM)
+        else:
+            gid = _region_game(app, region_id, have)
             info = library.GAMES_BY_ID[gid]
-            have = gid in installed
-            current = gid == app.game_id
-            label = info.title + ("" if info.full_support else "  - single player for now")
-            text(surf, f.body if have else f.small, label, (card.x + 28, gy + 8), TEXT if have else DIM)
-            br = pygame.Rect(card.right - 140, gy + 2, 126, 32)
-            if current:
-                text(surf, f.small, "playing now", br.center, GOOD, anchor="center")
-            elif have:
+            status = f"Ready - via {info.title}"
+            if not info.full_support:
+                status += "  (single player for now)"
+            text(surf, f.small, status, (card.x + 14, card.y + 40), GOOD if info.full_support else TEXT)
+            if here and app.game_id == gid:
+                text(surf, f.small, "you are here", br.center, GOOD, anchor="center")
+            else:
                 button(surf, app, f, br, "Travel", lambda g=gid: app.travel(g), offset=offset, primary=True,
                        enabled=not (app.trade or app.battle or app.live),
                        tip="Finish your trade or battle first.")
-            else:
-                text(surf, f.small, "not added", br.center, DIM, anchor="center")
-            gy += 40
+            if len(have) > 1:
+                # optional: which version to play this region with
+                text(surf, f.small, "Play with:", (card.x + 14, card.y + 64), DIM)
+                bx = card.x + 90
+                for g in have:
+                    label = library.GAMES_BY_ID[g].title.replace("Pokémon ", "")
+                    w = f.small.size(label)[0] + 22
+                    chip = pygame.Rect(bx, card.y + 60, w, 24)
+                    sel = g == gid
+                    pygame.draw.rect(surf, ACCENT if sel else PANEL_HI, chip, border_radius=12)
+                    text(surf, f.small, label, chip.center, (30, 28, 20) if sel else TEXT, anchor="center")
+                    app.click_targets.append((chip.move(offset), lambda rg=region_id, g=g: app.pick_region_game(rg, g),
+                                              "version:" + g))
+                    bx += w + 8
         y = card.bottom + 10
     button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 48, 200, 36), "Add a game file...", app.add_rom_dialog,
            offset=offset)
-    text(surf, f.small, "English Red, Blue, Yellow, Gold, Silver, Crystal", (r.x + 230, r.bottom - 40), DIM)
+    text(surf, f.small, "Kanto: Red/Blue/Yellow  ·  Johto: Gold/Silver/Crystal",
+         (r.x + 230, r.bottom - 40), DIM)
