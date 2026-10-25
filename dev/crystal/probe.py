@@ -1,0 +1,6 @@
+from common import *
+C = {"wss":0xCF78,"joydis":0xCFBE,"tbf":0xCFCF,"sprupd":0xC2CE,"inptype":0xC2C7,"hBGMap":0xFFD4,"hInMenu":0xFFAA,"hOAMupd":0xFFD8,
+     "state":0xD0ED,"evst":0xD433,"scrfl":0xD434,"smode":0xD437,"srun":0xD438,"bm":0xD22D,"pstate":0xD95D,"face":0xD4E3,"walk":0xD4DD,
+     "mapg":0xDCB5,"mapn":0xDCB6,"x":0xDCB8,"y":0xDCB7,"sfe":0xCFCD,"timpause":0xCFBC,"gametimer":0xCFBC, "spsetup":0xD45B,"sprflags":0xD13E,"hMapAnims":0xFFDE,"menuY":0xCFA9, "hLCDCptr":0xFFC6, "hWY":0xFFD2}
+def probe(pb, tag=""):
+    print(tag, " ".join(f"{k}={wram(pb,a)}" for k,a in C.items()))
