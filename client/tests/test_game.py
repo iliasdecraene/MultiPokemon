@@ -122,3 +122,16 @@ def test_sprite_layout():
     blob = bytes(range(256)) + bytes(128)
     grid = sprites.compose(blob, 0)
     assert len(grid) == 16 and all(len(r) == 16 for r in grid)
+
+
+def test_party_checked_rejects_half_written(gm):
+    mon = make_mon(0x54, nick="PIKACHU", ot="ASH")
+    gm.m[game.PARTY_COUNT] = 1
+    gm.write_party_slot(0, mon)
+    gm.m[game.PARTY_SPECIES + 1] = 0xFF
+    assert gm.party_checked() == [mon]
+    # game bumped the count and species list, but hasn't copied the struct yet
+    gm.m[game.PARTY_COUNT] = 2
+    gm.m[game.PARTY_SPECIES + 1] = 0x26
+    gm.m[game.PARTY_SPECIES + 2] = 0xFF
+    assert gm.party_checked() is None

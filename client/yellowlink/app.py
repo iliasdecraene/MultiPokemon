@@ -601,8 +601,10 @@ class App:
                 if tiles != self.last_sprite_sent:
                     if self.net.send({"type": "sprite", "data": game.b64(tiles)}):
                         self.last_sprite_sent = tiles
-        if self.frame % PARTY_CHECK_EVERY == 0 and not g.in_battle() and not self.battle:
-            party = g.party()
+        if self.frame % PARTY_CHECK_EVERY == 0 and g.is_safe() and not self.battle:
+            party = g.party_checked()
+            if party is None:
+                return
             key = tuple(m.data + m.ot + m.nick for m in party)
             if key != self.last_party_sent:
                 if self.net.send({"type": "party", "mons": [m.to_wire() for m in party],
@@ -756,7 +758,7 @@ class App:
                 self.trade_cursor = max(0, self.trade_cursor - 1)
             elif k == pygame.K_DOWN:
                 self.trade_cursor = min(max(0, len(party) - 1), self.trade_cursor + 1)
-            elif k in (pygame.K_RETURN, pygame.K_KP_ENTER) and party:
+            elif k in (pygame.K_RETURN, pygame.K_KP_ENTER) and party and self.game.party_checked():
                 slot = min(self.trade_cursor, len(party) - 1)
                 t.my_slot, t.my_mon = slot, party[slot]
                 t.me_confirmed = t.them_confirmed = False
