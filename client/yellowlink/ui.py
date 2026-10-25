@@ -112,13 +112,28 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
     app.volume_bar = bar
     y += 28
 
+    # wide view toggle
+    wr = pygame.Rect(x - 2, y - 2, SIDEBAR_W - 24, 26)
+    available = app.wv is not None
+    text(surf, f.small, "Wide view", (x, y + 3), TEXT if available else DIM)
+    sw = pygame.Rect(x0 + SIDEBAR_W - 62, y, 46, 22)
+    on = bool(app.wide)
+    pygame.draw.rect(surf, ACCENT if on else PANEL_HI, sw, border_radius=11)
+    pygame.draw.circle(surf, TEXT, (sw.right - 11 if on else sw.x + 11, sw.centery), 8)
+    text(surf, f.small, "see more of the map" if available else "Yellow only", (x + 80, y + 3), DIM)
+    if available:
+        app.click_targets.append((wr, app.toggle_wide, "Wide view"))
+    else:
+        app.click_targets.append((wr, lambda: app.toast("Wide view works in Yellow for now.", 3, BAD), "Wide view"))
+    y += 32
+
     text(surf, f.body, "Trainers", (x, y), TEXT)
     y += 24
     roster = app.sorted_roster()
     if not roster:
         text(surf, f.small, "nobody here yet", (x, y), DIM)
         y += 20
-    for e in roster[:8]:
+    for e in roster[:6]:
         online = e.get("online")
         dot = GOOD if online else (90, 94, 110)
         pygame.draw.circle(surf, dot, (x + 5, y + 8), 4)
@@ -130,31 +145,11 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
             info = "nearby · " + info
         text(surf, f.small, info, (x0 + SIDEBAR_W - 14, y), DIM, anchor="topright")
         y += 20
-    y += 10
+    y += 8
 
-    text(surf, f.body, "Chat", (x, y), TEXT)
-    y += 24
     hint_h = 92
     btn_h = 52   # Multiplayer / Regions buttons above the key hints
-    chat_bottom = h - hint_h - btn_h - (34 if app.mode == "chat" else 4)
-    lines = []
-    for who, msg, color in app.chat_log[-40:]:
-        prefix = f"{who}: " if who else ""
-        for i, ln in enumerate(wrap(f.small, prefix + msg, SIDEBAR_W - 30)):
-            lines.append((ln, color))
-    max_lines = max(0, (chat_bottom - y) // 18)
-    for ln, color in lines[-max_lines:] if max_lines else []:
-        text(surf, f.small, ln, (x, y), color)
-        y += 18
-
-    if app.mode == "chat":
-        r = pygame.Rect(x - 4, h - hint_h - btn_h - 30, SIDEBAR_W - 20, 26)
-        box(surf, r, PANEL, ACCENT, 6)
-        cursor = "_" if int(time.time() * 2) % 2 else " "
-        shown = app.chat_input
-        while f.small.size(shown + cursor)[0] > r.w - 12 and shown:
-            shown = shown[1:]
-        text(surf, f.small, shown + cursor, (r.x + 6, r.y + 6), TEXT)
+    draw_chat(surf, f, app, pygame.Rect(x0 + 10, y, SIDEBAR_W - 20, h - hint_h - btn_h - y - 4))
 
     # big clickable buttons
     bw = (SIDEBAR_W - 34) // 2
@@ -176,6 +171,82 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
     for hline in hints:
         text(surf, f.small, hline, (x, hy), DIM)
         hy += 19
+
+
+NAME_COLORS = [(255, 179, 102), (130, 200, 255), (180, 160, 255), (120, 225, 170), (255, 140, 170), (240, 220, 110)]
+
+
+def name_color(name):
+    return NAME_COLORS[sum(map(ord, name)) % len(NAME_COLORS)]
+
+
+def draw_chat(surf, f: Fonts, app, r):
+    """Chat room box: scrollable history + an input field ('Click here to chat')."""
+    if r.h < 90:
+        return
+    focused = app.mode == "chat"
+    box(surf, r, PANEL, ACCENT if focused else PANEL_HI, 8)
+    text(surf, f.body, "Chat", (r.x + 10, r.y + 6), TEXT)
+    online = sum(1 for e in app.roster if e.get("online"))
+    text(surf, f.small, f"{online} online", (r.right - 10, r.y + 9), DIM, anchor="topright")
+    app.chat_rect = r
+
+    inp = pygame.Rect(r.x + 8, r.bottom - 36, r.w - 16, 28)
+    area = pygame.Rect(r.x + 10, r.y + 32, r.w - 20, inp.y - r.y - 38)
+    width = area.w - 4
+
+    # build wrapped lines: (segments, ) where the first line of a message starts with a coloured name
+    lines = []
+    for who, msg, color in app.chat_log[-200:]:
+        if who:
+            prefix = who + ": "
+            wrapped = wrap(f.small, prefix + msg, width)
+            first = wrapped[0]
+            lines.append([(prefix, name_color(who)), (first[len(prefix):], color)] if first.startswith(prefix)
+                         else [(first, color)])
+            lines.extend([[(ln, color)] for ln in wrapped[1:]])
+        else:
+            lines.extend([[(ln, color)] for ln in wrap(f.small, msg, width)])
+    per = max(1, area.h // 18)
+    max_scroll = max(0, len(lines) - per)
+    app.chat_scroll = max(0, min(app.chat_scroll, max_scroll))
+    start = max(0, len(lines) - per - app.chat_scroll)
+    visible = lines[start:start + per]
+    clip = surf.get_clip()
+    surf.set_clip(area)
+    yy = area.bottom - len(visible) * 18
+    for segs in visible:
+        xx = area.x
+        for seg, color in segs:
+            rr = text(surf, f.small, seg, (xx, yy), color)
+            xx = rr.right
+        yy += 18
+    surf.set_clip(clip)
+    if not lines:
+        text(surf, f.small, "No messages yet. Say hi!", area.center, DIM, anchor="center")
+    if app.chat_scroll > 0:
+        tag = pygame.Rect(0, 0, 150, 20)
+        tag.midbottom = (area.centerx, area.bottom)
+        pygame.draw.rect(surf, PANEL_HI, tag, border_radius=10)
+        text(surf, f.small, "v newer messages", tag.center, ACCENT, anchor="center")
+        app.click_targets.append((tag, app.chat_to_bottom, "newer"))
+
+    # input field
+    pygame.draw.rect(surf, (24, 26, 36), inp, border_radius=6)
+    pygame.draw.rect(surf, ACCENT if focused else PANEL_HI, inp, 2, border_radius=6)
+    if focused:
+        cursor = "|" if int(time.time() * 2) % 2 else " "
+        shown = app.chat_input
+        while f.small.size(shown + cursor)[0] > inp.w - 60 and shown:
+            shown = shown[1:]
+        text(surf, f.small, shown + cursor, (inp.x + 8, inp.y + 7), TEXT)
+        send = pygame.Rect(inp.right - 50, inp.y + 3, 46, inp.h - 6)
+        pygame.draw.rect(surf, ACCENT, send, border_radius=5)
+        text(surf, f.small, "Send", send.center, (30, 28, 20), anchor="center")
+        app.click_targets.append((send, app.send_chat, "Send"))
+    else:
+        text(surf, f.small, "Click here to chat...", (inp.x + 8, inp.y + 7), DIM)
+        app.click_targets.append((inp, app.focus_chat, "chat input"))
 
 
 def draw_toasts(surf, f: Fonts, toasts, game_w):
