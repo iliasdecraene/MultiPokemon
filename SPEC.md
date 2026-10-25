@@ -348,3 +348,75 @@ Records in the PC store: 32 + 11 + 11 + 1 egg-flag byte (55). Hooks: open `_Bill
 RTC: PyBoy's RTC advances with emulated frames while running (not wall time) and adds the wall time elapsed since it
 was saved when a `.rtc` file or save state is loaded. Keep a `.rtc` next to each `.sav` (`stop(rtc_file=...)`), or
 PyBoy silently reads/writes `<rom>.rtc` next to the ROM. `rtc_file=io.BytesIO()` (empty) raises "No data".
+
+## 7. Challenges (Soul Link) — added in 0.6.0
+
+A challenge is a co-op run between two players on **fresh, separate saves** of the same game (Yellow or Crystal).
+It only runs while **both** players are in it. The server keeps the challenge record and an append-only **ledger**
+of rule events; each client derives the rule state from the ledger (`client/yellowlink/soullink.py`) and enforces
+it in its own game.
+
+### Local storage (client)
+`<appdir>/challenges/<challenge_id>/game.sav`, `resume.state`, `game.rtc`. While playing a challenge,
+`cfg["active_challenge"] = {"id", "game"}`; `Config.game_id/save_path/resume_path` point at the challenge.
+The main game's library, saves, PC database and party snapshot are untouched. On a fresh start of the app
+(e.g. after a crash) `active_challenge` is cleared, so the player always starts in their main game.
+Inside a challenge: no PC-database sync, no trades, no live/practice battles, no party publishing, and only
+players in the same challenge are drawn.
+
+### Record (server, `data/challenges.json`)
+```
+{"id", "kind": "soul_link", "game": "yellow"|"crystal", "players": [uidA, uidB], "names": {uid: name},
+ "rules": {"dupes": bool, "shiny": bool}, "status": "active"|"completed"|"failed"|"abandoned",
+ "created", "updated", "ended", "reason": str, "progress": {uid: {"badges": int, "hof": bool}},
+ "ledger": [event, ...]}
+```
+Summaries (`ledger` omitted, plus `"online": [uid...]` = players currently in the session) go to clients in
+`challenge_list` / `challenge_update`. At most one non-finished challenge per pair and kind.
+
+### Messages
+| client → server | fields | notes |
+|---|---|---|
+| `library` | `games` list[str] | games the player has installed (sent on connect); shown in roster as `games` |
+| `challenge_request` | `to`, `kind`, `game`, `rules` — or `to`, `challenge_id` to continue | target must be online and free |
+| `challenge_respond` | `request_id`, `accept` bool | |
+| `challenge_join` | `challenge_id` | sent after loading into the challenge game (and after every reconnect while in it) |
+| `challenge_leave` | `challenge_id`, `reason` | pause: back to the main game |
+| `challenge_event` | `challenge_id`, `event` | appended to the ledger, echoed to **both** players |
+| `challenge_progress` | `challenge_id`, `badges` | display only |
+| `challenge_abandon` | `challenge_id` | ends it for both (status abandoned) |
+
+| server → client | fields |
+|---|---|
+| `challenge_request` | `request_id`, `from`, `name`, `kind`, `game`, `rules`, `challenge_id` (null = new) |
+| `challenge_declined` | `request_id`, `name`, `reason` |
+| `challenge_go` | `challenge` (summary) — both players travel into the challenge now |
+| `challenge_state` | `challenge` (full record incl. ledger) — reply to `challenge_join` |
+| `challenge_ready` | `challenge_id` — both players are in; the game unpauses |
+| `challenge_partner_lost` | `challenge_id`, `name` — partner's connection dropped; 30 s grace, game paused |
+| `challenge_partner_left` | `challenge_id`, `name`, `reason` — session over, go back to the main game |
+| `challenge_event` | `challenge_id`, `event` (with `seq`, `p` = uid, `ts`) |
+| `challenge_list` | `challenges` list[summary] (after `hello`) |
+| `challenge_update` | `challenge` (summary) — any status/progress change |
+
+Session rules (server): a join from a player of an active challenge marks them present; when both are present →
+`challenge_ready` to both. `challenge_leave` or a disconnect lasting > 30 s ends the session and the other player
+gets `challenge_partner_left`. A player who loads in but whose partner doesn't join within 90 s also gets
+`challenge_partner_left` (reason "didn't load in"). Requests expire after 60 s.
+
+### Ledger events (`event` objects; server adds `seq`, `p`, `ts`)
+| `t` | fields | meaning |
+|---|---|---|
+| `enc` | `area`, `dex`, `status`: "open"\|"caught"\|"failed"\|"skipped", `key` (when caught), `gift` bool, `shiny` bool | first encounter of an area for player `p`. "open" when a counting wild battle starts; then "caught"/"failed". "skipped" = didn't count (dupes clause, shiny clause, no balls yet) |
+| `dead` | `key`, `why` | a mon fainted, was released, or vanished — permanently unusable |
+| `loc` | `key`, `where`: "party"\|"box" | player moved a linked mon (PC rule propagates to the partner) |
+| `swap` | `old`, `new` | in-game NPC trade: the link moves to the received mon |
+| `balls` | | player has Poké Balls for the first time: the Nuzlocke rules (faint = dead, blackout = fail, first encounters) apply from here; gifts (starters) count before it |
+| `hof` | | player entered the Hall of Fame |
+| `blackout` | | whole party fainted → challenge failed |
+
+Server reacts to `hof` (both players → status completed) and `blackout` (status failed). An `enc` left "open" when a
+player reconnects or reloads is treated as **failed** (no rerolling by closing the game mid-battle). Rule
+derivation (in `soullink.py`): two caught encounters in the same area = a linked pair; a caught mon whose partner's
+encounter in that area failed is **unlinked** (must stay boxed); `dead` on either side kills both; `loc` to box
+on one side boxes the partner.

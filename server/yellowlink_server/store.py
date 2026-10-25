@@ -41,6 +41,9 @@ class PlayerStore:
                     "badges": int(p.get("badges", 0) or 0),
                     "last_seen": float(p.get("last_seen", 0) or 0),
                 }
+                for extra in ("game", "games"):          # last region / installed games (0.5+)
+                    if extra in p:
+                        self.players[str(uid)][extra] = p[extra]
         log.info("loaded %d players from %s", len(self.players), self.path)
 
     def save_now(self) -> None:
@@ -102,6 +105,14 @@ class PlayerStore:
         if p is None or p.get("game") == game:
             return False
         p["game"] = game
+        self.schedule_save()
+        return True
+
+    def set_games(self, uid: str, games: list) -> bool:
+        p = self.players.get(uid)
+        if p is None or p.get("games") == games:
+            return False
+        p["games"] = games
         self.schedule_save()
         return True
 

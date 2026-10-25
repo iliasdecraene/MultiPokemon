@@ -20,6 +20,7 @@ from websockets.exceptions import ConnectionClosed
 
 from . import PROTOCOL_VERSION
 from .config import Config
+from .challenges import ChallengeError, ChallengeHub
 from .store import PlayerStore
 
 log = logging.getLogger("yellowlink.server")
@@ -35,7 +36,7 @@ BATTLE_RNS_MAX = 252
 BATTLE_CHECK_MAX = 64
 # Trade/battle messages get their own rate budget so position spam can never cause a
 # dropped battle_move (which would desync a link battle) or a dropped trade_done.
-CRITICAL_PREFIXES = ("trade_", "battle_")
+CRITICAL_PREFIXES = ("trade_", "battle_", "challenge_")
 CHAT_MAX = 200
 SPRITE_BYTES = 384
 
@@ -137,6 +138,8 @@ class Client:
     sprite: str | None = None
     trade_id: str | None = None
     battle_id: str | None = None
+    challenge_id: str | None = None   # set while in (or loading into) a challenge session
+    games: list | None = None         # installed games (from `library`), None = unknown (old client)
     last_report: float = 0.0
     _rate_window: float = 0.0
     _rate_count: int = 0
@@ -158,7 +161,7 @@ class Client:
 
     @property
     def busy(self) -> bool:
-        return bool(self.trade_id or self.battle_id)
+        return bool(self.trade_id or self.battle_id or self.challenge_id)
 
     def info(self) -> dict:
         return {"uid": self.uid, "name": self.name, "state": self.state,
@@ -212,6 +215,7 @@ class YellowLinkServer:
         # Clients that lost their connection mid-trade ask for this on reconnect.
         self.trade_outcomes: dict[str, str] = {}
         self.battles: dict[str, Battle] = {}
+        self.challenges = ChallengeHub(self, config.data_dir, debounce=store_debounce)
         self._server = None
 
     # ------------------------------------------------------------ lifecycle
@@ -233,6 +237,7 @@ class YellowLinkServer:
         for t in [*self.trades.values(), *self.battles.values()]:
             if t.timer:
                 t.timer.cancel()
+        await self.challenges.flush()
         await self.store.flush()
 
     # -------------------------------------------------------------- sending
@@ -281,6 +286,9 @@ class YellowLinkServer:
                 "trainer": p.get("trainer", ""),
                 "game": (self.clients[uid].state or {}).get("game") if online and self.clients[uid].state
                 else p.get("game"),
+                "games": (self.clients[uid].games if online and self.clients[uid].games is not None
+                          else p.get("games")),
+                "challenge": self._challenge_kind(self.clients[uid]) if online else None,
                 "online": online,
                 "party_size": len(species),
                 "levels": levels,
@@ -379,6 +387,7 @@ class YellowLinkServer:
             await self._cancel_trade_of(old, "partner left")
             await self._abort_battle_of(old, disconnected=True)
             del self.clients[uid]
+            await self.challenges.client_gone(old)
             await self.broadcast({"type": "player_leave", "uid": uid})
             asyncio.get_running_loop().create_task(
                 old.ws.close(CLOSE_REPLACED, "logged in from another place"))
@@ -396,6 +405,7 @@ class YellowLinkServer:
             "download_url": self.config.download_url,
             "motd": self.config.motd,
         })
+        await self.send(client, {"type": "challenge_list", "challenges": self.challenges.mine(uid)})
         for c in others:
             if c.sprite is not None:
                 await self.send(client, {"type": "sprite", "uid": c.uid, "data": c.sprite})
@@ -410,6 +420,7 @@ class YellowLinkServer:
         del self.clients[client.uid]
         await self._cancel_trade_of(client, "partner left")
         await self._abort_battle_of(client, disconnected=True)
+        await self.challenges.client_gone(client)
         self.store.touch(client.uid, client.name)
         log.info("%s (%s) disconnected", client.name, client.uid)
         await self.broadcast({"type": "player_leave", "uid": client.uid})
@@ -466,9 +477,14 @@ class YellowLinkServer:
         if not isinstance(game, str) or not re.fullmatch(r"[a-z0-9]{1,16}", game):
             raise Invalid("game must be a short lowercase id")
         state["game"] = game
+        chal = msg.get("challenge")
+        if chal is not None:
+            if not isinstance(chal, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", chal):
+                raise Invalid("challenge must be a short id")
+            state["challenge"] = chal
         client.state = state
         await self.broadcast({"type": "state", "uid": client.uid, **state}, exclude=client)
-        if self.store.set_game(client.uid, game):
+        if chal is None and self.store.set_game(client.uid, game):
             await self.broadcast_roster()           # the trainer list shows everyone's region
 
     async def on_sprite(self, client: Client, msg: dict) -> None:
@@ -500,7 +516,8 @@ class YellowLinkServer:
         log.info("chat <%s> %s", client.name, text)
         # chat goes to everyone, whatever game they're in; "game" lets clients show the sender's region
         game = (client.state or {}).get("game") or (self.store.get(client.uid) or {}).get("game")
-        await self.broadcast({"type": "chat", "uid": client.uid, "name": client.name, "text": text, "game": game})
+        await self.broadcast({"type": "chat", "uid": client.uid, "name": client.name, "text": text, "game": game,
+                              "challenge": self._challenge_kind(client)})
 
     async def on_get_party(self, client: Client, msg: dict) -> None:
         uid = msg.get("uid")
@@ -937,7 +954,43 @@ class YellowLinkServer:
         log.info("PC store of %s saved: rev %d, %d mons", client.name, store["rev"], count)
         await self.send(client, {"type": "pc_saved", "rev": store["rev"]})
 
+    def _challenge_kind(self, client) -> str | None:
+        """Challenge type the player is playing right now (for chat/roster labels), or None."""
+        cid = client.challenge_id if client else None
+        s = self.challenges.sessions.get(cid) if cid else None
+        if s is None or client.uid not in s.present:
+            return None
+        return self.challenges.records[cid]["kind"]
+
+    async def on_library(self, client: Client, msg: dict) -> None:
+        games = msg.get("games")
+        if not isinstance(games, list) or len(games) > 8 or not all(
+                isinstance(g, str) and re.fullmatch(r"[a-z0-9]{1,16}", g) for g in games):
+            raise Invalid("games must be a list of game ids")
+        client.games = sorted(set(games))
+        if self.store.set_games(client.uid, client.games):
+            await self.broadcast_roster()
+
+    def _chal(name):  # noqa: N805 - builds a handler that maps ChallengeError -> Invalid
+        async def handler(self, client, msg):
+            before = (client.challenge_id, self._challenge_kind(client))
+            try:
+                await getattr(self.challenges, name)(client, msg)
+            except ChallengeError as exc:
+                raise Invalid(str(exc)) from None
+            if (client.challenge_id, self._challenge_kind(client)) != before:
+                await self.broadcast_roster()       # "in Soul Link" labels
+        return handler
+
     _handlers = {
+        "library": on_library,
+        "challenge_request": _chal("on_request"),
+        "challenge_respond": _chal("on_respond"),
+        "challenge_join": _chal("on_join"),
+        "challenge_leave": _chal("on_leave"),
+        "challenge_event": _chal("on_event"),
+        "challenge_progress": _chal("on_progress"),
+        "challenge_abandon": _chal("on_abandon"),
         "pc_get": on_pc_get,
         "pc_put": on_pc_put,
         "hello": on_hello,

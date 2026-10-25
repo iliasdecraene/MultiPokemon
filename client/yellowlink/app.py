@@ -19,6 +19,7 @@ from .config import Config, app_dir
 from .diag import Diagnostics, send_report_sync, show_report_window
 from .game import GameMemory
 from . import crystal
+from .challenge import ChallengeMixin
 from .net import NetClient
 
 log = logging.getLogger("yellowlink")
@@ -109,12 +110,19 @@ class GhostBattle:
     result: int | None = None
 
 
-class App:
+class App(ChallengeMixin):
     def __init__(self, cfg: Config, diag: Diagnostics | None = None):
         self.cfg = cfg
         self.diag = diag
         self.lib = library.Library(cfg, app_dir())
-        self.game_id = self.lib.current or "yellow"
+        if cfg.challenge and cfg.challenge["game"] not in self.lib.games:
+            log.warning("challenge game %s is not installed; back to the main game", cfg.challenge["game"])
+            cfg.pop("active_challenge", None)
+            cfg.save()
+        self.init_challenges()
+        # in a challenge: that run's own game + separate save (Config paths follow active_challenge)
+        self.game_id = cfg.challenge["game"] if cfg.challenge else (self.lib.current or "yellow")
+        self.save_tag = f"challenge-{cfg.challenge['id']}" if cfg.challenge else self.game_id
         self.game_info = self.lib.info(self.game_id)
         self.travel_to = None
         self.pcsync = pcdb.PCSync(app_dir() / "pc" / f"{cfg['uid']}.json")
@@ -245,7 +253,7 @@ class App:
         ram = None
         self.had_save = save.exists() and any(save.read_bytes()[:32768])
         if save.exists():
-            shutil.copy2(save, self.cfg.backup_dir / time.strftime(f"{self.game_id}-%Y%m%d-%H%M%S.sav"))
+            shutil.copy2(save, self.cfg.backup_dir / time.strftime(f"{self.save_tag}-%Y%m%d-%H%M%S.sav"))
             self._prune_backups()
             ram = io.BytesIO(save.read_bytes()[:32768])
         else:
@@ -259,7 +267,7 @@ class App:
         self.game = (crystal.CrystalMemory if self.gen2 else GameMemory)(self.pyboy.memory, self.rom)
         # Hooks patch ROM addresses, so only enable them on the exact ROM they were verified on.
         if self.full and self.gen2:
-            self.pc_codec = crystal.Gen2PC(self.pyboy.memory, self.rom)
+            self.pc_codec = None if self.chal else crystal.Gen2PC(self.pyboy.memory, self.rom)
             self.pyboy.hook_register(*crystal.HOOK_PC_OPEN, self._hook_safe(self.on_pc_open), None)
             self.pyboy.hook_register(*crystal.HOOK_PC_CLOSE, self._hook_safe(self.on_pc_close), None)
             if self.wide:
@@ -268,7 +276,7 @@ class App:
         elif self.full:
             self.hooks = pvp.LinkHooks(self.pyboy, self._send_battle_move)
             self.wv = worldview.WorldView(self.rom.rom, margin_x=WIDE_MX, margin_y=WIDE_MY)
-            self.pc_codec = pcdb.Gen1PC(self.pyboy.memory, self.rom)
+            self.pc_codec = None if self.chal else pcdb.Gen1PC(self.pyboy.memory, self.rom)
             self.pyboy.hook_register(0x08, 0x546F, self._hook_safe(self.on_pc_open), None)    # BillsPC_
             self.pyboy.hook_register(0x08, 0x553E, self._hook_safe(self.on_pc_close), None)   # ExitBillsPC
         else:
@@ -343,7 +351,7 @@ class App:
         ok = write_atomic(self.cfg.resume_path, buf.getvalue())
         if ok:
             self.flush_sram()
-            store = self.pcsync.commit()
+            store = None if self.chal else self.pcsync.commit()
             if store:
                 self.net.send({"type": "pc_put", "store": store})
         return ok
@@ -357,7 +365,7 @@ class App:
         pygame.display.flip()
 
     def _prune_backups(self, keep=15):
-        files = sorted(self.cfg.backup_dir.glob(f"{self.game_id}-*.sav"))
+        files = sorted(self.cfg.backup_dir.glob(f"{self.save_tag}-*.sav"))
         for p in files[:-keep]:
             try:
                 p.unlink()
@@ -425,7 +433,8 @@ class App:
             return False
         f = self.friends.get(uid)
         return bool(f and f.state and self.game.in_game() and f.state.get("map") == self.game.map_id()
-                    and f.state.get("visible") and f.state.get("game", "yellow") == self.game_id)
+                    and f.state.get("visible") and f.state.get("game", "yellow") == self.game_id
+                    and f.state.get("challenge") == (self.chal or {}).get("id"))
 
     # -------------------------------------------------------------- network
     def handle_net(self):
@@ -440,7 +449,9 @@ class App:
 
     def on_connected(self, msg):
         log.info("connected to %s", self.cfg["server_url"])
-        self.net.send({"type": "pc_get"})
+        if not self.chal:
+            self.net.send({"type": "pc_get"})
+        self.chal_on_connected()
         self.last_state_sent = None
         self.last_sprite_sent = None
         self.last_party_sent = None
@@ -471,6 +482,7 @@ class App:
             self.sys_msg("The trade didn't complete and couldn't be undone automatically (party changed).", ui.BAD)
 
     def on_disconnected(self, msg):
+        self.chal_on_disconnected()
         log.warning("disconnected: %s (%s)", self.net.status, msg.get("reason"))
         if self.live:
             self._end_live("Battle ended: connection lost.", ui.BAD)
@@ -538,7 +550,8 @@ class App:
         mine = msg.get("uid") == self.cfg["uid"]
         game_id = msg.get("game") or (self.game_id if mine else (self.friends.get(msg.get("uid")) and
                                                                    self.friend_game(msg.get("uid"))))
-        region = library.region_name(game_id)
+        region = "Soul Link" if msg.get("challenge") == "soul_link" or (mine and self.chal) \
+            else library.region_name(game_id)
         who = msg.get("name", "?") + (f" · {region}" if region else "")
         self.chat_log.append((who, msg.get("text", ""), ui.CHAT_SELF if mine else ui.TEXT))
 
@@ -556,7 +569,9 @@ class App:
     def player_region(self, e) -> str:
         """Region label for a roster entry (yourself: the game you're playing right now)."""
         if e.get("uid") == self.cfg["uid"]:
-            return library.region_name(self.game_id)
+            return "Soul Link" if self.chal else library.region_name(self.game_id)
+        if e.get("challenge") == "soul_link":
+            return "Soul Link"
         f = self.friends.get(e.get("uid"))
         return library.region_name((f.state or {}).get("game") if f and f.state else e.get("game"))
 
@@ -565,7 +580,7 @@ class App:
         return (f.state or {}).get("game", "yellow") if f else "yellow"
 
     def on_trade_request(self, msg):
-        if (not self.full or self.trade or self.battle or self.live or self.prompt
+        if (self.chal or not self.full or self.trade or self.battle or self.live or self.prompt
                 or self.friend_game(msg.get("from")) != self.game_id):
             self.net.send({"type": "trade_respond", "trade_id": msg["trade_id"], "accept": False})
             return
@@ -758,7 +773,7 @@ class App:
         self.net.send({"type": "battle_move", "battle_id": s.battle_id, "n": n, "v": v, "check": check})
 
     def on_battle_request(self, msg):
-        if not self.full or self.trade or self.battle or self.live or self.prompt or not self.hooks or not self.game.party():
+        if self.chal or not self.full or self.trade or self.battle or self.live or self.prompt or not self.hooks or not self.game.party():
             self.net.send({"type": "battle_respond", "battle_id": msg["battle_id"], "accept": False})
             return
         self.prompt = {"kind": "battle", "id": msg["battle_id"], "name": msg.get("name", "?"),
@@ -891,6 +906,8 @@ class App:
             st = g.position()
             st["visible"] = g.in_game()  # stay visible (at your last spot) in menus and battles too
             st["game"] = self.game_id
+            if self.chal:
+                st["challenge"] = self.chal["id"]
             st["type"] = "state"
             now = time.time()
             if st != self.last_state_sent or now - self.last_state_time > 2:
@@ -906,7 +923,8 @@ class App:
                 if tiles != self.last_sprite_sent:
                     if self.net.send({"type": "sprite", "data": game.b64(tiles)}):
                         self.last_sprite_sent = tiles
-        if self.frame % PARTY_CHECK_EVERY == 0 and g.is_safe() and not self.battle and not self.live:
+        if self.frame % PARTY_CHECK_EVERY == 0 and g.is_safe() and not self.battle and not self.live \
+                and not self.chal:
             party = g.party_checked()
             if party is None:
                 return
@@ -927,6 +945,10 @@ class App:
         return wrapped
 
     def on_pc_open(self):
+        if self.chal:
+            if self.referee:
+                self.referee.on_pc_open()
+            return
         if not self.pc_codec:
             return
         if self.gen2 and not self.pc_codec.initialised():
@@ -938,6 +960,10 @@ class App:
         log.info("PC opened: %d mons in the database", self.pcsync.count())
 
     def on_pc_close(self):
+        if self.chal:
+            if self.referee:
+                self.referee.on_pc_close()
+            return
         if not self.pc_codec or not self.pcsync.session_open:
             return
         report = self.pcsync.close_session(self.game_id, self.pc_codec, self.G.party_records(self.game))
@@ -1027,6 +1053,9 @@ class App:
         self.panel_sel = None if self.panel_sel == uid else uid
 
     def action_trade(self, e):
+        if self.chal:
+            self.toast("Not during a Soul Link - it's just you and your partner.", 4, ui.BAD)
+            return
         if not e.get("online"):
             self.toast("They need to be online to trade.", color=ui.BAD)
         elif not self.full:
@@ -1042,6 +1071,9 @@ class App:
             self.close_panel()
 
     def action_battle(self, e):
+        if self.chal:
+            self.toast("Not during a Soul Link - it's just you and your partner.", 4, ui.BAD)
+            return
         if not e.get("online"):
             self.toast("They need to be online for a live battle. Try Practice.", color=ui.BAD)
         elif not self.full or not self.hooks:
@@ -1056,6 +1088,9 @@ class App:
             self.close_panel()
 
     def action_practice(self, e):
+        if self.chal:
+            self.toast("Not during a Soul Link - it's just you and your partner.", 4, ui.BAD)
+            return
         if not self.full or self.gen2:
             self.toast("Practice battles work in Yellow for now.", color=ui.BAD)
             return
@@ -1063,6 +1098,9 @@ class App:
         self.close_panel()
 
     def travel(self, game_id):
+        if self.chal:
+            self.leave_to_main("travelled", travel_to=game_id)
+            return
         if self.trade or self.battle or self.live:
             self.toast("Finish your trade or battle first.", color=ui.BAD)
             return
@@ -1282,12 +1320,20 @@ class App:
                     self.net.send({"type": "get_party", "uid": e["uid"]})
                     self.mode = "play"
             return
+        if self.mode == "chal_popup":
+            if k in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE, pygame.K_SPACE):
+                self.chal_close_popup()
+            return
         if self.mode == "prompt":
             p = self.prompt
             if not p or time.time() - (p.get("shown") or 0) < 0.5:
                 return
             if k in (pygame.K_y, pygame.K_RETURN, pygame.K_n, pygame.K_ESCAPE):
                 accept = k in (pygame.K_y, pygame.K_RETURN)
+                if p["kind"] == "challenge":
+                    self.respond_challenge(accept)
+                    self.release_all()
+                    return
                 if p["kind"] == "battle":
                     self.net.send({"type": "battle_respond", "battle_id": p["id"], "accept": accept})
                 else:
@@ -1460,7 +1506,8 @@ class App:
         layer.fill((0, 0, 0, 0))
         for f in self.friends.values():
             st = f.state
-            if not st or not f.sprite or not st.get("visible") or st.get("game", "yellow") != self.game_id:
+            if not st or not f.sprite or not st.get("visible") or st.get("game", "yellow") != self.game_id \
+                    or st.get("challenge") != (self.chal or {}).get("id"):
                 continue
             shift = (0, 0)
             if st.get("map") != me["map"]:
@@ -1534,13 +1581,44 @@ class App:
             panels.draw_multiplayer(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
         elif self.mode == "panel" and self.panel == "regions":
             panels.draw_regions(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
+        elif self.mode == "panel" and self.panel == "challenges":
+            panels.draw_challenges(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
+        elif self.mode == "panel" and self.panel == "soullink":
+            panels.draw_soullink(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
+        elif self.mode == "chal_popup" and self.chal_popup:
+            p = self.chal_popup
+            r = ui.modal(sub, self.fonts, self.game_w, self.game_h, p["title"], p["lines"] + [""],
+                         f"[Enter] OK ({max(0, int(p['until'] - time.time()))}s)")
+            panels.button(sub, self, self.fonts, pygame.Rect(r.right - 118, r.bottom - 50, 100, 36), "OK",
+                          self.chal_close_popup, offset=(0, self.game_y), primary=True)
         elif self.mode == "menu":
             ui.draw_link_menu(sub, self.fonts, self, self.game_w, self.game_h)
         elif self.mode == "trade" and self.trade:
             ui.draw_trade(sub, self.fonts, self, self.game_w, self.game_h)
         elif self.mode == "prompt" and self.prompt:
             left = max(0, int(self.prompt["until"] - time.time()))
-            if self.prompt["kind"] == "battle":
+            if self.prompt["kind"] == "challenge":
+                p = self.prompt
+                game = library.GAMES_BY_ID.get(p["game"])
+                rules = p.get("rules") or {}
+                if p.get("continue"):
+                    lines = [f"{p['name']} wants to continue your Soul Link!",
+                             (f"{game.title if game else p['game']} - you'll both jump into your run.", ui.DIM)]
+                else:
+                    lines = [f"{p['name']} challenges you to a Soul Link!",
+                             (f"{game.title if game else p['game']}, fresh save (your main game is kept safe).",
+                              ui.DIM),
+                             ("Dupes clause " + ("on" if rules.get("dupes", True) else "off")
+                              + (", shiny clause on" if rules.get("shiny") and p["game"] == "crystal" else ""),
+                              ui.DIM)]
+                r = ui.modal(sub, self.fonts, self.game_w, self.game_h, "Challenge!", lines + [(f"({left}s)", ui.DIM), ""],
+                             "[Y] accept    [N] decline")
+                off = (0, self.game_y)
+                panels.button(sub, self, self.fonts, pygame.Rect(r.right - 250, r.bottom - 52, 110, 36), "Accept",
+                              lambda: self.respond_challenge(True), offset=off, primary=True)
+                panels.button(sub, self, self.fonts, pygame.Rect(r.right - 128, r.bottom - 52, 110, 36), "Decline",
+                              lambda: self.respond_challenge(False), offset=off)
+            elif self.prompt["kind"] == "battle":
                 ui.modal(sub, self.fonts, self.game_w, self.game_h, "Battle challenge!",
                          [f"{self.prompt['name']} challenges you to a live battle!",
                           ("Exhibition match: teams fully healed, nothing is lost.", ui.DIM),
@@ -1572,6 +1650,20 @@ class App:
                       ("SAVE IN-GAME FIRST (Start > Save)!", ui.BAD),
                       ("Anything since your last save is lost on restart.", ui.DIM)],
                      "[Enter] restart now    [Esc] later (press U)")
+        if self.chal and self.chal_wait and self.mode != "chal_popup":
+            _, partner = self.chal_partner()
+            msg = {"load": f"Waiting for {partner} to load in...",
+                   "lost": f"{self.chal_wait_name or partner} lost connection - waiting up to 30 s...",
+                   "offline": "Connection lost - reconnecting..."}[self.chal_wait]
+            band = pygame.Rect(0, self.game_h // 2 - 60, self.game_w, 130)
+            shade = pygame.Surface(band.size, pygame.SRCALPHA)
+            shade.fill((0, 0, 0, 190))
+            sub.blit(shade, band.topleft)
+            ui.text(sub, self.fonts.title, msg, (self.game_w // 2, band.y + 22), ui.ACCENT, anchor="midtop")
+            ui.text(sub, self.fonts.small, "Paused - a Soul Link only runs while you're both in it.",
+                    (self.game_w // 2, band.y + 58), ui.DIM, anchor="midtop")
+            panels.button(sub, self, self.fonts, pygame.Rect(self.game_w // 2 - 65, band.y + 84, 130, 34),
+                          "Go back", lambda: self.leave_to_main("paused"), offset=(0, self.game_y))
         ui.draw_toasts(sub, self.fonts, self.toasts, self.game_w)
         if self.fast:
             ui.text(sub, self.fonts.body, ">> fast", (self.game_w - 10, 10), ui.ACCENT, anchor="topright")
@@ -1582,7 +1674,8 @@ class App:
     def step(self):
         """Advance one host frame (network, emulation, publishing)."""
         self.handle_net()
-        ticks = 4 if self.fast and not self.trade else 1
+        paused = self.chal_paused()
+        ticks = 0 if paused else (4 if self.fast and not self.trade else 1)
         for i in range(ticks):
             self.pyboy.tick(1, i == ticks - 1)
             if ticks == 1:
@@ -1590,6 +1683,7 @@ class App:
             self.update_battle()
             self.update_live()
         self._try_apply_trade()
+        self.chal_step()
         if self.update_dl and self.update_dl.status != "downloading" and not getattr(self.update_dl, "announced", False):
             self.update_dl.announced = True
             if self.update_dl.status == "ready":
@@ -1616,7 +1710,7 @@ class App:
         self.publish()
         if self.frame % SRAM_FLUSH_EVERY == 0:
             self.flush_sram()
-        if self.frame % AUTOSAVE_EVERY == 0:
+        if self.frame % AUTOSAVE_EVERY == 0 and not paused:
             self.autosave()
 
     def run(self):
@@ -1678,6 +1772,7 @@ class App:
                 write_atomic(self.rtc_path, rtc.getvalue())
         except Exception:  # noqa: BLE001
             log.exception("shutdown save failed")
+        self.chal_shutdown()
         self.net.stop()
         pygame.quit()
 
@@ -1717,10 +1812,22 @@ def _main(argv, cfg, diag):
         from .setup_dialog import run_setup
         if not run_setup(cfg, first_run=not cfg.is_complete()):
             return
+    if cfg.pop("active_challenge", None):      # crashed/closed inside a challenge: start in the main game
+        cfg.save()
     while True:
         errors_before = diag.errors
         app = App(cfg, diag)
         app.run()
+        if app.enter_challenge:
+            cfg["active_challenge"] = app.enter_challenge
+            cfg.save()
+            continue
+        if app.leave_challenge:
+            cfg.pop("active_challenge", None)
+            cfg.save()
+            if app.travel_to:
+                library.Library(cfg, app_dir()).set_current(app.travel_to)
+            continue
         if app.travel_to:
             library.Library(cfg, app_dir()).set_current(app.travel_to)
             continue

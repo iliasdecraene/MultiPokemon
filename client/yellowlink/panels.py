@@ -1,6 +1,8 @@
 """Mouse-driven panels: Multiplayer and Regions. Pure drawing + click-target registration."""
 from __future__ import annotations
 
+import math
+
 import pygame
 
 from . import library
@@ -79,9 +81,9 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
         y += row_h
         if selected:
             bx = row.x + 32
-            bw = 130
+            bw = 122
             same_game = app.friend_game(uid) == app.game_id if online else True
-            can_live = online and same_game and app.full and app.hooks is not None
+            can_live = online and same_game and app.full and app.hooks is not None and not app.chal
             button(surf, app, f, pygame.Rect(bx, y, bw, 34), "Battle", lambda e=e: app.action_battle(e),
                    enabled=can_live, offset=offset, primary=True,
                    tip="They need to be online, and you both in Yellow.")
@@ -92,6 +94,10 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
                    lambda e=e: app.action_practice(e),
                    enabled=app.full and not app.gen2 and same_game and bool(lv), offset=offset,
                    tip="Practice battles work in Yellow vs a trainer with Pokémon.")
+            done = sum(1 for c in app.challenges_with(uid) if c["status"] == "completed")
+            button(surf, app, f, pygame.Rect(bx + 3 * (bw + 10), y, bw, 34),
+                   "Challenges" + (f" ({done})" if done else ""), lambda u=uid: app.open_challenges(u),
+                   offset=offset)
             y += 44
     text(surf, f.small, "Battle: live vs them  ·  Practice: their team played by the AI (works offline)",
          (r.x + 18, r.bottom - 26), DIM)
@@ -160,3 +166,222 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
            offset=offset)
     text(surf, f.small, "Kanto: Pokémon Yellow  ·  Johto: Pokémon Crystal",
          (r.x + 230, r.bottom - 40), DIM)
+
+
+
+# --- challenges -------------------------------------------------------------------------------------------
+GOLD, GOLD_DARK = (240, 200, 80), (150, 112, 30)
+
+
+def draw_badge(surf, center, state, small=False):
+    """The badge slot: an empty dashed circle, or a gold badge when the challenge was completed."""
+    rad = 13 if small else 20
+    cx, cy = center
+    if state == "completed":
+        pygame.draw.circle(surf, GOLD_DARK, center, rad)
+        pygame.draw.circle(surf, GOLD, center, rad - 3)
+        pts = []
+        for i in range(10):                          # a star
+            a = -math.pi / 2 + i * math.pi / 5
+            rr = (rad - 6) if i % 2 == 0 else (rad - 6) * 0.45
+            pts.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
+        pygame.draw.polygon(surf, (255, 248, 210), pts)
+    else:
+        for i in range(0, 360, 30):
+            a0, a1 = math.radians(i), math.radians(i + 16)
+            pygame.draw.line(surf, (90, 94, 110), (cx + rad * math.cos(a0), cy + rad * math.sin(a0)),
+                             (cx + rad * math.cos(a1), cy + rad * math.sin(a1)), 2)
+
+
+def _status_line(app, c):
+    st = c.get("status")
+    if st == "completed":
+        return "Completed together!", GOOD
+    if st == "failed":
+        return f"Failed: {c.get('reason', '')}", BAD
+    if st == "abandoned":
+        reason = c.get("reason") or "abandoned"
+        return reason[:1].upper() + reason[1:], DIM
+    me = app.cfg["uid"]
+    other = next((u for u in c["players"] if u != me), None)
+    prog = c.get("progress", {})
+    stats = c.get("stats", {})
+    game = library.GAMES_BY_ID.get(c.get("game"))
+    mine = stats.get(me, {})
+    return (f"In progress · {game.title if game else c.get('game')} · you: {mine.get('caught', 0)} caught, "
+            f"{mine.get('dead', 0)} lost · badges {bin(prog.get(me, {}).get('badges', 0)).count('1')}"
+            f"/{bin(prog.get(other, {}).get('badges', 0)).count('1')}"), TEXT
+
+
+def draw_challenges(surf, f, app, game_w, game_h, offset):
+    uid = app.chal_view_uid
+    e = next((r for r in app.roster if r.get("uid") == uid), {}) or {}
+    name = e.get("name", "?")
+    r = _panel_frame(surf, app, f, game_w, game_h, f"Challenges with {name}", offset)
+    button(surf, app, f, pygame.Rect(r.right - 120, r.y + 10, 68, 30), "Back",
+           lambda: app.toggle_panel("multiplayer"), offset=offset)
+    y = r.y + 58
+    if app.chal_form and app.chal_form.get("uid") == uid:
+        _draw_challenge_form(surf, f, app, r, y, offset)
+        return
+    history = [c for c in app.challenges_with(uid) if c["kind"] == "soul_link"]
+    finished = [c for c in history if c["status"] != "active"]
+    completed = sum(1 for c in history if c["status"] == "completed")
+    active = next((c for c in history if c["status"] == "active"), None)
+    # the Soul Link row with its badge slot
+    card = pygame.Rect(r.x + 12, y, r.w - 24, 118)
+    box(surf, card, PANEL_HI, PANEL_HI, 8)
+    draw_badge(surf, (card.x + 34, card.y + 34), "completed" if completed else "empty")
+    if completed > 1:
+        text(surf, f.small, f"x{completed}", (card.x + 34, card.y + 60), GOLD, anchor="midtop")
+    text(surf, f.title, "Soul Link", (card.x + 66, card.y + 10), TEXT)
+    text(surf, f.small, "A Nuzlocke for two: linked partners live and die together.",
+         (card.x + 66, card.y + 40), DIM)
+    online = bool(e.get("online"))
+    if active:
+        line, color = _status_line(app, active)
+        text(surf, f.small, line, (card.x + 66, card.y + 62), color)
+        if app.chal and app.chal["id"] == active["id"]:
+            text(surf, f.small, "You're playing it right now.", (card.x + 66, card.y + 86), GOOD)
+        else:
+            free = online and not e.get("challenge") and not app.chal
+            button(surf, app, f, pygame.Rect(card.x + 66, card.y + 82, 130, 30), "Continue",
+                   lambda c=active: app.continue_challenge(c), enabled=free, offset=offset, primary=True,
+                   tip=f"{name} needs to be online and free to continue." if not app.chal
+                   else "Leave your current challenge first.")
+            if getattr(app, "chal_confirm", None) == active["id"]:
+                button(surf, app, f, pygame.Rect(card.x + 206, card.y + 82, 170, 30), "Really abandon?",
+                       lambda c=active: (app.abandon_challenge(c), setattr(app, "chal_confirm", None)),
+                       offset=offset)
+            else:
+                button(surf, app, f, pygame.Rect(card.x + 206, card.y + 82, 110, 30), "Abandon",
+                       lambda c=active: setattr(app, "chal_confirm", c["id"]), offset=offset)
+    else:
+        last = history[0] if history else None
+        if last:
+            line, color = _status_line(app, last)
+            text(surf, f.small, "Last run: " + line, (card.x + 66, card.y + 62), color)
+        shared = app.shared_games(uid)
+        can = online and not e.get("challenge") and not app.chal and bool(shared)
+        tip = ("Leave your current challenge first." if app.chal else f"{name} needs to be online." if not online
+               else f"{name} is busy in another challenge." if e.get("challenge")
+               else "You both need Pokémon Yellow or Crystal (v1.0) added in Regions.")
+        button(surf, app, f, pygame.Rect(card.x + 66, card.y + 82, 170, 30), "Start a Soul Link",
+               lambda: app.new_challenge_form(uid, name), enabled=can, offset=offset, primary=True, tip=tip)
+    y = card.bottom + 14
+    # history
+    if finished:
+        text(surf, f.body, "Past runs", (r.x + 18, y), TEXT)
+        y += 26
+        for c in finished[:6]:
+            if y > r.bottom - 30:
+                break
+            draw_badge(surf, (r.x + 32, y + 9), "completed" if c["status"] == "completed" else "empty", small=True)
+            line, color = _status_line(app, c)
+            game = library.GAMES_BY_ID.get(c.get("game"))
+            text(surf, f.small, f"{game.title if game else ''}: {line}", (r.x + 54, y + 1), color)
+            y += 26
+    text(surf, f.small, "More challenges coming later.", (r.x + 18, r.bottom - 26), DIM)
+
+
+def _toggle(surf, app, f, rect, label, on, cb, offset):
+    hover = rect.move(offset).collidepoint(pygame.mouse.get_pos())
+    sw = pygame.Rect(rect.x, rect.y + 4, 44, 24)
+    pygame.draw.rect(surf, GOOD if on else (70, 74, 92), sw, border_radius=12)
+    pygame.draw.circle(surf, (245, 245, 250), (sw.right - 12 if on else sw.x + 12, sw.centery), 9)
+    text(surf, f.body, label, (rect.x + 56, rect.y + 5), TEXT if not hover else ACCENT)
+    app.click_targets.append((rect.move(offset), cb, label))
+
+
+def _draw_challenge_form(surf, f, app, r, y, offset):
+    form = app.chal_form
+    text(surf, f.title, "New Soul Link", (r.x + 18, y), ACCENT)
+    y += 34
+    text(surf, f.small, "You both start a fresh save, separate from your main games.", (r.x + 18, y), DIM)
+    text(surf, f.small, "It only runs while you're both in it - pause and continue together any time.",
+         (r.x + 18, y + 18), DIM)
+    y += 50
+    text(surf, f.body, "Game", (r.x + 18, y + 6), TEXT)
+    shared = app.shared_games(form["uid"])
+    for i, g in enumerate(("yellow", "crystal")):
+        info = library.GAMES_BY_ID[g]
+        rect = pygame.Rect(r.x + 100 + i * 190, y, 180, 34)
+        sel = form["game"] == g
+        if sel:
+            pygame.draw.rect(surf, ACCENT, rect.inflate(6, 6), 2, border_radius=9)
+        button(surf, app, f, rect, info.title, lambda g=g: form.__setitem__("game", g), enabled=g in shared,
+               offset=offset, primary=sel, tip="You both need this game added (Crystal: v1.0).")
+    y += 54
+    _toggle(surf, app, f, pygame.Rect(r.x + 18, y, 420, 30), "Dupes clause (skip families you already caught)",
+            form["dupes"], lambda: form.__setitem__("dupes", not form["dupes"]), offset)
+    y += 40
+    shiny_ok = form["game"] == "crystal"
+    _toggle(surf, app, f, pygame.Rect(r.x + 18, y, 420, 30),
+            "Shiny clause (shinies are a free catch)" + ("" if shiny_ok else " - Crystal only"),
+            form["shiny"], lambda: form.__setitem__("shiny", not form["shiny"]), offset)
+    y += 52
+    rules = ["Only the first wild encounter per area counts (once you have Poké Balls).",
+             "Same area = partners. Faint, and your partner's goes too. Missed = no partner.",
+             "PC rule: box one, the partner follows. Blackout = run over for both.",
+             "Win: both of you reach the Hall of Fame."]
+    for line in rules:
+        text(surf, f.small, "· " + line, (r.x + 18, y), DIM)
+        y += 19
+    y += 10
+    button(surf, app, f, pygame.Rect(r.x + 18, y, 200, 36), f"Invite {form['name']}", app.send_challenge,
+           enabled=bool(form.get("game")), offset=offset, primary=True)
+    button(surf, app, f, pygame.Rect(r.x + 230, y, 110, 36), "Cancel",
+           lambda: setattr(app, "chal_form", None), offset=offset)
+
+
+def draw_soullink(surf, f, app, game_w, game_h, offset):
+    """In a run: the linked pairs, and the Pause button."""
+    _, partner = app.chal_partner()
+    r = _panel_frame(surf, app, f, game_w, game_h, f"Soul Link with {partner}", offset)
+    y = r.y + 54
+    sl = app.sl
+    if sl is None:
+        text(surf, f.body, "Connecting...", (r.x + 18, y), DIM)
+    else:
+        cnt = sl.counts()
+        text(surf, f.small, f"{cnt['alive']} alive · {cnt['dead']} lost · rules: "
+             + ("dupes clause on" if sl.rules["dupes"] else "dupes clause off")
+             + (", shiny clause on" if sl.rules["shiny"] else ""), (r.x + 18, y), DIM)
+        y += 26
+        text(surf, f.small, "Area", (r.x + 18, y), DIM)
+        text(surf, f.small, "You", (r.x + 200, y), DIM)
+        text(surf, f.small, partner, (r.x + 390, y), DIM)
+        y += 20
+        view = app.referee.view if app.referee else None
+        rows = sl.pairs()
+        if not rows:
+            text(surf, f.body, "No encounters yet. Go catch something!", (r.x + 18, y + 6), DIM)
+        mine_dead, theirs_dead = sl.mine()["dead"], sl.theirs()["dead"]
+
+        def cell(key, st, dex, dead):
+            if st == "caught":
+                name = app.dex_name(dex or 0)
+                return (f"{name} (lost)", BAD) if key in dead else (name, GOOD)
+            if st == "failed":
+                return "missed", BAD
+            if st == "open":
+                return "in battle...", ACCENT
+            return "-", DIM
+
+        for area, ka, kb, sa, sb, da, db in rows:
+            if y > r.bottom - 70:
+                text(surf, f.small, "...", (r.x + 18, y), DIM)
+                break
+            label = view.area_name(area) if view else area
+            if "*" in area:
+                label += " (shiny)"
+            text(surf, f.small, label[:24], (r.x + 18, y), TEXT)
+            s1, c1 = cell(ka, sa, da, mine_dead)
+            s2, c2 = cell(kb, sb, db, theirs_dead)
+            text(surf, f.small, s1, (r.x + 200, y), c1)
+            text(surf, f.small, s2, (r.x + 390, y), c2)
+            y += 20
+    button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 50, 210, 36), "Pause & go back",
+           lambda: app.leave_to_main("paused"), offset=offset, primary=True)
+    text(surf, f.small, "Your run is saved. Continue it together any time", (r.x + 240, r.bottom - 48), DIM)
+    text(surf, f.small, "from Multiplayer > Challenges.", (r.x + 240, r.bottom - 30), DIM)

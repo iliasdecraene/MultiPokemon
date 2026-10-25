@@ -156,7 +156,8 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
 
     # big clickable buttons
     bw = (SIDEBAR_W - 34) // 2
-    for i, (label, panel) in enumerate((("Multiplayer", "multiplayer"), ("Regions", "regions"))):
+    second = ("Soul Link", "soullink") if app.chal else ("Regions", "regions")
+    for i, (label, panel) in enumerate((("Multiplayer", "multiplayer"), second)):
         br = pygame.Rect(x0 + 12 + i * (bw + 10), h - hint_h - btn_h + 4, bw, 40)
         active = app.panel == panel
         hover = br.collidepoint(pygame.mouse.get_pos())
