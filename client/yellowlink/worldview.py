@@ -262,6 +262,32 @@ class WorldView:
         bp = r[h + 3] | (r[h + 4] << 8)
         return ts, hh, ww, self._rom_addr(bank, bp)
 
+    def neighbor_offset(self, memory, map_id):
+        """Where a connected map sits relative to the current one, in map squares (steps).
+
+        Returns (dx, dy) so that a position (x, y) on `map_id` is (x + dx, y + dy) in the current
+        map's coordinates — the same placement _build_canvas uses. None if not directly connected.
+        """
+        mem = _Mem(memory)
+        w, h = mem[W_CUR_WIDTH], mem[W_CUR_HEIGHT]
+        raw = mem.block(W_CONNECTIONS, 44)
+        for d in range(4):
+            c = raw[11 * d:11 * d + 11]
+            if c[0] == 0xFF or c[0] != map_id:
+                continue
+            hdr = self.map_header(map_id)
+            if hdr is None:
+                return None
+            _, ch, cw, _ = hdr
+            if d in (0, 1):
+                c0 = -_s8(c[8]) // 2
+                r0 = -ch if d == 0 else h
+            else:
+                r0 = -_s8(c[7]) // 2
+                c0 = -cw if d == 2 else w
+            return c0 * 2, r0 * 2
+        return None
+
     # ------------------------------------------------------------------
     def _blockset(self, bank, ptr):
         start = self._rom_addr(bank, ptr)
