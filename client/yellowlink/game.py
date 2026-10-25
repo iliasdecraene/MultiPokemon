@@ -380,3 +380,57 @@ class GameMemory:
             self.write(ENEMY_OT + i * NAME_SIZE, mon.ot)
             self.write(ENEMY_NICKS + i * NAME_SIZE, mon.nick)
         self.write(TRAINER_NAME, text.encode(trainer_name.upper(), NAME_SIZE))
+
+
+# --- fast boot ---------------------------------------------------------
+SAVE_FILE_STATUS = 0xD087   # 0 = not checked yet, 1 = no save, 2 = save found
+SHADOW_OAM = 0xC300
+TILEMAP = 0xC3A0
+
+
+def _overworld_loaded(m) -> bool:
+    return (m[SHADOW_OAM] == 76 and m[SHADOW_OAM + 1] == 72 and not (m[FONT_LOADED] & 1)
+            and m[IS_IN_BATTLE] == 0)
+
+
+def fast_continue(pyboy, max_frames: int = 3000, on_progress=None) -> str:
+    """Skip intro + title and press CONTINUE. Returns 'loaded', 'no-save' or 'timeout'.
+
+    Never touches NEW GAME: if the game reports no save, it stops at the main menu.
+    """
+    m = pyboy.memory
+    cont = text.encode("CONTINUE", 9)[:8]
+    player = text.encode("PLAYER", 7)[:6]
+    f = 0
+    while f < max_frames and m[SAVE_FILE_STATUS] == 0:      # intro + title screen
+        if f % 10 == 0:
+            pyboy.button_press("a")
+        if f % 10 == 3:
+            pyboy.button_release("a")
+        pyboy.tick(1, False, False)
+        f += 1
+        if on_progress and f % 120 == 0:
+            on_progress()
+    pyboy.button_release("a")
+    for _ in range(90):
+        if m[SAVE_FILE_STATUS] == 2:
+            break
+        pyboy.tick(1, False, False)
+        f += 1
+    if m[SAVE_FILE_STATUS] != 2:
+        return "no-save"
+    last_press = -999
+    while f < max_frames:
+        pyboy.tick(1, False, False)
+        f += 1
+        if _overworld_loaded(m):
+            return "loaded"
+        tm = bytes(m[TILEMAP + i] for i in range(360)) if f % 5 == 0 else b""
+        if tm and (cont in tm or player in tm) and f - last_press > 45:
+            pyboy.button_press("a")
+            for _ in range(3):
+                pyboy.tick(1, False, False)
+            pyboy.button_release("a")
+            f += 3
+            last_press = f
+    return "timeout"
