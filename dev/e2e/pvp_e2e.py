@@ -51,8 +51,9 @@ def run(n, cond=None, bot=False):
 run(200)
 print("online:", A.net.status, B.net.status, "hooks:", A.hooks is not None)
 # Ash challenges Brock via the link menu
-A.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_TAB))
-A.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_b))
+A.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_TAB))     # opens the Multiplayer panel
+A.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_DOWN))    # select the first trainer (Brock)
+A.on_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_b))       # Battle
 run(200, lambda: B.mode=="prompt")
 print("B prompt:", B.prompt and B.prompt["kind"])
 time.sleep(0.6)

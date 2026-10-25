@@ -22,6 +22,8 @@ Run with `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` on a headless machine (th
 | `e2e/widetest.py` | wide view in Pallet Town with a friend in the margin |
 | `e2e/bordertest.py` | friend on a connected map (Route 1) drawn across the border from Pallet Town |
 | `e2e/walkdiag.py` | wide view while walking: counts frames with black margins (must be 0) |
+| `e2e/libtest.py` | auto-resume across restarts + mouse-driven Multiplayer/Regions panels (click → battle request) |
+| `e2e/traveltest.py` | travelling to another game and back (separate saves/snapshots, Yellow-only features off elsewhere) |
 | `e2e/diagtest.py` | logging, error tolerance, bug reports (live + report-only connection), crash marker |
 | `e2e/pvp_proto.py` | two emulators linked in-process (no server) — the original link-battle sync proof |
 | `worldview/verify.py` | wide-view renderer vs real screen, pixel agreement report |

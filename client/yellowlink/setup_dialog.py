@@ -5,7 +5,8 @@ import shutil
 import time
 from pathlib import Path
 
-from . import game, text
+from . import library, text
+from .config import app_dir
 
 
 def run_setup(cfg, first_run: bool) -> bool:
@@ -29,12 +30,12 @@ def run_setup(cfg, first_run: bool) -> bool:
         fields[key] = var
         return e
 
-    tk.Label(root, text="Multiplayer for Pokémon Yellow — you bring your own ROM.",
+    tk.Label(root, text="Multiplayer Pokémon — you bring your own game files.",
              font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", **pad)
     row(1, "Your name (shown to friends)", "name")
     row(2, "Server address", "server_url")
     row(3, "Room password", "room_key", show="•")
-    row(4, "Pokémon Yellow ROM (.gb)", "rom_path")
+    row(4, "Your game file (.gb / .gbc)", "rom_path")
 
     def browse_rom():
         p = filedialog.askopenfilename(title="Select your Pokémon Yellow ROM",
@@ -71,24 +72,24 @@ def run_setup(cfg, first_run: bool) -> bool:
             url = "ws://" + url
         rom = fields["rom_path"].get().strip().strip('"')
         if not rom or not Path(rom).is_file():
-            messagebox.showerror("YellowLink", "Please select your Pokémon Yellow ROM file.")
+            messagebox.showerror("YellowLink", "Please select your Pokémon game file (.gb/.gbc).")
             return
-        with open(rom, "rb") as f:
-            header = f.read(0x150)
-        if header[0x134:0x142] != b"POKEMON YELLOW":
-            messagebox.showerror("YellowLink", "That file doesn't look like Pokémon Yellow.")
+        info = library.identify(rom)
+        if info is None:
+            messagebox.showerror("YellowLink", "That file isn't a supported English Pokémon Red, Blue, Yellow,\n"
+                                               "Gold, Silver or Crystal game file.")
             return
-        if game.sha1_of(rom) != game.YELLOW_SHA1:
-            if not messagebox.askyesno("YellowLink",
-                                       "This ROM isn't the USA/Europe release everyone else uses.\n"
-                                       "Other languages/revisions will glitch trades and battles.\n\nUse it anyway?"):
-                return
         sav = sav_var.get().strip().strip('"')
         if sav:
             p = Path(sav)
             if not p.is_file() or p.stat().st_size < 32768:
                 messagebox.showerror("YellowLink", "That save file looks invalid (needs to be 32 KB).")
                 return
+            cfg["current_game"] = info.id
+            try:
+                cfg.resume_path.unlink()   # an imported save replaces the resume snapshot
+            except OSError:
+                pass
             if cfg.save_path.exists():
                 shutil.copy2(cfg.save_path, cfg.backup_dir / f"before-import-{int(time.time())}.sav")
             with open(p, "rb") as f:
@@ -97,7 +98,13 @@ def run_setup(cfg, first_run: bool) -> bool:
         cfg["name"] = name
         cfg["server_url"] = url
         cfg["room_key"] = fields["room_key"].get()
-        cfg["rom_path"] = rom
+        lib = library.Library(cfg, app_dir())
+        try:
+            lib.add_rom(rom)
+        except (ValueError, OSError) as e:
+            messagebox.showerror("YellowLink", str(e))
+            return
+        lib.set_current(info.id)
         cfg["skip_intro"] = bool(skip_var.get())
         cfg.save()
         result["ok"] = True
