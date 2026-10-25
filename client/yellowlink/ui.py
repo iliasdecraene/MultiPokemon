@@ -136,10 +136,10 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
 
     hy = h - hint_h + 6
     pygame.draw.line(surf, PANEL_HI, (x0 + 10, hy - 6), (x0 + SIDEBAR_W - 10, hy - 6))
-    hints = ["Arrows move · X=A · Z=B · Enter=Start",
-             "Bksp=Select · Space hold=fast",
+    hints = ["A button: X or A  ·  B button: Z or S",
+             "Start: Enter · Select: Bksp · Space: fast",
              "Tab: trade/battle menu · T: chat",
-             "F1: help · M: mute · F5/F6: size"]
+             "F1: help · F3: report a problem"]
     for hline in hints:
         text(surf, f.small, hline, (x, hy), DIM)
         hy += 19
@@ -255,18 +255,17 @@ def draw_trade(surf, f, app, game_w, game_h):
 
 def draw_help(surf, f, game_w, game_h):
     lines = [
-        "Play normally — your game and save are your own.",
-        "Friends on the same map walk around in your world.",
+        ("Game Boy controls", ACCENT),
+        "  A button (talk, confirm, next text):  X  or  A",
+        "  B button (back, cancel):  Z  or  S",
+        "  Start: Enter      Select: Backspace      D-pad: arrow keys",
         "",
-        ("Tab  open the link menu (trade / battle)", ACCENT),
-        ("T    chat with everyone", ACCENT),
-        ("Battles are exhibition matches vs. a friend's", TEXT),
-        ("current team: both sides fully healed, nothing", TEXT),
-        ("is won or lost, you're put back where you were.", TEXT),
-        ("After a trade, SAVE in-game (Start > Save).", TEXT),
+        ("YellowLink", ACCENT),
+        "  Tab: link menu - trade (R) or battle (B) a friend",
+        "  T: chat     Space (hold): fast-forward     M: mute",
+        "  F3: report a problem     F5/F6: window size     F2: settings",
         "",
-        ("Controls: arrows, X=A, Z=B, Enter=Start, Bksp=Select", DIM),
-        ("Space (hold) fast-forward · M mute · F5/F6 window size", DIM),
-        ("F2 settings (restart required) · gamepads work too", DIM),
+        ("Battles are exhibition matches - nothing is won or lost.", DIM),
+        ("After a trade, SAVE in-game (Start > Save).", DIM),
     ]
-    modal(surf, f, game_w, game_h, "How YellowLink works", lines, "[Esc / F1] close")
+    modal(surf, f, game_w, game_h, "How to play", lines, "[Esc / Enter / F1] close")

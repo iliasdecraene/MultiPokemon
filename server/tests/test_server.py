@@ -481,3 +481,26 @@ async def test_trade_status_complete_and_unknown(connect_client):
     assert (await a.expect("trade_status", trade_id=tid))["state"] == "complete"
     await a.send(type="trade_status", trade_id="nope")
     assert (await a.expect("trade_status", trade_id="nope"))["state"] == "unknown"
+
+
+async def test_bug_report_saved(connect_client, server):
+    a = await connect_client("Ilias")
+    await a.send(type="bug_report", text="Traceback: boom", reason="crash")
+    r = await a.expect("report_saved")
+    folder = os.path.join(server.config.data_dir, "reports")
+    content = open(os.path.join(folder, r["file"]), encoding="utf-8").read()
+    assert "Traceback: boom" in content and "Ilias" in content
+    await a.send(type="bug_report", text="again")
+    await a.expect("error")  # rate limited
+
+
+async def test_report_only_connection_does_not_join(connect_client, server):
+    watcher = await connect_client("Ilias")
+    async with connect(f"ws://127.0.0.1:{server.port}") as ws:
+        await ws.send(json.dumps({"type": "hello", "name": "Alex", "uid": "report-x", "key": KEY,
+                                  "version": "0.1.1", "protocol": 1, "mode": "report"}))
+        await ws.send(json.dumps({"type": "bug_report", "text": "crash log", "reason": "crash"}))
+        reply = json.loads(await ws.recv())
+        assert reply["type"] == "report_saved"
+    await watcher.expect_none("player_join")
+    assert all(e["name"] != "Alex" for e in server.roster())

@@ -127,3 +127,22 @@ Do this if you own a domain. Caddy gets a free HTTPS certificate automatically.
 Clone the repo somewhere else (e.g. `git clone ... ~/yellowlink-src`), `apt install -y python3-venv`, then
 follow the install steps at the top of `server/yellowlink.service` from inside `~/yellowlink-src/server`
 (it installs into `/opt/yellowlink` with a Python venv; logs via `journalctl -u yellowlink -f`).
+
+
+## Updating to a new version
+
+```bash
+cd /opt/yellowlink && git pull
+cd server && docker compose up -d --build
+```
+
+Players on an older client then see an "update available" notice in the game.
+
+## Reading bug reports from players
+
+When a player presses F3 (or after a crash) and clicks **Send to host**, the report is saved on the server:
+
+```bash
+ls -lt /opt/yellowlink/server/data/reports | head      # newest first
+cat /opt/yellowlink/server/data/reports/<file>.txt
+```

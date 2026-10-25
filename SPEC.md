@@ -83,6 +83,7 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `trade_cancel` | `trade_id` | either side, any time before execute |
 | `trade_done` | `trade_id`, `ok` bool | after the client wrote the received mon into RAM |
 | `trade_status` | `trade_id` | ask the final outcome of a trade (used after reconnecting mid-trade) |
+| `bug_report` | `text` (<=60 KB), `reason` | saved to `<data_dir>/reports/`; answered with `report_saved`. Can also be sent on a report-only connection: `hello` with `"mode": "report"` (not logged in, not shown to others), then one `bug_report`. |
 | `ping` | `t` | server answers `pong` with same `t` |
 
 ### Server -> Client
@@ -105,6 +106,7 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `trade_complete` | `trade_id` (both sides acked ok) |
 | `trade_cancelled` | `trade_id`, `reason` str |
 | `trade_status` | `trade_id`, `state`: `complete` \| `failed` \| `pending` \| `unknown` |
+| `report_saved` | `file` |
 | `error` | `message` |
 | `pong` | `t` |
 
