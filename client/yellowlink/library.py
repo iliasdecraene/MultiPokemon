@@ -22,14 +22,16 @@ class GameInfo:
 # Only Yellow (Kanto) and Crystal (Johto) are supported — one game per region keeps things simple.
 KNOWN_GAMES = {
     "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1": GameInfo("yellow", "Pokémon Yellow", "kanto", True),
-    "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133": GameInfo("crystal", "Pokémon Crystal", "johto", False),
-    "f2f52230b536214ef7c9924f483392993e226cfb": GameInfo("crystal", "Pokémon Crystal", "johto", False),
+    "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133": GameInfo("crystal", "Pokémon Crystal", "johto", True),   # v1.0
+    "f2f52230b536214ef7c9924f483392993e226cfb": GameInfo("crystal", "Pokémon Crystal", "johto", False),  # v1.1: unverified
 }
 CRYSTAL_REVISIONS = {
     "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133": "1.0",
     "f2f52230b536214ef7c9924f483392993e226cfb": "1.1",
 }
-GAMES_BY_ID = {g.id: g for g in KNOWN_GAMES.values()}
+GAMES_BY_ID = {}
+for _g in KNOWN_GAMES.values():          # first entry per id wins (Crystal v1.0 over v1.1)
+    GAMES_BY_ID.setdefault(_g.id, _g)
 REGIONS = [
     ("kanto", "Kanto", ["yellow"]),
     ("johto", "Johto", ["crystal"]),
@@ -74,7 +76,8 @@ class Library:
 
     @property
     def games(self) -> dict:
-        return {k: v for k, v in self.cfg.get("games", {}).items() if Path(v).exists()}
+        # only supported games (0.4.x also accepted Red/Blue/Gold/Silver; those are simply ignored now)
+        return {k: v for k, v in self.cfg.get("games", {}).items() if k in GAMES_BY_ID and Path(v).exists()}
 
     @property
     def current(self) -> str | None:

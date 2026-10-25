@@ -68,7 +68,11 @@ def _b64(value, length: int, what: str) -> bytes:
 def validate_mon(mon) -> dict:
     if not isinstance(mon, dict):
         raise Invalid("mon must be an object")
-    data = _b64(mon.get("data"), 44, "mon.data")
+    if not isinstance(mon.get("data"), str):
+        raise Invalid("mon.data must be a base64 string")
+    # 44 bytes = Gen 1 (Yellow) party struct, 48 bytes = Gen 2 (Crystal)
+    size = 48 if len(mon["data"]) == 64 else 44
+    data = _b64(mon.get("data"), size, "mon.data")
     _b64(mon.get("ot"), 11, "mon.ot")
     _b64(mon.get("nick"), 11, "mon.nick")
     if data[0] == 0:
@@ -267,7 +271,7 @@ class YellowLinkServer:
                 try:
                     raw = base64.b64decode(mon["data"])
                     species.append(raw[0])
-                    levels.append(raw[33])
+                    levels.append(raw[31] if len(raw) == 48 else raw[33])   # Crystal : Yellow
                 except Exception:
                     continue
             online = uid in self.clients
@@ -663,6 +667,9 @@ class YellowLinkServer:
             raise Invalid("trade is not open")
         if len(trade.offers) < 2:
             raise Invalid("both players must offer a Pokemon first")
+        sizes = {len(m["data"]) for _, m in trade.offers.values()}
+        if len(sizes) > 1:
+            raise Invalid("trades only work between players in the same game for now")
         trade.confirmed.add(client.uid)
         await self._send_confirm_state(trade)
         if trade.confirmed >= {trade.a, trade.b}:

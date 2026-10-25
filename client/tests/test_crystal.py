@@ -399,3 +399,60 @@ def test_pcsync_with_gen2_codec(tmp_path):
     assert [e["nick"] for e in sync.working["boxes"][0]] == ["PIKA", "CYNDA"]
     assert sync.working["boxes"][1] == []
     assert sync.working["boxes"][0][1]["gen2"] is not None
+
+
+class EvoRom(FakeRom):
+    BASE = {**FakeRom.BASE, **{64: (40, 35, 30, 105, 120, 70, 24, 24), 65: (55, 50, 45, 120, 135, 85, 24, 24),
+                                 95: (35, 45, 160, 70, 30, 45, 5, 4), 208: (75, 85, 200, 30, 55, 65, 8, 4)}}
+
+    def species_name(self, s):
+        return {64: "KADABRA", 65: "ALAKAZAM", 95: "ONIX", 208: "STEELIX"}.get(s, "MON")
+
+    def species_name_raw(self, s):
+        return text.encode(self.species_name(s))
+
+
+def test_trade_evolution_plain_and_item():
+    rom = EvoRom()
+    kad = crystal.make_mon(rom, 64, 20, [93], 1, "ASH", nick="KADABRA")
+    ala = crystal.evolve_for_trade(kad, rom)
+    assert ala.species == 65 and ala.nick_str() == "ALAKAZAM"
+    assert crystal.calc_stats(ala.data, rom.BASE[65])[0] == ala.max_hp == ala.hp
+    onix = crystal.make_mon(rom, 95, 20, [33], 1, "ASH")
+    assert crystal.evolve_for_trade(onix, rom).species == 95              # no Metal Coat: stays Onix
+    coat = crystal.make_mon(rom, 95, 20, [33], 1, "ASH", item=crystal.METAL_COAT)
+    steelix = crystal.evolve_for_trade(coat, rom)
+    assert steelix.species == 208 and steelix.item == 0                    # item used up
+    stone = crystal.make_mon(rom, 64, 20, [93], 1, "ASH", item=crystal.EVERSTONE)
+    assert crystal.evolve_for_trade(stone, rom).species == 64              # Everstone blocks it
+
+
+class Gen1Rom:
+    """Enough of Yellow's RomData for gen2_to_gen1 (Pidgey = internal 0x24, dex 16)."""
+    def species_for_dex(self, dex):
+        return {16: 0x24}.get(dex, 0)
+
+    def dex_no(self, s):
+        return {0x24: 16}.get(s, 0)
+
+    def base_stats(self, s):
+        return (40, 45, 40, 56, 35, 0, 2) if s == 0x24 else None
+
+    def catch_rate(self, s):
+        return 255
+
+
+def test_gen2_to_gen1_and_back():
+    from yellowlink import pcdb
+    rec2 = crystal.make_mon(FakeRom(), 16, 9, [33, 28], 4321, "CHRIS", nick="BIRDY").box_record()
+    rec1 = pcdb.gen2_to_gen1(rec2, Gen1Rom())
+    assert rec1 and len(rec1) == 55 and rec1[0] == 0x24 and rec1[3] == 9
+    assert rec1[5:7] == bytes([0, 2]) and rec1[8:10] == bytes([33, 28]) and (rec1[12] << 8 | rec1[13]) == 4321
+    assert text.decode(rec1[44:]) == "BIRDY" and text.decode(rec1[33:44]) == "CHRIS"
+    back = crystal.gen1_to_gen2(rec1, 16)
+    assert [i for i in range(55) if back[i] != rec2[i]] in ([], [1], [27], [1, 27])   # item/happiness only
+    # Johto species, Gen-2 moves and eggs can't go to Yellow
+    assert pcdb.gen2_to_gen1(crystal.make_mon(FakeRom(), 155, 5, [33], 1, "X").box_record(), Gen1Rom()) is None
+    assert pcdb.gen2_to_gen1(crystal.make_mon(FakeRom(), 16, 5, [200], 1, "X").box_record(), Gen1Rom()) is None
+    egg = crystal.record(rec2[:32], rec2[32:43], rec2[43:54], egg=True)
+    assert pcdb.gen2_to_gen1(egg, Gen1Rom()) is None

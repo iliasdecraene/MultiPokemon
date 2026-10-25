@@ -332,6 +332,41 @@ def full_heal(mon: Mon, rom: RomData) -> Mon:
     return Mon(bytes(d), mon.ot, mon.nick, mon.egg)
 
 
+
+# Trade evolutions (data/pokemon/evos_attacks.asm). Item ids checked against the ROM's item names.
+KINGS_ROCK, EVERSTONE, METAL_COAT, DRAGON_SCALE, UP_GRADE = 0x52, 0x70, 0x8F, 0x97, 0xAC
+TRADE_EVOLUTIONS = {64: (65, None), 67: (68, None), 75: (76, None), 93: (94, None),        # Kadabra Machoke Graveler Haunter
+                    61: (186, KINGS_ROCK), 79: (199, KINGS_ROCK), 95: (208, METAL_COAT),
+                    123: (212, METAL_COAT), 117: (230, DRAGON_SCALE), 137: (233, UP_GRADE)}
+
+
+def evolve_for_trade(mon: Mon, rom: RomData) -> Mon:
+    """Evolve a freshly received mon like the game does after a trade (Everstone blocks it)."""
+    rule = TRADE_EVOLUTIONS.get(mon.species)
+    if mon.egg or not rule or mon.item == EVERSTONE:
+        return mon
+    new, item = rule
+    if item is not None and mon.item != item:
+        return mon
+    base = rom.base_stats(new)
+    if base is None:
+        return mon
+    d = bytearray(mon.data)
+    old_max, old_hp = mon.max_hp, mon.hp
+    d[0] = new
+    if item is not None:
+        d[1] = 0                                   # the item is used up
+    stats = calc_stats(d, base)
+    d[36:38] = stats[0].to_bytes(2, "big")
+    for i in range(5):
+        d[38 + 2 * i:40 + 2 * i] = stats[i + 1].to_bytes(2, "big")
+    new_hp = max(0, stats[0] - (old_max - old_hp)) if old_hp > 0 else 0
+    d[34:36] = new_hp.to_bytes(2, "big")
+    nick = mon.nick
+    if text.decode(nick) == rom.species_name(mon.species):
+        nick = rom.species_name_raw(new)
+    return Mon(bytes(d), mon.ot, nick, mon.egg)
+
 # ---------------------------------------------------------------------------------------------------------
 class CrystalMemory:
     """Same method names/semantics as game.GameMemory, for Pokémon Crystal."""
@@ -504,6 +539,30 @@ class CrystalMemory:
     def heal_party(self):
         for i, mon in enumerate(self.party()):
             self.write_party_slot(i, full_heal(mon, self.rom))
+
+    def remove_party_slot(self, slot: int):
+        party = self.party()
+        if 0 <= slot < len(party) and len(party) > 1:
+            self.set_party(party[:slot] + party[slot + 1:])
+
+    def apply_trade(self, slot: int, expected: Mon, receive: Mon) -> Mon:
+        """Replace party slot with the received mon. Raises if the slot changed."""
+        party = self.party()
+        if slot >= len(party) or party[slot].identity() != expected.identity():
+            raise RuntimeError("party changed since the offer")
+        new = evolve_for_trade(receive, self.rom)
+        self.write_party_slot(slot, new)
+        self.set_dex(receive.species)
+        self.set_dex(new.species)
+        return new
+
+    def player_img(self) -> int:
+        return self.position()["img"]
+
+    def status_line(self) -> str:
+        return (f"in_game={self.in_game()} map={self.map_id():#06x} xy=({self.r(X_COORD)},{self.r(Y_COORD)}) "
+                f"battle={self.r(BATTLE_MODE)} font={self.font_loaded()} script={self.script_running()} "
+                f"walk={self.r(PLAYER_WALKING)} party={self.r(PARTY_COUNT)}")
 
 
 def rgb555(c: int):

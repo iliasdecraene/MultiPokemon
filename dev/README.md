@@ -36,3 +36,5 @@ Run with `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` on a headless machine (th
 Expected output: see the `print` lines; screenshots go to a temp dir printed at the end.
 - `pc_actions.py` — scripted Bill's PC button presses (deposit/withdraw/release/change box) from `pokecenter_pc.state`.
 - `pctest.py` — PC database e2e on the real ROM (deposit, commit to server, stand-ins, restart).
+- `crossgame.py` — Yellow and Crystal share one PC database (real PC menus in both games).
+- `crystal_mp.py` — two Crystal players + one Yellow player: seeing each other, Crystal trade with evolution, cross-game refusal.

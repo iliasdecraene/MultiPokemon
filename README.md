@@ -1,6 +1,6 @@
 # YellowLink
 
-Private multiplayer for Pokémon Yellow, for you and your friends.
+Private multiplayer for Pokémon Yellow (Kanto) and Pokémon Crystal (Johto), for you and your friends.
 
 Everyone plays their **own** game with their own save and story. On top of that:
 
@@ -10,12 +10,13 @@ Everyone plays their **own** game with their own save and story. On top of that:
 - **Practice**: fight a copy of a friend's team played by the game's AI (Tab → P), even when they're offline.
 - **Wide view** (press **V**): see twice as much of the world around you, NPCs and friends included. The real Game Boy picture stays untouched in the middle.
 - **Straight into your game**: with a save, the intro and title screen are skipped and Continue is picked for you.
-- **Regions**: add your other Pokémon game files (Red, Blue, Gold, Silver, Crystal) and travel between them from the sidebar. Each game keeps its own progress. Multiplayer features are Yellow-only for now.
+- **Two regions**: Kanto is Pokémon Yellow, Johto is Pokémon Crystal. Add your Crystal game file in **Regions** and travel between them from the sidebar. Each game keeps its own progress. In Crystal you see friends and trade (trade evolutions included, Metal Coat and friends too); live battles, practice and wide view are Yellow-only for now.
+- **One PC for both games**: your PC boxes live in your own database (also backed up on the server). Deposit a Pokémon in Yellow and it's in the PC in Crystal, and the other way round. Pokémon that can't exist in a game (a Chikorita in Yellow) show up as `?CHIKORITA` and stay safely in the PC.
 - **No saving needed**: closing YellowLink remembers exactly where you were (it also snapshots every 30 seconds), and every game resumes where you left it.
 - **Chat.** You can also see who's online, and the app shows a notice when an update is available.
 
 > **No ROM is included, and none ever should be.** Each player needs their own copy of
-> *Pokémon Yellow Version (USA, Europe)*. The repo contains only original code; all graphics come from
+> *Pokémon Yellow Version (USA, Europe)*, plus *Pokémon Crystal Version (USA, Europe)* (v1.0 for multiplayer) for Johto. The repo contains only original code; all graphics come from
 > your own game while it runs.
 
 ---
@@ -94,7 +95,7 @@ The client runs the game in [PyBoy](https://github.com/Baekalfen/PyBoy) and read
 addresses in `SPEC.md`, which are taken from the pret/pokeyellow disassembly and verified against the ROM:
 
 - **Friends:** your map ID and pixel position are sent about 15 times a second. Your sprite's tiles are read from video memory, so bikes and surfing show up correctly. Friends are drawn over the game screen using your own map palette.
-- **Trades:** the server runs a two-step handshake. Each client writes the received 44-byte Pokémon record into its party, and undoes the write if the other side fails.
+- **Trades:** the server runs a two-step handshake. Each client writes the received Pokémon record (44 bytes in Yellow, 48 in Crystal) into its party, and undoes the write if the other side fails.
 - **Live battles:** both games run the game's own *link battle* engine (normally used with a link cable), started from the overworld with the same random-number list on both sides. Each turn's choice travels over the server instead of a cable, so both screens show the exact same battle. A save state taken before the battle is restored afterwards.
 - **Practice battles:** a normal trainer battle with the friend's team swapped in and the game's AI in control.
 

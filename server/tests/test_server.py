@@ -529,3 +529,34 @@ async def test_pc_store_roundtrip_and_conflict(connect_client):
     assert got["rev"] == 2 and len(got["boxes"][0]) == 20
     await a.send(type="pc_put", store={"rev": 3, "boxes": [[]]})
     await a.expect("error")
+
+
+def make_crystal_mon(species=155, level=7):
+    data = bytearray(48)
+    data[0], data[31] = species, level
+    m = make_mon()
+    m["data"] = base64.b64encode(bytes(data)).decode()
+    return m
+
+
+async def test_crystal_party_levels_in_roster(connect_client):
+    a = await connect_client("Ilias")
+    await a.send(type="party", mons=[make_crystal_mon(155, 7), make_crystal_mon(16, 4)], trainer="CHRIS", badges=0)
+    r = await a.expect("roster", timeout=3)
+    while not any(e["uid"] == a.uid and e["party_size"] == 2 for e in r["roster"]):
+        r = await a.expect("roster")
+    me = next(e for e in r["roster"] if e["uid"] == a.uid)
+    assert me["levels"] == [7, 4] and me["species"] == [155, 16]
+
+
+async def test_cross_game_trade_cannot_be_confirmed(connect_client):
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    tid = await open_trade(a, b)
+    await a.send(type="trade_offer", trade_id=tid, slot=0, mon=make_mon(0x54, 10))
+    await b.expect("trade_offer")
+    await b.send(type="trade_offer", trade_id=tid, slot=0, mon=make_crystal_mon())
+    await a.expect("trade_offer")
+    await a.send(type="trade_confirm", trade_id=tid)
+    err = await a.expect("error")
+    assert "same game" in err["message"]

@@ -62,9 +62,11 @@ All messages are JSON objects with a `"type"` field. Binary game data is base64 
 
 ### Mon object (used in party / trade / battle)
 ```json
-{"data": "<b64 44 bytes party_struct>", "ot": "<b64 11 bytes>", "nick": "<b64 11 bytes>"}
+{"data": "<b64 44 bytes (Yellow) or 48 bytes (Crystal) party_struct>", "ot": "<b64 11 bytes>", "nick": "<b64 11 bytes>"}
 ```
-Server treats these as opaque except for validation: data decodes to exactly 44 bytes, ot/nick exactly 11 bytes, species byte (data[0]) != 0.
+Trades only complete between mons of the same size (same game); `trade_confirm` errors otherwise.
+State `map` for Crystal is `group << 8 | number` (can exceed 255).
+Server treats these as opaque except for validation: data decodes to exactly 44 or 48 bytes (roster level is byte 33 or 31), ot/nick exactly 11 bytes, species byte (data[0]) != 0.
 
 ### Client -> Server
 | type | fields | notes |

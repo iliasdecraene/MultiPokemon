@@ -97,8 +97,10 @@ pcfiles = [f for f in files if "/pc/" in f]
 check("server pc file exists", bool(pcfiles))
 
 # 2. stand-in from another region
+from yellowlink import text
+CHIK = pcdb._b64(bytes([152]) + bytes(30) + bytes([12]) + text.encode("ASH") + text.encode("CHIKORITA") + b"\x00")
 A.pcsync.working["boxes"][0].append({"id": "johto1", "origin": "crystal", "dex": 152, "level": 12,
-                                     "nick": "CHIKORITA", "ot": "ASH", "otid": 1, "gen1": None, "gen2": "x"})
+                                     "nick": "CHIKORITA", "ot": "ASH", "otid": 1, "gen1": None, "gen2": CHIK})
 A.pcsync.pending = True
 A.autosave(force=True)
 pa.open_pc(pb)
@@ -112,7 +114,7 @@ pa.close_pc(pb)
 check("stand-in removed from party again", len(pa.party(pb)) == n_party and
       all(n != "?CHIKORITA" for _, n in pa.party(pb)))
 check("stand-in back in the database", "CHIKORITA" in db_names(A) and
-      next(e for e in A.pcsync.working["boxes"][0] if e["id"] == "johto1")["gen2"] == "x")
+      next(e for e in A.pcsync.working["boxes"][0] if e["id"] == "johto1")["gen2"] == CHIK)
 pa.open_pc(pb)
 check("box view restored", [n for _, n in pa.box(pb)] == ["PIDGEY", "?CHIKORITA"])
 pa.release(pb, 1)

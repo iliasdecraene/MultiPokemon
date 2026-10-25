@@ -120,6 +120,20 @@ class RomData:
         o = ROM_BASE_STATS + (dex - 1) * 28
         return tuple(self.rom[o + 1:o + 8])
 
+    def species_for_dex(self, dex: int) -> int:
+        """Yellow's internal species index for a national dex number (0 if none)."""
+        if not 1 <= dex <= 151:
+            return 0
+        table = self.rom[ROM_DEX_ORDER:ROM_DEX_ORDER + 190]
+        try:
+            return table.index(dex) + 1
+        except ValueError:
+            return 0
+
+    def catch_rate(self, species: int) -> int:
+        dex = self.dex_no(species)
+        return self.rom[ROM_BASE_STATS + (dex - 1) * 28 + 8] if 1 <= dex <= 151 else 0
+
     def move_pp(self, move: int) -> int:
         if not 1 <= move <= 165:
             return 0
@@ -278,6 +292,24 @@ class GameMemory:
 
     def overworld_visible(self) -> bool:
         return self.in_game() and not self.in_battle() and not self.font_loaded()
+
+    def map_id(self) -> int:
+        return self.m[CUR_MAP]
+
+    def walking(self) -> bool:
+        return self.m[WALK_COUNTER] != 0
+
+    def player_img(self) -> int:
+        return self.m[PLAYER_IMG]
+
+    def status_line(self) -> str:
+        m = self.m
+        return (f"in_game={self.in_game()} map={m[CUR_MAP]} xy=({m[X_COORD]},{m[Y_COORD]}) "
+                f"battle={m[IS_IN_BATTLE]} font={m[FONT_LOADED]} joyignore={m[JOY_IGNORE]} "
+                f"walk={m[WALK_COUNTER]} opp={m[CUR_OPPONENT]} party={m[PARTY_COUNT]}")
+
+    def remove_party_slot(self, slot: int):
+        remove_party_slot(self, slot)
 
     # -- position --
     def position(self) -> dict:

@@ -31,6 +31,12 @@ class FakeRom:
     def dex_no(self, species):
         return species  # good enough for tests
 
+    def species_for_dex(self, dex):
+        return dex if dex <= 151 else 0
+
+
+CHIKORITA_G2 = pcdb._b64(bytes([152]) + bytes(30) + bytes([12]) + text.encode("ASH") + text.encode("CHIKORITA") + b"\x00")
+
 
 def rec(species, nick, ot="ASH", otid=1, level=10):
     d = bytearray(33)
@@ -108,7 +114,7 @@ def test_standins_cannot_leave(tmp_path):
     mem, pc = setup_game([[]])
     sync = pcdb.PCSync(tmp_path / "s.json")
     sync.working["boxes"][0].append({"id": "johto1", "origin": "crystal", "dex": 152, "level": 12,
-                                     "nick": "CHIKORITA", "ot": "ASH", "otid": 1, "gen1": None, "gen2": "x"})
+                                     "nick": "CHIKORITA", "ot": "ASH", "otid": 1, "gen1": None, "gen2": CHIKORITA_G2})
     sync.working["linked"].append("yellow")
     sync.last_view["yellow"] = [[] for _ in range(12)]
     view = sync.open_session("yellow", pc, True)
@@ -118,7 +124,7 @@ def test_standins_cannot_leave(tmp_path):
     pc.write_boxes([[]] * 12)            # player withdraws (or releases) the stand-in
     report = sync.close_session("yellow", pc, party_records=[standin])
     assert report["standins_returned"] == ["CHIKORITA"] and report["standin_party_slots"] == [0]
-    assert sync.working["boxes"][0][0]["id"] == "johto1" and sync.working["boxes"][0][0]["gen2"] == "x"
+    assert sync.working["boxes"][0][0]["id"] == "johto1" and sync.working["boxes"][0][0]["gen2"] == CHIKORITA_G2
 
 
 def test_identical_twins_and_moves(tmp_path):

@@ -163,9 +163,14 @@ class Gen1PC:
                 "gen1": _b64(rec), "gen2": None}
 
     def record_for(self, entry: dict) -> bytes:
-        """The bytes to show in Yellow: the entry's own Gen-1 data, else a stand-in."""
+        """The bytes to show in Yellow: own Gen-1 data, else a Time-Capsule conversion of the Gen-2 data,
+        else a stand-in."""
         if entry.get("gen1"):
             return _unb64(entry["gen1"])
+        if entry.get("gen2"):
+            rec = gen2_to_gen1(_unb64(entry["gen2"]), self.rom)
+            if rec is not None:
+                return rec
         return self.standin(entry)
 
     def standin(self, entry: dict) -> bytes:
@@ -379,3 +384,39 @@ class PCSync:
         if changed or report["added"] or report["removed"]:
             self.pending = True
         return report
+
+
+def gen2_to_gen1(rec2: bytes, rom) -> bytes | None:
+    """Convert a 55-byte Gen-2 (Crystal) box record to a 55-byte Gen-1 (Yellow) one, like the Time Capsule:
+    only Gen-1 species with Gen-1 moves can go; held item, happiness and Pokérus are dropped.
+    None if the mon can't exist in Gen 1 (it then shows as a stand-in)."""
+    from .game import calc_stats
+    if len(rec2) < 54 or (len(rec2) > 54 and rec2[54]):         # eggs stay in Gen 2
+        return None
+    dex, level = rec2[0], rec2[31]
+    species = rom.species_for_dex(dex)
+    if not species or not 1 <= level <= 100:
+        return None
+    moves = rec2[2:6]
+    if any(m > 165 for m in moves) or not any(moves):
+        return None
+    base = rom.base_stats(species)
+    if base is None:
+        return None
+    d = bytearray(G1_STRUCT)
+    d[0] = species
+    d[3] = level
+    d[5], d[6] = base[5], base[6]
+    d[7] = rom.catch_rate(species)
+    d[8:12] = moves
+    d[12:14] = rec2[6:8]
+    d[14:17] = rec2[8:11]
+    d[17:27] = rec2[11:21]
+    d[27:29] = rec2[21:23]
+    d[29:33] = rec2[23:27]
+    party = bytearray(44)                       # calc_stats works on the party layout (level at 33)
+    party[:G1_STRUCT] = d
+    party[33] = level
+    hp = calc_stats(bytes(party), base)[0]
+    d[1], d[2] = hp >> 8, hp & 0xFF
+    return bytes(d) + bytes(rec2[32:43]) + bytes(rec2[43:54])

@@ -17,7 +17,8 @@ from . import __version__, game, library, panels, pcdb, pvp, sprites, ui, update
 from .audio import AudioOut
 from .config import Config, app_dir
 from .diag import Diagnostics, send_report_sync, show_report_window
-from .game import GameMemory, Mon, RomData
+from .game import GameMemory
+from . import crystal
 from .net import NetClient
 
 log = logging.getLogger("yellowlink")
@@ -77,12 +78,12 @@ class TradeSession:
     partner_uid: str
     partner_name: str
     my_slot: int | None = None
-    my_mon: Mon | None = None
-    their_mon: Mon | None = None
+    my_mon: object = None
+    their_mon: object = None
     me_confirmed: bool = False
     them_confirmed: bool = False
     phase: str = "open"          # open | executing | applied | done
-    pending_receive: Mon | None = None
+    pending_receive: object = None
     pending_since: float = 0.0
     applied_backup: tuple | None = None  # (slot, original mon, received mon as written)
 
@@ -127,9 +128,14 @@ class App:
         self._last_err_toast = 0.0
         self.fps = 0.0
         cfg["rom_path"] = self.lib.rom_path(self.game_id) or cfg.get("rom_path", "")
-        self.rom = RomData.from_file(cfg["rom_path"])
-        # Multiplayer features rely on verified Yellow memory addresses. Other games just play.
-        self.full = self.game_info.full_support and game.sha1_of(cfg["rom_path"]) == game.YELLOW_SHA1
+        # One adapter module per game: game (Yellow, Gen 1) or crystal (Gen 2). Same method names.
+        self.gen2 = self.game_id == "crystal"
+        self.G = crystal if self.gen2 else game
+        self.rom = self.G.RomData.from_file(cfg["rom_path"])
+        # Multiplayer features rely on memory addresses verified on these exact ROMs.
+        # Live/practice battles and wide view are Yellow-only (self.hooks / self.wv).
+        sha = game.sha1_of(cfg["rom_path"])
+        self.full = self.game_info.full_support and sha in (game.YELLOW_SHA1, crystal.CRYSTAL_SHA1)
         self.scale = 4
         self.wide = bool(cfg.get("wide_view", False))
         self.wv = None
@@ -244,12 +250,22 @@ class App:
             ram = io.BytesIO(save.read_bytes()[:32768])
         else:
             ram = io.BytesIO(bytes(32768))  # keep PyBoy from writing <rom>.ram next to the ROM
+        extra = {}
+        if self.gen2:                # Crystal's real-time clock lives next to the save
+            extra["rtc_file"] = io.BytesIO(self._load_rtc())
         self.pyboy = PyBoy(self.cfg["rom_path"], window="null", ram_file=ram,
-                           sound_emulated=True, sound_sample_rate=48000, log_level="ERROR")
+                           sound_emulated=True, sound_sample_rate=48000, log_level="ERROR", **extra)
         self.pyboy.set_emulation_speed(0)
-        self.game = GameMemory(self.pyboy.memory, self.rom)
-        # Live battles hook ROM addresses, so only enable them on the exact ROM they were verified on.
-        if self.full:
+        self.game = (crystal.CrystalMemory if self.gen2 else GameMemory)(self.pyboy.memory, self.rom)
+        # Hooks patch ROM addresses, so only enable them on the exact ROM they were verified on.
+        if self.full and self.gen2:
+            self.pc_codec = crystal.Gen2PC(self.pyboy.memory, self.rom)
+            self.pyboy.hook_register(*crystal.HOOK_PC_OPEN, self._hook_safe(self.on_pc_open), None)
+            self.pyboy.hook_register(*crystal.HOOK_PC_CLOSE, self._hook_safe(self.on_pc_close), None)
+            if self.wide:
+                self.wide = False
+                self._make_window()
+        elif self.full:
             self.hooks = pvp.LinkHooks(self.pyboy, self._send_battle_move)
             self.wv = worldview.WorldView(self.rom.rom, margin_x=WIDE_MX, margin_y=WIDE_MY)
             self.pc_codec = pcdb.Gen1PC(self.pyboy.memory, self.rom)
@@ -270,9 +286,25 @@ class App:
         elif self.full and self.had_save and self.cfg.get("skip_intro", True):
             self._loading_screen("Loading your adventure...")
             t0 = time.time()
-            result = game.fast_continue(self.pyboy, on_progress=lambda: self._loading_screen(
+            result = self.G.fast_continue(self.pyboy, on_progress=lambda: self._loading_screen(
                 "Loading your adventure..."))
             log.info("fast continue: %s in %.2fs", result, time.time() - t0)
+
+    @property
+    def rtc_path(self):
+        return self.cfg.save_path.with_suffix(".rtc")
+
+    def _load_rtc(self) -> bytes:
+        """Crystal's clock file. PyBoy can't start from an empty one, so make a fresh clock if missing."""
+        try:
+            data = self.rtc_path.read_bytes()
+            if len(data) >= 33:
+                return data
+        except OSError:
+            pass
+        import struct
+        now = struct.pack("d", time.time())
+        return now + bytes(9) + bytes(8) + now
 
     def _try_resume(self) -> bool:
         """Continue exactly where the player left off (snapshot written on exit / every 30 s)."""
@@ -346,12 +378,9 @@ class App:
 
     # ------------------------------------------------------------- messages
     def debug_snapshot(self) -> str:
-        m = self.pyboy.memory
         g = self.game
         try:
-            gs = (f"in_game={g.in_game()} map={m[game.CUR_MAP]} xy=({m[game.X_COORD]},{m[game.Y_COORD]}) "
-                  f"battle={m[game.IS_IN_BATTLE]} font={m[game.FONT_LOADED]} joyignore={m[game.JOY_IGNORE]} "
-                  f"walk={m[game.WALK_COUNTER]} opp={m[game.CUR_OPPONENT]} party={m[game.PARTY_COUNT]}")
+            gs = g.status_line()
         except Exception as e:  # noqa: BLE001
             gs = f"(game state unreadable: {e})"
         return (f"mode={self.mode} net={self.net.status}/{self.net.status_detail} rtt={self.net.rtt_ms} "
@@ -395,7 +424,7 @@ class App:
         if not self.full:
             return False
         f = self.friends.get(uid)
-        return bool(f and f.state and self.game.in_game() and f.state.get("map") == self.game.m[game.CUR_MAP]
+        return bool(f and f.state and self.game.in_game() and f.state.get("map") == self.game.map_id()
                     and f.state.get("visible") and f.state.get("game", "yellow") == self.game_id)
 
     # -------------------------------------------------------------- network
@@ -520,8 +549,13 @@ class App:
         self.sys_msg("Server: " + msg.get("message", "error"), ui.BAD)
 
     # trades -------------------------------------------------------------
+    def friend_game(self, uid) -> str:
+        f = self.friends.get(uid)
+        return (f.state or {}).get("game", "yellow") if f else "yellow"
+
     def on_trade_request(self, msg):
-        if not self.full or self.trade or self.battle or self.live or self.prompt:
+        if (not self.full or self.trade or self.battle or self.live or self.prompt
+                or self.friend_game(msg.get("from")) != self.game_id):
             self.net.send({"type": "trade_respond", "trade_id": msg["trade_id"], "accept": False})
             return
         self.prompt = {"kind": "trade", "id": msg["trade_id"], "name": msg.get("name", "?"),
@@ -548,7 +582,7 @@ class App:
         t = self.trade
         if t and t.trade_id == msg["trade_id"]:
             try:
-                t.their_mon = Mon.from_wire(msg["mon"])
+                t.their_mon = self.G.Mon.from_wire(msg["mon"])
             except (ValueError, KeyError):
                 t.their_mon = None
 
@@ -563,7 +597,7 @@ class App:
             self.net.send({"type": "trade_done", "trade_id": msg["trade_id"], "ok": False})
             return
         try:
-            t.pending_receive = Mon.from_wire(msg["receive"])
+            t.pending_receive = self.G.Mon.from_wire(msg["receive"])
         except (ValueError, KeyError):
             self.net.send({"type": "trade_done", "trade_id": t.trade_id, "ok": False})
             return
@@ -630,13 +664,13 @@ class App:
 
     # battles ------------------------------------------------------------
     def on_party_data(self, msg):
-        if not self.full:
+        if not self.full or self.gen2:
             return
         if msg.get("error") or not msg.get("mons"):
             self.toast("That trainer has no Pokémon to battle yet.", color=ui.BAD)
             return
         try:
-            mons = [Mon.from_wire(m) for m in msg["mons"]][:6]
+            mons = [game.Mon.from_wire(m) for m in msg["mons"]][:6]
         except (ValueError, KeyError):
             self.toast("Couldn't read their team.", color=ui.BAD)
             return
@@ -737,7 +771,7 @@ class App:
         if not s or s.battle_id != msg.get("battle_id") or s.phase != "ready":
             return
         try:
-            mons = [Mon.from_wire(m) for m in msg.get("mons", [])][:6]
+            mons = [game.Mon.from_wire(m) for m in msg.get("mons", [])][:6]
         except (ValueError, KeyError):
             mons = []
         rns = msg.get("rns") or []
@@ -853,9 +887,9 @@ class App:
                 self.last_state_sent, self.last_state_time = st, now
         if self.frame % 30 == 0:
             tiles = g.sprite_tiles()
-            if tiles and g.m[game.WALK_COUNTER] == 0:
+            if tiles and not g.walking():
                 self.my_tiles = tiles
-                pal = sprites.sample_palette(self.pyboy.screen.ndarray, tiles, g.m[game.PLAYER_IMG])
+                pal = sprites.sample_palette(self.pyboy.screen.ndarray, tiles, g.player_img())
                 if pal:
                     self.palette = pal
                 if tiles != self.last_sprite_sent:
@@ -884,6 +918,9 @@ class App:
     def on_pc_open(self):
         if not self.pc_codec:
             return
+        if self.gen2 and not self.pc_codec.initialised():
+            log.info("PC opened before the first save: Crystal's boxes don't exist yet, not syncing")
+            return
         boxes = self.pcsync.open_session(self.game_id, self.pc_codec, trust_game=self.pc_trust)
         self.pc_codec.write_boxes(boxes)
         self.pc_trust = True
@@ -892,9 +929,9 @@ class App:
     def on_pc_close(self):
         if not self.pc_codec or not self.pcsync.session_open:
             return
-        report = self.pcsync.close_session(self.game_id, self.pc_codec, game.party_records(self.game))
+        report = self.pcsync.close_session(self.game_id, self.pc_codec, self.G.party_records(self.game))
         for slot in sorted(report["standin_party_slots"], reverse=True):
-            game.remove_party_slot(self.game, slot)
+            self.game.remove_party_slot(slot)
         if report["standins_returned"]:
             names = ", ".join(n.title() for n in report["standins_returned"][:3])
             self.toast(f"{names} can't leave the PC here - they live in another region.", 6, ui.ACCENT)
@@ -982,7 +1019,10 @@ class App:
         if not e.get("online"):
             self.toast("They need to be online to trade.", color=ui.BAD)
         elif not self.full:
-            self.toast("Trading works in Yellow for now.", color=ui.BAD)
+            self.toast("Trading isn't available in this game.", color=ui.BAD)
+        elif self.friend_game(e["uid"]) != self.game_id:
+            self.toast(f"{e.get('name')} is playing another game - trades work within the same game for now.",
+                       5, ui.BAD)
         elif not self.game.party():
             self.toast("You need a Pokémon first!", color=ui.BAD)
         else:
@@ -1005,7 +1045,7 @@ class App:
             self.close_panel()
 
     def action_practice(self, e):
-        if not self.full:
+        if not self.full or self.gen2:
             self.toast("Practice battles work in Yellow for now.", color=ui.BAD)
             return
         self.net.send({"type": "get_party", "uid": e["uid"]})
@@ -1382,7 +1422,7 @@ class App:
     def _neighbor_shift(self, map_id):
         if not self.wv or map_id is None:
             return None
-        key = (self.game.m[game.CUR_MAP], map_id)
+        key = (self.game.map_id(), map_id)
         cache = self.__dict__.setdefault("_nb_cache", {})
         if key not in cache:
             try:
@@ -1442,7 +1482,7 @@ class App:
             return
         g = self.game
         img = None
-        cur_map = g.m[game.CUR_MAP]
+        cur_map = g.map_id()
         if self.wv and g.in_game() and not g.in_battle() and not self.battle and not self.live:
             try:
                 img = self.wv.render(self.pyboy.memory, arr, fill_center=False)
@@ -1618,10 +1658,13 @@ class App:
             self.autosave(force=True)
             self.flush_sram(force=True)
             ram = io.BytesIO()
-            self.pyboy.stop(save=True, ram_file=ram)
+            rtc = io.BytesIO() if self.gen2 else None
+            self.pyboy.stop(save=True, ram_file=ram, rtc_file=rtc)
             data = ram.getvalue()
             if len(data) >= 32768 and data != self.last_sram:
                 write_atomic(self.cfg.save_path, data)
+            if rtc is not None and len(rtc.getvalue()) >= 33:
+                write_atomic(self.rtc_path, rtc.getvalue())
         except Exception:  # noqa: BLE001
             log.exception("shutdown save failed")
         self.net.stop()

@@ -77,14 +77,17 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
         if selected:
             bx = row.x + 32
             bw = 130
-            can_live = online and app.full and app.hooks is not None
+            same_game = app.friend_game(uid) == app.game_id if online else True
+            can_live = online and same_game and app.full and app.hooks is not None
             button(surf, app, f, pygame.Rect(bx, y, bw, 34), "Battle", lambda e=e: app.action_battle(e),
                    enabled=can_live, offset=offset, primary=True,
                    tip="They need to be online, and you both in Yellow.")
             button(surf, app, f, pygame.Rect(bx + bw + 10, y, bw, 34), "Trade", lambda e=e: app.action_trade(e),
-                   enabled=online and app.full, offset=offset, tip="They need to be online, and you both in Yellow.")
+                   enabled=online and same_game and app.full, offset=offset,
+                   tip="They need to be online and playing the same game as you.")
             button(surf, app, f, pygame.Rect(bx + 2 * (bw + 10), y, bw, 34), "Practice",
-                   lambda e=e: app.action_practice(e), enabled=app.full and bool(lv), offset=offset,
+                   lambda e=e: app.action_practice(e),
+                   enabled=app.full and not app.gen2 and same_game and bool(lv), offset=offset,
                    tip="Practice battles work in Yellow vs a trainer with Pokémon.")
             y += 44
     text(surf, f.small, "Battle: live vs them  ·  Practice: their team played by the AI (works offline)",
@@ -126,7 +129,8 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
             info = library.GAMES_BY_ID[gid]
             status = f"Ready - via {info.title}"
             if not info.full_support:
-                status += "  (single player for now)"
+                status += "  (single player: multiplayer needs Crystal v1.0)" if gid == "crystal" else \
+                    "  (single player for now)"
             text(surf, f.small, status, (card.x + 14, card.y + 40), GOOD if info.full_support else TEXT)
             if here and app.game_id == gid:
                 text(surf, f.small, "you are here", br.center, GOOD, anchor="center")
