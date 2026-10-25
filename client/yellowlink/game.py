@@ -62,7 +62,7 @@ TRADE_EVOLUTIONS = {0x26: 0x95, 0x29: 0x7E, 0x27: 0x31, 0x93: 0x0E}
 
 # --- ROM tables (file offsets) -----------------------------------------
 ROM_MOVES = 0x38000          # 6 bytes/move, pp at +5, index move-1
-ROM_BASE_STATS = 0x3C3DE     # 28 bytes/entry, index dexno-1
+ROM_BASE_STATS = 0x383DE     # 28 bytes/entry, index dexno-1 (0E:43DE)
 ROM_DEX_ORDER = 0x410B1      # index species-1 -> dexno
 ROM_MON_NAMES = 0xE8000      # 10 bytes/species, index species-1
 ROM_MOVE_NAMES = 0xBC000     # 0x50-terminated list

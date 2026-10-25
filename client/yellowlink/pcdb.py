@@ -329,12 +329,6 @@ class PCSync:
                 pool.setdefault(_unb64(rb), []).append((bi, eid))
         new_boxes = [list() for _ in range(STORE_BOXES)]
         used = set()
-        # Entries this game never saw (added from another game since) are kept exactly where they are.
-        seen = {eid for box in before for eid, _ in box}
-        for bi, box in enumerate(self.working["boxes"][:len(game_boxes)]):
-            for e in box:
-                if e["id"] not in seen:
-                    new_boxes[bi].append(e)
         for bi, box in enumerate(game_boxes):
             for rec in box:
                 cands = pool.get(bytes(rec), [])
@@ -348,6 +342,12 @@ class PCSync:
                 else:
                     new_boxes[bi].append(codec.entry_from_record(rec, origin=game_id))
                     report["added"] += 1
+        # Entries this game never saw (added from another game since) stay in their box, after the ones it knows.
+        seen = {eid for box in before for eid, _ in box}
+        for bi, box in enumerate(self.working["boxes"][:len(game_boxes)]):
+            for e in box:
+                if e["id"] not in seen:
+                    new_boxes[bi].append(e)
         # entries that disappeared from this game's view
         for bi, box in enumerate(before):
             for eid, rb in box:

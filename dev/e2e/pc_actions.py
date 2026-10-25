@@ -19,9 +19,7 @@ party mon, the following Pikachu, a full box or an empty box).
 
 Run as a script for a demo:  python dev/e2e/pc_actions.py
 """
-import io
 import os
-import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.abspath(os.path.join(_HERE, "..", ".."))
@@ -305,6 +303,7 @@ if __name__ == "__main__":
     print("deposit(1) ->", deposit(pb, 1)); _show(pb, "deposit")
     print("withdraw(0) ->", withdraw(pb, 0)); _show(pb, "withdraw")
     print("release(0) ->", release(pb, 0)); _show(pb, "release")
+    print("deposit(1) ->", deposit(pb, 1)); _show(pb, "deposit")
     print("change_box(1) ->", change_box(pb, 1)); _show(pb, "change_box")
     print("change_box(0) ->", change_box(pb, 0)); _show(pb, "change_box")
     close_pc(pb)

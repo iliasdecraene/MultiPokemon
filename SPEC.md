@@ -169,7 +169,7 @@ Party struct (44 bytes): 0 species(internal idx) · 1-2 HP BE · 3 box level · 
 
 ROM tables (file offset = bank*0x4000 + (addr-0x4000)):
 * Moves: 0E:4000 → 0x38000, 6 bytes/move (anim, effect, power, type, accuracy, **pp**), index move_id-1.
-* BaseStats: 0E:43DE → 0x3C3DE, 28 bytes/entry, index dexno-1: [dexno, hp, atk, def, spd, spc, type1, type2, ...].
+* BaseStats: 0E:43DE → 0x383DE, 28 bytes/entry, index dexno-1: [dexno, hp, atk, def, spd, spc, type1, type2, ...].
 * PokedexOrder: 10:50B1 → 0x410B1, 1 byte/species, index internal_id-1 → dexno.
 * MonsterNames: 3A:4000 → 0xE8000, 10 bytes/species (0x50 padded), index internal_id-1.
 

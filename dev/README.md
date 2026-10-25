@@ -31,3 +31,5 @@ Run with `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` on a headless machine (th
 | `worldview/verify.py` | wide-view renderer vs real screen, pixel agreement report |
 
 Expected output: see the `print` lines; screenshots go to a temp dir printed at the end.
+- `pc_actions.py` — scripted Bill's PC button presses (deposit/withdraw/release/change box) from `pokecenter_pc.state`.
+- `pctest.py` — PC database e2e on the real ROM (deposit, commit to server, stand-ins, restart).
