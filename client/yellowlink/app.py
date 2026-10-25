@@ -10,6 +10,7 @@ import time
 import webbrowser
 from dataclasses import dataclass, field
 
+import numpy as np
 import pygame
 
 from . import __version__, game, pvp, sprites, ui, updater
@@ -149,6 +150,7 @@ class App:
         self.fast = False
         self.last_sram: bytes | None = None
         self.sprite_cache = sprites.SpriteCache()
+        self.clean_frame = None
 
         self._skip_text = False
         pygame.mixer.pre_init(48000, -16, 2, 1024)
@@ -185,6 +187,7 @@ class App:
         h = max(self.game_h, 480)
         self.screen = pygame.display.set_mode((self.game_w + ui.SIDEBAR_W, h))
         self.game_surf = pygame.Surface((160, 144))
+        self.friend_layer = pygame.Surface((160, 144), pygame.SRCALPHA)
         self.game_y = (h - self.game_h) // 2
 
     def _start_emulator(self):
@@ -725,7 +728,7 @@ class App:
             return
         if self.frame % STATE_SEND_EVERY == 0:
             st = g.position()
-            st["visible"] = g.overworld_visible() and not self.battle and not self.live
+            st["visible"] = g.in_game()  # stay visible (at your last spot) in menus and battles too
             st["type"] = "state"
             now = time.time()
             if st != self.last_state_sent or now - self.last_state_time > 2:
@@ -1019,12 +1022,33 @@ class App:
             else:
                 f.anim = 0
 
-    def draw_friends(self):
+    def menu_mask(self, arr):
+        """8x8-cell mask (18x20) of screen areas covered by a menu/text box, or None if nothing is.
+
+        While a menu is open the player can't move, so any cell that differs from the last clean
+        overworld frame must be covered by the menu. Works for text boxes and full-screen menus alike.
+        """
         g = self.game
-        if not g.overworld_visible() or self.battle:
+        if not g.font_loaded():
+            self.clean_frame = arr.copy()
+            return None
+        if self.clean_frame is None:
+            return np.ones((18, 20), dtype=bool)
+        diff = (arr[:, :, :3] != self.clean_frame[:, :, :3]).any(axis=2)
+        return diff.reshape(18, 8, 20, 8).any(axis=(1, 3))
+
+    def draw_friends(self, arr):
+        g = self.game
+        if not g.in_game() or g.in_battle() or self.battle or self.live:
+            self.clean_frame = None
             return []
+        mask = self.menu_mask(arr)
+        if mask is not None and mask.mean() > 0.85:
+            return []  # full-screen menu (party, bag, Pokédex, map...)
         me = g.position()
         tags = []
+        layer = self.friend_layer
+        layer.fill((0, 0, 0, 0))
         for f in self.friends.values():
             st = f.state
             if not st or not f.sprite or not st.get("visible") or st.get("map") != me["map"]:
@@ -1034,15 +1058,22 @@ class App:
             sy = sprites.PLAYER_SCREEN_Y + int(f.cur_py - me["py"])
             if -16 < sx < 160 and -16 < sy < 144:
                 surf = self.sprite_cache.get(f.sprite, img, self.palette)
-                self.game_surf.blit(surf, (sx, sy))
-                tags.append((f.name, sx + 8, sy))
+                layer.blit(surf, (sx, sy))
+                head = (min(17, max(0, sy // 8)), min(19, max(0, (sx + 8) // 8)))
+                if mask is None or not mask[head]:
+                    tags.append((f.name, sx + 8, sy))
+        if mask is not None:
+            # Friends stand *behind* menus and text boxes.
+            for r, c in zip(*np.nonzero(mask)):
+                layer.fill((0, 0, 0, 0), (int(c) * 8, int(r) * 8, 8, 8))
+        self.game_surf.blit(layer, (0, 0))
         return tags
 
     def render(self):
         arr = self.pyboy.screen.ndarray
         frame = pygame.image.frombuffer(arr.tobytes(), (160, 144), "RGBA")
         self.game_surf.blit(frame, (0, 0))
-        tags = self.draw_friends()
+        tags = self.draw_friends(arr)
         self.screen.fill(ui.BG)
         scaled = pygame.transform.scale(self.game_surf, (self.game_w, self.game_h))
         self.screen.blit(scaled, (0, self.game_y))
