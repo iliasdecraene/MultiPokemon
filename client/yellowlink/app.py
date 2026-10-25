@@ -151,6 +151,9 @@ class App:
         self.last_sram: bytes | None = None
         self.sprite_cache = sprites.SpriteCache()
         self.clean_frame = None
+        self.volume_rect = None
+        self.volume_bar = None
+        self.dragging_volume = False
 
         self._skip_text = False
         pygame.mixer.pre_init(48000, -16, 2, 1024)
@@ -194,6 +197,7 @@ class App:
         from pyboy import PyBoy
         save = self.cfg.save_path
         ram = None
+        self.had_save = save.exists() and any(save.read_bytes()[:32768])
         if save.exists():
             shutil.copy2(save, self.cfg.backup_dir / time.strftime("yellow-%Y%m%d-%H%M%S.sav"))
             self._prune_backups()
@@ -214,6 +218,20 @@ class App:
         if dev_state:
             with open(dev_state, "rb") as f:
                 self.pyboy.load_state(f)
+        elif self.had_save and self.cfg.get("skip_intro", True):
+            self._loading_screen("Loading your adventure...")
+            t0 = time.time()
+            result = game.fast_continue(self.pyboy, on_progress=lambda: self._loading_screen(
+                "Loading your adventure..."))
+            log.info("fast continue: %s in %.2fs", result, time.time() - t0)
+
+    def _loading_screen(self, msg):
+        pygame.event.pump()
+        self.screen.fill(ui.BG)
+        f = pygame.font.Font(None, 40)
+        img = f.render(msg, True, ui.ACCENT)
+        self.screen.blit(img, img.get_rect(center=(self.screen.get_width() // 2, self.screen.get_height() // 2)))
+        pygame.display.flip()
 
     def _prune_backups(self, keep=15):
         files = sorted(self.cfg.backup_dir.glob("yellow-*.sav"))
@@ -755,6 +773,17 @@ class App:
                     self.last_party_sent = key
 
     # ---------------------------------------------------------------- input
+    def set_volume(self, percent):
+        percent = max(0, min(100, int(percent)))
+        self.audio.volume = percent / 100
+        if self.audio.muted and percent > 0:
+            self.audio.set_muted(False)
+
+    def _set_volume_from_x(self, x):
+        bar = self.volume_bar
+        if bar and bar.w:
+            self.set_volume(round((x - bar.x) / bar.w * 100))
+
     def release_all(self):
         for b in list(self.held):
             self.pyboy.button_release(b)
@@ -793,6 +822,16 @@ class App:
                     self.press(KEYMAP[ev.key], False)
                 if ev.key == pygame.K_SPACE:
                     self.fast = False
+            elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                if self.volume_rect and self.volume_rect.collidepoint(ev.pos):
+                    self.dragging_volume = True
+                    self._set_volume_from_x(ev.pos[0])
+            elif ev.type == pygame.MOUSEMOTION and self.dragging_volume:
+                self._set_volume_from_x(ev.pos[0])
+            elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1 and self.dragging_volume:
+                self.dragging_volume = False
+                self.cfg["volume"] = int(round(self.audio.volume * 100))
+                self.cfg.save()
             elif ev.type == pygame.TEXTINPUT and self.mode == "chat":
                 if self._skip_text:
                     self._skip_text = False
@@ -974,6 +1013,12 @@ class App:
             self.mode = "help"
         elif k == pygame.K_SPACE:
             self.fast = True
+        elif k in (pygame.K_MINUS, pygame.K_KP_MINUS, pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+            step = -10 if k in (pygame.K_MINUS, pygame.K_KP_MINUS) else 10
+            self.set_volume(int(round(self.audio.volume * 100)) + step)
+            self.cfg["volume"] = int(round(self.audio.volume * 100))
+            self.cfg.save()
+            self.toast(f"Volume {self.cfg['volume']}%", 1.2)
         elif k == pygame.K_m:
             self.audio.set_muted(not self.audio.muted)
             self.toast("Sound off" if self.audio.muted else "Sound on", 1.5)

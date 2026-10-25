@@ -98,6 +98,20 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
         text(surf, f.small, label, (x + 4, y + 21), TEXT)
         y += 48
 
+    # volume slider (click/drag, or - / + keys)
+    vol = 0 if app.audio.muted else int(round(app.audio.volume * 100))
+    text(surf, f.small, "Volume" + (" (muted)" if app.audio.muted else ""), (x, y), DIM)
+    bar = pygame.Rect(x + 70, y + 4, SIDEBAR_W - 120, 8)
+    pygame.draw.rect(surf, PANEL_HI, bar, border_radius=4)
+    fill = bar.copy()
+    fill.w = int(bar.w * vol / 100)
+    pygame.draw.rect(surf, ACCENT, fill, border_radius=4)
+    pygame.draw.circle(surf, TEXT, (bar.x + fill.w, bar.centery), 7)
+    text(surf, f.small, f"{vol}%", (x0 + SIDEBAR_W - 14, y), DIM, anchor="topright")
+    app.volume_rect = bar.inflate(14, 16)
+    app.volume_bar = bar
+    y += 28
+
     text(surf, f.body, "Trainers", (x, y), TEXT)
     y += 24
     roster = app.sorted_roster()
@@ -146,7 +160,7 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
     hints = ["A button: X or A  ·  B button: Z or S",
              "Start: Enter · Select: Bksp · Space: fast",
              "Tab: trade/battle menu · T: chat",
-             "F1: help · F3: report a problem"]
+             "F1: help · F3: report · -/+: volume"]
     for hline in hints:
         text(surf, f.small, hline, (x, hy), DIM)
         hy += 19

@@ -55,8 +55,11 @@ def run_setup(cfg, first_run: bool) -> bool:
             sav_var.set(p)
 
     tk.Button(root, text="Browse…", command=browse_sav).grid(row=5, column=2, **pad)
-    tk.Label(root, text="Saves live in: " + str(cfg.save_path.parent), fg="#666").grid(
+    skip_var = tk.BooleanVar(value=bool(cfg.get("skip_intro", True)))
+    tk.Checkbutton(root, text="Skip the intro and continue my save automatically", variable=skip_var).grid(
         row=6, column=0, columnspan=3, sticky="w", **pad)
+    tk.Label(root, text="Saves live in: " + str(cfg.save_path.parent), fg="#666").grid(
+        row=7, column=0, columnspan=3, sticky="w", **pad)
 
     def on_ok():
         name = text.sanitize_name(fields["name"].get())
@@ -95,12 +98,13 @@ def run_setup(cfg, first_run: bool) -> bool:
         cfg["server_url"] = url
         cfg["room_key"] = fields["room_key"].get()
         cfg["rom_path"] = rom
+        cfg["skip_intro"] = bool(skip_var.get())
         cfg.save()
         result["ok"] = True
         root.destroy()
 
     btns = tk.Frame(root)
-    btns.grid(row=7, column=0, columnspan=3, sticky="e", **pad)
+    btns.grid(row=8, column=0, columnspan=3, sticky="e", **pad)
     tk.Button(btns, text="Cancel", width=10, command=root.destroy).pack(side="right", padx=4)
     tk.Button(btns, text="Save & play", width=12, command=on_ok, default="active").pack(side="right", padx=4)
     root.bind("<Return>", lambda e: on_ok())
