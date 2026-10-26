@@ -30,12 +30,15 @@ os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, "cfg")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 sys.path.insert(0, os.path.join(_REPO, "client"))
+sys.path.insert(0, os.path.join(_REPO, "dev", "platinum"))
+import ptrom  # noqa: E402  YL_PT_ROM=vanilla (default) | sinnoh: the Sinnoh ROM the app / DS core runs
+print("Sinnoh ROM:", ptrom.label())
 
 from yellowlink import nds_core, pk4, platinum_exp as X  # noqa: E402
 from yellowlink.ndsrom import NDSRom, PlatinumData, lz77_decompress, EOS  # noqa: E402
 from yellowlink.platinum import PlatinumMemory, PAGE_PARTY  # noqa: E402
 
-ROM = os.path.join(STATES, "platinum.nds")
+ROM = ptrom.ROM
 FAILS = []
 SHOTS = os.environ.get("YL_SHOTS") or os.path.join(TMP, "shots")
 

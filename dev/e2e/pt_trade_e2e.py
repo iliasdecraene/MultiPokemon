@@ -15,6 +15,9 @@ tmp = pathlib.Path(tempfile.mkdtemp(prefix="yl_pttrade_"))
 os.environ["XDG_CONFIG_HOME"] = str(tmp / "appdata")
 os.environ["SDL_VIDEODRIVER"] = "dummy"; os.environ["SDL_AUDIODRIVER"] = "dummy"
 sys.path.insert(0, os.path.join(_REPO, "client"))
+sys.path.insert(0, os.path.join(_REPO, "dev", "platinum"))
+import ptrom  # noqa: E402  YL_PT_ROM=vanilla (default) | sinnoh: the Sinnoh ROM the app / DS core runs
+print("Sinnoh ROM:", ptrom.label())
 sys.path.insert(0, _HERE)
 import pygame
 pygame.quit = lambda: None
