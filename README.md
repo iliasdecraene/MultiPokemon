@@ -19,11 +19,17 @@ Everyone plays their **own** game with their own save and story. On top of that:
   you: only the first encounter per area counts, catches in the same area are linked partners, a fainted Pokémon (and
   its partner) goes to the PC for good, boxing one boxes its partner, and a blackout ends the run. The run only plays
   while you're both in it; pause any time and **Continue** together later. Finish it (both reach the Hall of Fame) to
-  earn the badge. A Platinum Soul Link needs both of you on the latest YellowLink (press **U** to update).
+  earn the Soul Link badge (gold without Exp Share All, silver with it). A Platinum Soul Link needs both of you on the latest YellowLink (press **U** to update).
 - **Exp Share All** (Settings, top right of the sidebar - on by default): like the newer games, Pokémon that battle get
   full experience and the rest of your party gets half, in Yellow, Crystal and Platinum. Levels, new moves and
   evolutions happen the normal way. Turn it off for the original rules. In a Soul Link the run decides: whoever
   starts it picks Exp Share All on or off for both players.
+- **Badges.** Every region has badges you earn in your main game: **Champion** (enter the Hall of Fame),
+  **Pokédex** (catch the whole regional dex: Kanto 150 without Mew, Johto 249 without Mew and Celebi, Sinnoh 209
+  without Manaphy - Pokémon you get through YellowLink trades or from your other games count, like real trades),
+  **Shiny hunter** (catch shinies yourself: 1, 10, 25, 50, 100) and the **Soul Link** badge. See yours under each
+  region in **Regions**, and a friend's by clicking them in **Multiplayer**. Yellow has no shinies, so a Yellow
+  Pokémon that would be shiny in Crystal counts as shiny in YellowLink - a **Shiny!** tag shows in wild battles.
 - **Chat.** You can also see who's online, and the app shows a notice when an update is available.
 
 > **No ROM is included, and none ever should be.** Each player needs their own copy of
