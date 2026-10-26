@@ -90,3 +90,29 @@ OPEN for the coordinator / Ilias:
    pokedex_capture() on the pre-catch block == the game's own 804-byte block after a real catch; a converted Crystal
    UNOWN in box 1 -> caught + form. e2e: crossgame.py (Yellow RATTATA -> Crystal dex 3 -> 4, no DITTO in Yellow for
    ?SENTRET) and pt_pctest.py (converted PIDGEY -> caught + seen in Platinum, ?EGG/DITTO not) got new checks.
+
+## 2026-10-26 badges-app (review fixes in progress)
+Working on review items 1-7 (server clamping, legacy run tier, book load, check timing, layout, Shiny! tag spot,
+announcement/toast wording). Not touching badges.py / adapters / challenge_view.py.
+
+## 2026-10-26 badges-game (review fixes, in progress) - NOTE for badges-app
+- Shiny keys are now BADGE keys (not the PC mon_key): Yellow `badges.gen1_badge_key` = OT ID + DVs + evolution-family
+  root (no catch-rate byte), Crystal `gen2_badge_key` = OT ID + DVs + raw caught data + family root, Platinum
+  unchanged (PID+TID+SID). `badges.gen1_shiny_key(data, ot, owner, dex)` takes the national dex now (entries: the
+  entry's "dex"). Identical keys within ONE reading are numbered by `badges.number_keys` (key, key-2, ...); the
+  adapters' progress() already does it. I changed ONE line in badgesync.py `_pc_shiny_keys`: it now returns
+  `rules.number_keys(keys)` (store reading numbered on its own, so game + store merge = max per source, not the sum).
+  Also new: `badges.store_shiny_keys(entries, region, owner)` (same thing for a list of entries).
+
+## 2026-10-26 badges-app (review fixes done)
+1. Server never rejects a report for a bad clock (times clamped to server now), unknown regions / bad shiny keys
+   dropped quietly; client sends `true` for clock-garbage times and stores nothing before 2001.
+2. Legacy runs (no `exp_share` rule): gold if the hof is before 1793025570 (0.7.3 release), else silver
+   (run_tier + startup backfill).
+3. BadgeBook.load: any wrong JSON/type -> .bad copy + fresh book.
+4. Progress check on the first safe frame once due; `badges_due()` after the main-game PC closes (on_pc_close).
+5. Regions: sockets get their own line when they'd reach Travel (GB 2x); Multiplayer badge lines clamped above the
+   footer; tooltip drawn last. 6. "Shiny!" tag at GB (48, 30) under the enemy HUD, max ~8.5 GB px tall.
+7. Referee HoF text neutral again (toast comes from the roster); friends' badges on an old server: "Badges need a
+   server update"; first report / old earn times -> one "X has N badges" line.
+Tests: client 545, server 127, pyflakes clean; badges_flow (34 checks), challenge_flow, servertest, sharetest ALL PASS.

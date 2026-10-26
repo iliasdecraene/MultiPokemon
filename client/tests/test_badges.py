@@ -165,7 +165,7 @@ YOWNER = {"ot": "ASH", "tid": 0x1234}
 
 def g1_rec(dvs=SHINY, otid=0x1234, ot="ASH", species=0x54, catch=190):
     d = bytearray(33)
-    d[0], d[3], d[7] = species, 5, catch
+    d[0], d[3], d[7], d[8] = species, 5, catch, 33
     d[12], d[13] = otid >> 8, otid & 0xFF
     d[27:29] = dvs
     return bytes(d) + text.encode(ot, 11) + text.encode("PIKACHU", 11)
@@ -180,19 +180,27 @@ def g2_rec(dvs=SHINY, otid=0x1234, ot="ASH", caught=(0x82, 0x02), egg=False, spe
     return crystal.record(bytes(d), text.encode(ot, 11), text.encode("PIKACHU", 11), egg)
 
 
+def YK(rec, dex):
+    return badges.gen1_badge_key(rec, dex)
+
+
+def CK(rec):
+    return badges.gen2_badge_key(rec)
+
+
 def test_gen1_shiny_key():
     r = g1_rec()
-    assert badges.gen1_shiny_key(r[:33], r[33:44], YOWNER) == game.mon_key(r) == pcdb.Gen1PC.key(r)
-    assert badges.gen1_shiny_key(r[:33], r[33:44], {"ot": "ASH", "tid": 0x1235}) is None
-    assert badges.gen1_shiny_key(r[:33], r[33:44], {"ot": "MISTY", "tid": 0x1234}) is None
-    assert badges.gen1_shiny_key(r[:33], r[33:44], {"ot": "", "tid": 0x1234}) is None
+    assert badges.gen1_shiny_key(r[:33], r[33:44], YOWNER, 25) == "1234eaaa019"     # OT ID, DVs, family root
+    assert badges.gen1_shiny_key(r[:33], r[33:44], {"ot": "ASH", "tid": 0x1235}, 25) is None
+    assert badges.gen1_shiny_key(r[:33], r[33:44], {"ot": "MISTY", "tid": 0x1234}, 25) is None
+    assert badges.gen1_shiny_key(r[:33], r[33:44], {"ot": "", "tid": 0x1234}, 25) is None
     p = g1_rec(dvs=PLAIN)
-    assert badges.gen1_shiny_key(p[:33], p[33:44], YOWNER) is None
+    assert badges.gen1_shiny_key(p[:33], p[33:44], YOWNER, 25) is None
 
 
 def test_gen2_shiny_key():
     r = g2_rec()
-    assert badges.gen2_shiny_key(r[:32], r[32:43], YOWNER) == crystal.mon_key(r) == crystal.Gen2PC.key(r)
+    assert badges.gen2_shiny_key(r[:32], r[32:43], YOWNER) == "1234eaaa8202019"     # + raw caught data
     assert badges.gen2_shiny_key(r[:32], r[32:43], YOWNER, egg=True) is None
     z = g2_rec(caught=(0, 0))                          # converted from Gen 1 (no caught data): not a Crystal catch
     assert badges.gen2_shiny_key(z[:32], z[32:43], YOWNER) is None
@@ -238,15 +246,15 @@ def b64(b):
 
 
 def test_entries():
-    e1 = {"id": "1", "origin": "yellow", "gen1": b64(g1_rec()), "gen2": None}
+    e1 = {"id": "1", "origin": "yellow", "dex": 25, "gen1": b64(g1_rec()), "gen2": None}
     e2 = {"id": "2", "origin": "crystal", "gen1": None, "gen2": b64(g2_rec())}
     e4 = {"id": "4", "origin": "platinum", "gen1": None, "gen2": None, "gen4": b64(pt_rec())}
-    plain = {"id": "5", "origin": "yellow", "gen1": b64(g1_rec(dvs=PLAIN))}
+    plain = {"id": "5", "origin": "yellow", "dex": 25, "gen1": b64(g1_rec(dvs=PLAIN))}
     assert badges.entry_is_shiny(e1) and badges.entry_is_shiny(e2) and badges.entry_is_shiny(e4)
     assert not badges.entry_is_shiny(plain) and not badges.entry_is_shiny({"id": "x"})
     assert not badges.entry_is_shiny({"id": "y", "gen4": b64(pt_rec(pid=0x12345678))})
-    assert badges.entry_shiny_key(e1, "kanto", YOWNER) == game.mon_key(g1_rec())
-    assert badges.entry_shiny_key(e2, "johto", YOWNER) == crystal.mon_key(g2_rec())
+    assert badges.entry_shiny_key(e1, "kanto", YOWNER) == YK(g1_rec(), 25)
+    assert badges.entry_shiny_key(e2, "johto", YOWNER) == CK(g2_rec())
     assert badges.entry_shiny_key(e4, "sinnoh", POWNER) == pk4.mon_key(pt_rec())
     assert badges.entry_shiny_key(e1, "johto", YOWNER) is None              # no gen2 representation
     assert badges.entry_shiny_key(e1, "kanto", None) is None
@@ -280,9 +288,21 @@ class GBMem:
             self.flat[k] = v
 
 
+Y_INDEX = {25: 0x54, 16: 0x24, 17: 0x96, 19: 0xA5, 20: 0xA6, 132: 0x4C}      # dex -> Yellow internal index
+
+
 class FakeYRom:
     def dex_no(self, species):
-        return {0x54: 25, 0x24: 16, 0x4C: 132}.get(species, 0)
+        return {v: k for k, v in Y_INDEX.items()}.get(species, 0)
+
+    def species_for_dex(self, dex):
+        return Y_INDEX.get(dex, 0)
+
+    def base_stats(self, species):
+        return (40, 45, 40, 56, 35, 0, 2) if self.dex_no(species) else None
+
+    def catch_rate(self, species):
+        return 255 if self.dex_no(species) in (16, 19) else 45
 
 
 def yellow_world(party=()):
@@ -311,7 +331,7 @@ def test_yellow_progress():
     for d in (25, 16, 151):
         m[game.DEX_OWNED + (d - 1) // 8] |= 1 << ((d - 1) % 8)
     p = game.progress(gm)
-    assert p["shinies"] == [game.mon_key(own)] and p["dex_caught"] == 2 and not p["champion"]
+    assert p["shinies"] == [YK(own, 25)] and p["dex_caught"] == 2 and not p["champion"]
     assert p["owner"] == {"ot": "ASH", "tid": 0x1234} and p["dex_total"] == 150
     m[game.NUM_HOF_TEAMS] = 1
     assert game.progress(gm)["champion"] and game.champion(gm)
@@ -324,7 +344,7 @@ def test_yellow_progress():
     m[game.DAYCARE_IN_USE] = 1
     gm.write(game.DAYCARE_MON, day[:33])
     gm.write(game.DAYCARE_MON_OT, day[33:44])
-    assert game.progress(gm)["shinies"] == [game.mon_key(own), game.mon_key(box_mon), game.mon_key(day)]
+    assert game.progress(gm)["shinies"] == [YK(own, 25), YK(box_mon, 25), YK(day, 25)]
     m[game.PARTY_SPECIES + 3] = 0x12                      # half-written party
     assert game.progress(gm) is None
     m[game.PARTY_SPECIES + 3] = 0xFF
@@ -339,7 +359,7 @@ def test_yellow_sram_boxes():
     boxes = [[] for _ in range(12)]
     boxes[7] = [g1_rec(dvs=bytes([0xEA, 0xAA])), g1_rec(otid=0x9999)]
     pc.write_boxes(boxes)
-    assert game.progress(gm)["shinies"] == [game.mon_key(boxes[7][0])]
+    assert game.progress(gm)["shinies"] == [YK(boxes[7][0], 25)]
 
 
 def test_yellow_wild_is_shiny():
@@ -400,7 +420,7 @@ def test_crystal_progress():
         a = crystal.DEX_CAUGHT + (d - 1) // 8
         cm.w(a, cm.r(a) | 1 << ((d - 1) % 8))
     p = crystal.progress(cm)
-    assert p["shinies"] == [crystal.mon_key(own)] and p["dex_caught"] == 2 and p["dex_total"] == 249
+    assert p["shinies"] == [CK(own)] and p["dex_caught"] == 2 and p["dex_total"] == 249
     assert p["owner"] == {"ot": "ASH", "tid": 0x1234} and not p["champion"]
     # Day Care (lady's slot) + the live current box (sBox)
     day = g2_rec(dvs=bytes([0x6A, 0xAA]))
@@ -415,7 +435,7 @@ def test_crystal_progress():
         mem[1, crystal.SBOX_MONS + i] = v
     for i, v in enumerate(box[32:43]):
         mem[1, crystal.SBOX_OTS + i] = v
-    assert crystal.progress(cm)["shinies"] == [crystal.mon_key(own), crystal.mon_key(box), crystal.mon_key(day)]
+    assert crystal.progress(cm)["shinies"] == [CK(own), CK(box), CK(day)]
     for addr, val in ((crystal.HALL_OF_FAME_COUNT, 1), (crystal.STATUS_FLAGS, 0x40),
                       (crystal.EVENT_FLAGS + crystal.EVENT_BEAT_ELITE_FOUR // 8, 1 << (crystal.EVENT_BEAT_ELITE_FOUR % 8))):
         cm.w(addr, val)
@@ -612,3 +632,112 @@ def test_platinum_mark_dex_writes_back():
     assert blk[P.DEX_UNOWN] == 9
     bus.w32(body + P.PAGE_POKEDEX, 0)                                  # no Pokédex page: nothing written
     assert codec.mark_dex([[g4(26)]]) == []
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# badge keys: different mons never merge, the same mon keeps its key (review probes)
+# ---------------------------------------------------------------------------------------------------------------
+def test_key_hatched_shinies_of_different_families_stay_apart():
+    hatched = (0x41, 0x2A)                      # caught data of a hatch: level 1, same time + place for both
+    chiko = g2_rec(species=152, dvs=SHINY, caught=hatched)
+    charm = g2_rec(species=4, dvs=SHINY, caught=hatched)
+    keys = [badges.gen2_shiny_key(r[:32], r[32:43], YOWNER) for r in (chiko, charm)]
+    assert keys[0] and keys[1] and keys[0] != keys[1]
+    assert crystal.mon_key(chiko) == crystal.mon_key(charm)            # (the PC/Soul Link key can't tell them)
+
+
+def test_key_two_255_catch_rate_species_stay_apart():
+    pidgey, rattata = g1_rec(species=0x24, catch=255), g1_rec(species=0xA5, catch=255)
+    assert game.mon_key(pidgey) == game.mon_key(rattata)               # (the PC/Soul Link key can't tell them)
+    m, gm = yellow_world([pidgey, rattata])
+    assert len(game.progress(gm)["shinies"]) == 2
+
+
+def test_key_same_mon_after_evolution():
+    pidgey = g1_rec(species=0x24, catch=255)
+    pidgeotto = bytearray(pidgey)
+    pidgeotto[0] = 0x96                                                 # evolution changes the species only
+    assert YK(pidgey, 16) == YK(bytes(pidgeotto), 17)
+    chiko, bayleef = g2_rec(species=152), g2_rec(species=153)
+    assert CK(chiko) == CK(bayleef)
+    pichu, pikachu = g2_rec(species=172), g2_rec(species=25)            # baby -> evolved: same family root
+    assert CK(pichu) == CK(pikachu)
+
+
+def test_key_same_mon_after_yellow_crystal_yellow():
+    rom = FakeYRom()
+    y = g1_rec(species=0x24, catch=255)                                 # PIDGEY, catch-rate byte 255
+    c = crystal.gen1_to_gen2(y, 16)
+    assert c[1] != 0                                                    # Time Capsule turned the byte into an item
+    back = pcdb.gen2_to_gen1(c, rom)
+    assert back[7] == 255 and back[27:29] == y[27:29]
+    evolved = bytearray(c)
+    evolved[0] = 18                                                     # evolved to PIDGEOT in Crystal
+    back2 = pcdb.gen2_to_gen1(bytes(evolved), dict_rom(rom, {18: 0x97}))
+    assert back2[7] != y[7]                                             # the catch-rate byte did change
+    assert YK(y, 16) == YK(back, 16) == YK(back2, 18)
+
+
+def dict_rom(rom, extra):
+    class R(FakeYRom):
+        def species_for_dex(self, dex):
+            return extra.get(dex) or rom.species_for_dex(dex)
+
+        def dex_no(self, species):
+            return next((d for d, s in extra.items() if s == species), 0) or rom.dex_no(species)
+    return R()
+
+
+def test_number_keys_counts_identical_mons():
+    assert badges.number_keys(["a", "b", "a", "a"]) == ["a", "b", "a-2", "a-3"]
+    assert badges.number_keys([]) == []
+    game_side = badges.number_keys(["k", "k"])                          # two identical mons in the game
+    store_side = badges.number_keys(["k"])                              # one of them is also in the PC store
+    e = {}
+    badges.merge(e, "kanto", prog(shinies=game_side), 1.0)
+    badges.merge(e, "kanto", prog(shinies=store_side), 2.0)
+    assert e["kanto"]["shinies"] == ["k", "k-2"]                        # max per source, not the sum
+    assert all(badges.KEY_RE.match(k) for k in badges.number_keys(["1234eaaa8202019"] * 12))
+
+
+def test_progress_numbers_identical_mons():
+    twin = g1_rec(species=0x54)
+    m, gm = yellow_world([twin, twin])
+    assert game.progress(gm)["shinies"] == [YK(twin, 25), YK(twin, 25) + "-2"]
+
+
+def test_store_shiny_keys():
+    e = {"id": "1", "origin": "yellow", "dex": 25, "gen1": b64(g1_rec()), "gen2": None}
+    e2 = dict(e, id="2")
+    plain = {"id": "3", "origin": "yellow", "dex": 25, "gen1": b64(g1_rec(dvs=PLAIN))}
+    assert badges.store_shiny_keys([e, plain, e2], "kanto", YOWNER) == [YK(g1_rec(), 25), YK(g1_rec(), 25) + "-2"]
+    evolved = dict(e, dex=26)                                           # entry dex = current species (RAICHU)
+    assert badges.entry_shiny_key(evolved, "kanto", YOWNER) == YK(g1_rec(), 25)
+
+
+def test_yellow_battle_info_shiny_and_referee_wait():
+    m, gm = yellow_world([g1_rec(dvs=PLAIN)])
+    m[game.IS_IN_BATTLE], m[game.ENEMY_MON_SPECIES2] = 1, 0x24
+    gm.write(game.ENEMY_MON_DVS, SHINY)
+    assert gm.battle_info()["shiny"] is True and game.wild_is_shiny(gm) is True
+    gm.write(game.ENEMY_MON_DVS, PLAIN)
+    assert gm.battle_info()["shiny"] is False
+    m[game.ENEMY_BATTLE_STATUS3] = 1 << game.TRANSFORMED_BIT           # Transform copied someone's DVs
+    gm.write(game.TRANSFORMED_ENEMY_ORIG_DVS, SHINY)
+    assert gm.battle_info()["shiny"] is True
+    m[game.ENEMY_BATTLE_STATUS3] = 0
+    m[game.BATTLE_TYPE] = game.BATTLE_TYPE_OLD_MAN
+    gm.write(game.ENEMY_MON_DVS, SHINY)
+    assert gm.battle_info()["shiny"] is False                          # special battles never count as shiny
+    m[game.BATTLE_TYPE] = game.BATTLE_TYPE_NORMAL
+    # the referee's view starts a Yellow battle one frame late (the DVs may still be the previous battle's)
+    app = types.SimpleNamespace(game=gm, G=game, gen2=False, ds=False, pyboy=types.SimpleNamespace(memory=m),
+                                rom=FakeYRom())
+    view = challenge_view.ChallengeView(app)
+    assert view.battle() is None
+    assert view.battle()["shiny"] is True
+    m[game.IS_IN_BATTLE] = 0
+    assert view.battle() is None
+    m[game.IS_IN_BATTLE] = 2                                           # next battle: again one frame later
+    m[game.ENEMY_PARTY_COUNT], m[game.ENEMY_PARTY_SPECIES] = 1, 0x24
+    assert view.battle() is None and view.battle()["kind"] == "trainer"

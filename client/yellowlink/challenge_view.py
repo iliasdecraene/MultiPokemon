@@ -37,6 +37,7 @@ class ChallengeView:
             self.codec = crystal.Gen2PC(app.pyboy.memory, app.rom) if self.gen2 else \
                 pcdb.Gen1PC(app.pyboy.memory, app.rom)
         self._move_error_logged = False
+        self._in_battle = False          # Yellow: battle seen on the previous battle() call
 
     # --- state -------------------------------------------------------------------------------------------
     def ready(self) -> bool:
@@ -50,6 +51,14 @@ class ChallengeView:
 
     def battle(self):
         info = self.g.battle_info()
+        if not self.ds and not self.gen2:
+            # Yellow: InitWildBattle sets wIsInBattle, then LoadEnemyMonData writes the wild mon's DVs - a frame can
+            # end in between, so on the first frame of a battle "shiny" may come from the previous one. The referee
+            # (one call per frame) decides the encounter on the first non-None info: start it one frame later.
+            first = info is not None and not self._in_battle
+            self._in_battle = info is not None
+            if first:
+                return None
         if info is not None and self.ds and "result" not in info:
             dto = self.g.battle_dto() if hasattr(self.g, "battle_dto") else None
             info["result"] = self.g.r32(dto + DTO_RESULT_MASK) if dto else 0     # the game's own outcome

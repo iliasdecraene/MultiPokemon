@@ -33,16 +33,17 @@ async def test_report_merges_and_shows_in_roster(server, connect_client):
     while entry_in(r, a.uid).get("badges") == {}:
         r = await b.expect("roster", timeout=3)
     assert entry_in(r, a.uid)["badges"] == {"kanto": {"champion": True, "dex": False, "shiny": 2, "soullink": None}}
-    sysmsg = [m["text"] for m in b.inbox if m.get("type") == "system"]
     await asyncio.sleep(0.1)
-    sysmsg += [m["text"] for m in b.inbox if m.get("type") == "system"]
-    assert any("Kanto Champion" in t for t in sysmsg)
-    assert any("Shiny hunter" in t for t in sysmsg)
+    sysmsg = [m["text"] for m in b.inbox if m.get("type") == "system" and "Ilias" in m["text"]]
+    assert sysmsg == ["Ilias has 2 badges"]       # first report (badges from before): one line, not one per badge
 
     # a later report can't take anything away; shinies are a union; earliest time kept
+    b.clear()
     await a.send(type="badges", earned={"kanto": {"champion": None, "shinies": ["cc03"]},
                                         "johto": {"dex": True}})
     await asyncio.sleep(0.2)
+    news = [m["text"] for m in b.inbox if m.get("type") == "system"]
+    assert news == ["Ilias completed the Johto Pokédex!"]     # earned just now: announced
     e = entry(server, a.uid)
     assert e["badges"]["kanto"] == {"champion": True, "dex": False, "shiny": 3, "soullink": None}
     assert e["badges"]["johto"] == {"champion": False, "dex": True, "shiny": 0, "soullink": None}
@@ -80,16 +81,8 @@ async def test_same_report_twice_is_quiet(server, connect_client):
 
 @pytest.mark.parametrize("earned, needle", [
     ("nope", "earned"),
-    ({"hoenn": {"champion": True}}, "region"),
     ({"kanto": "yes"}, "kanto"),
-    ({"kanto": {"champion": "yesterday"}}, "champion"),
-    ({"kanto": {"dex": 12}}, "dex"),                                   # not a sane unix time
-    ({"kanto": {"dex": time.time() + 10 * 86400}}, "dex"),             # from the future
     ({"kanto": {"shinies": "aa"}}, "shinies"),
-    ({"kanto": {"shinies": ["a b"]}}, "shinies"),
-    ({"kanto": {"shinies": ["x" * 41]}}, "shinies"),
-    ({"kanto": {"shinies": ["aa", "aa"]}}, "shinies"),
-    ({"kanto": {"shinies": [f"k{i}" for i in range(1001)]}}, "shinies"),
 ])
 async def test_report_validation(server, connect_client, earned, needle):
     a = await connect_client("Ilias")
@@ -97,6 +90,27 @@ async def test_report_validation(server, connect_client, earned, needle):
     err = await a.expect("error")
     assert needle in err["message"]
     assert server.badges.get(a.uid) in (None, {})
+
+
+async def test_bad_clock_and_odd_values_are_tolerated(server, connect_client):
+    """A wrong PC clock or a key we don't know must never block syncing (no red error on every connect)."""
+    a = await connect_client("Ilias")
+    now = time.time()
+    await a.send(type="badges", earned={
+        "kanto": {"champion": 12, "dex": now + 10 * 86400, "shinies": ["aa", "aa", "a b", "x" * 41, 5, "bb"]},
+        "johto": {"champion": "yesterday"},
+        "hoenn": {"champion": True}})                       # a region from a newer client: ignored
+    await a.expect("roster")
+    await a.expect_none("error", wait=0.2)
+    st = server.badges.get(a.uid)
+    assert set(st) == {"kanto", "johto"}
+    assert abs(st["kanto"]["champion"] - now) < 5 and abs(st["kanto"]["dex"] - now) < 5   # clamped to server time
+    assert abs(st["johto"]["champion"] - now) < 5
+    assert st["kanto"]["shinies"] == ["aa", "bb"]
+    big = [f"k{i}" for i in range(1500)]
+    await a.send(type="badges", earned={"sinnoh": {"shinies": big}})
+    await asyncio.sleep(0.2)
+    assert len(server.badges.get(a.uid)["sinnoh"]["shinies"]) == bdg.SHINY_MAX
 
 
 async def test_soullink_field_in_report_is_ignored(server, connect_client):
@@ -206,3 +220,42 @@ def test_backfill_from_old_runs(tmp_path):
     assert srv.badges.summary("B")["sinnoh"]["soullink"] == "gold"
     assert srv.badges.summary("C") == {}
     assert srv.badges.get("B")["sinnoh"]["soullink_ts"] == 1.7e9 + 5
+
+
+async def test_old_earn_times_are_not_announced_one_by_one(server, connect_client):
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    now = time.time()
+    await a.send(type="badges", earned={"kanto": {"champion": now}})
+    await asyncio.sleep(0.2)
+    b.clear()
+    # a later report bringing badges earned long ago (e.g. played offline last week): one summary line
+    await a.send(type="badges", earned={"johto": {"champion": now - 7 * 86400, "dex": now - 86400},
+                                        "sinnoh": {"champion": now}})
+    await asyncio.sleep(0.2)
+    news = [m["text"] for m in b.inbox if m.get("type") == "system"]
+    assert news == ["Ilias earned the Sinnoh Champion badge!", "Ilias has 4 badges"]
+
+
+def test_legacy_run_tier_by_release_time():
+    """Runs without the exp_share rule: 0.7.3 (2026-10-26 14:39:30 UTC) applied the personal Exp Share All
+    setting (default on) inside runs - a Hall of Fame from then on is silver, before it gold."""
+    legacy = {"rules": {"dupes": True}}
+    assert bdg.run_tier(legacy, bdg.EXP_SHARE_RELEASE - 1) == "gold"
+    assert bdg.run_tier(legacy, bdg.EXP_SHARE_RELEASE) == "silver"
+    assert bdg.run_tier({"rules": {"exp_share": False}}, bdg.EXP_SHARE_RELEASE + 99) == "gold"
+    assert bdg.run_tier({"rules": {"exp_share": True}}, bdg.EXP_SHARE_RELEASE - 99) == "silver"
+    assert bdg.EXP_SHARE_RELEASE == 1793025570
+
+
+def test_backfill_legacy_after_release_is_silver(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    t = bdg.EXP_SHARE_RELEASE
+    recs = [{"id": "r1", "kind": "soul_link", "game": "yellow", "players": ["A", "B"], "names": {},
+             "rules": {"dupes": True}, "status": "completed", "progress": {},
+             "ledger": [{"seq": 1, "p": "A", "ts": t - 60, "t": "hof"}, {"seq": 2, "p": "B", "ts": t + 60, "t": "hof"}]}]
+    (data / "challenges.json").write_text(json.dumps({"version": 1, "challenges": recs}))
+    srv = YellowLinkServer(Config(data_dir=str(data), key="k"), store_debounce=0.01)
+    assert srv.badges.summary("A")["kanto"]["soullink"] == "gold"
+    assert srv.badges.summary("B")["kanto"]["soullink"] == "silver"

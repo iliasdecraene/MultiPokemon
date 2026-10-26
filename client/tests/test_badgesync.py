@@ -15,7 +15,7 @@ import pytest  # noqa: E402
 from yellowlink import badge_art, badgesync, library, panels, ui  # noqa: E402
 from yellowlink.badgesync import BadgeBook, BadgeMixin  # noqa: E402
 
-T0 = 1.8e9
+T0 = 1.79e9
 
 
 # --- the book -------------------------------------------------------------------------------------------------
@@ -54,6 +54,26 @@ def test_damaged_book_is_kept_aside(tmp_path):
     book = BadgeBook(p)
     assert book.earned == {}
     assert any(n.name.startswith("badges.bad-") for n in tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("content", ["[]", '"x"', '{"earned": []}', '{"soullink": []}',
+                                     '{"soullink": {"main": "gold"}}', '{"earned": {"kanto": 5}}', "null"])
+def test_wrongly_typed_book_is_kept_aside(tmp_path, content):
+    p = tmp_path / "b.json"
+    p.write_text(content)
+    book = BadgeBook(p)                       # never raises (App.__init__ creates it)
+    assert book.earned == {} and book.soullink == {}
+    assert any(n.name.startswith("badges.bad-") for n in tmp_path.iterdir())
+    assert book.apply("kanto", {"champion": True}) == [("champion", None)]     # and works from scratch
+
+
+def test_bad_clock_times_sent_as_now(tmp_path):
+    book = BadgeBook(tmp_path / "b.json")
+    book.apply("kanto", {"champion": True}, now=12.0)                 # PC clock in 1970
+    book.apply("johto", {"dex_complete": True}, now=T0)
+    assert book.earned["kanto"]["champion"] >= badgesync.MIN_TS        # clamped when written
+    w = book.wire()["earned"]
+    assert w["kanto"]["champion"] is True and w["johto"]["dex"] == T0  # True = "now" on the server
 
 
 def test_wire_format_matches_spec(tmp_path):
@@ -178,6 +198,29 @@ def test_sync_checks_merges_toasts_and_reports(tmp_path):
     assert len(app.net.sent) == n + 1
 
 
+def test_due_check_runs_on_the_first_safe_frame(tmp_path):
+    app = SyncApp(tmp_path)
+    app.game.safe = False
+    app.run(badgesync.CHECK_EVERY + 50)
+    assert app.calls == 0
+    app.game.safe = True
+    app.run(1)                                 # the very next safe frame, not 600 frames later
+    assert app.calls == 1
+    app.run(badgesync.CHECK_EVERY - 5)
+    assert app.calls == 1
+    app.run(10)
+    assert app.calls == 2
+
+
+def test_check_right_after_the_pc_closes(tmp_path):
+    app = SyncApp(tmp_path)
+    app.run(badgesync.CHECK_EVERY + 1)
+    n = app.calls
+    app.badges_due()                           # App.on_pc_close calls this (main game)
+    app.run(1)
+    assert app.calls == n + 1
+
+
 def test_no_checks_in_a_run_unsafe_or_unverified(tmp_path):
     app = SyncApp(tmp_path)
     app.reading = {"champion": True}
@@ -294,6 +337,7 @@ class PanelApp(SyncApp):
         self.game_info = library.GAMES_BY_ID["yellow"]
         self.click_targets = []
         self.panel_sel = "you"
+        self.badge_feature = True
         self.hooks = None
         self.gen2 = self.ds = False
         self.roster = [{"uid": "me", "name": "Ilias", "online": True, "badges": {}},
@@ -321,16 +365,19 @@ class PanelApp(SyncApp):
         return []
 
 
-@pytest.mark.parametrize("size", [(480, 432), (640, 576), (384, 576)])      # Yellow 3x/4x, DS 1.5x
+@pytest.mark.parametrize("size", [(320, 288), (480, 432), (640, 576), (384, 576)])   # Yellow 2x/3x/4x, DS 1.5x
 def test_regions_panel_has_sockets_that_fit(tmp_path, fonts, size):
     app = PanelApp(tmp_path)
     app.badges.apply("kanto", {"champion": True, "shinies": [f"s{i}" for i in range(10)]}, now=T0)
     surf = pygame.Surface(size)
     panels.draw_regions(surf, fonts, app, size[0], size[1], (0, 0))
     socks = [(r, label) for r, _, label in app.click_targets if label.startswith("badge:")]
-    assert len(socks) == 12                                       # 3 regions x 4 sockets
-    travel = [r for r, _, label in app.click_targets if label == "Travel"]
-    panel = pygame.Rect(0, 0, size[0], size[1])
+    assert len(socks) == (12 if size[1] > 300 else len(socks)) and len(socks) % 4 == 0 and socks
+    # sockets never share a pixel with each other or a card's text line
+    rects = [r for r, _ in socks]
+    assert all(not a.colliderect(b) for i, a in enumerate(rects) for b in rects[i + 1:])
+    travel = [r for r, _, label in app.click_targets if label in ("Travel", "you are here")]
+    panel = next(r for r, _, label in app.click_targets if label == "panel")
     for r, _ in socks:
         assert panel.contains(r)
         assert not any(r.colliderect(t) for t in travel)
@@ -340,8 +387,33 @@ def test_regions_panel_has_sockets_that_fit(tmp_path, fonts, size):
     assert app.toasts[-1].startswith("Kanto Shiny hunter 10 - 10 shiny catches")
 
 
+def test_multiplayer_old_server_says_so(tmp_path, fonts):
+    app = PanelApp(tmp_path)
+    app.badge_feature = False
+    surf = pygame.Surface((640, 576))
+    panels.draw_multiplayer(surf, fonts, app, 640, 576, (0, 0))
+    assert not [1 for _, _, label in app.click_targets if label.startswith("badge:")]
+    assert getattr(app, "_badges_note", "") == "Badges need a server update."
+
+
+def test_multiplayer_badges_stay_inside_the_panel(tmp_path, fonts):
+    """Many trainers + the selected one at the bottom: the badge lines never cross the footer / panel edge."""
+    app = PanelApp(tmp_path)
+    for i in range(6):
+        app.roster.insert(1, {"uid": f"u{i}", "name": f"P{i}", "online": False, "levels": [], "badges": {}})
+    for size in ((320, 288), (480, 432), (384, 576)):
+        app.click_targets = []
+        surf = pygame.Surface(size)
+        panels.draw_multiplayer(surf, fonts, app, size[0], size[1], (0, 0))
+        panel = next(r for r, _, label in app.click_targets if label == "panel")
+        for r, _, label in app.click_targets:
+            if label.startswith("badge:"):
+                assert r.bottom <= panel.bottom - 30, (size, label, r)
+
+
 def test_multiplayer_shows_selected_players_badges(tmp_path, fonts):
     app = PanelApp(tmp_path)
+    app.roster = app.roster[:1] + app.roster[-1:]
     for size in ((480, 432), (640, 576), (384, 576)):
         app.click_targets = []
         surf = pygame.Surface(size)

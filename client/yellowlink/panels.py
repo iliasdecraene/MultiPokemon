@@ -76,9 +76,14 @@ def _badge_summary(app, uid) -> dict:
     return fn(uid) if fn else {}
 
 
-def draw_player_badges(surf, f, app, uid, area, offset):
-    """A player's badges: 'Kanto (4 sockets)  Johto (...)  Sinnoh (...)', wrapping onto more lines when narrow.
-    Returns the y below."""
+def draw_player_badges(surf, f, app, uid, area, offset, bottom):
+    """A player's badges: 'Kanto (4 sockets)  Johto (...)  Sinnoh (...)', wrapping onto more lines when narrow;
+    nothing below `bottom`. Returns the y below."""
+    if not getattr(app, "badge_feature", True):
+        app._badges_note = "Badges need a server update."
+        if area.y + 18 <= bottom:
+            text(surf, f.small, app._badges_note, (area.x, area.y + 2), DIM)
+        return area.y + 20
     summ = _badge_summary(app, uid)
     rad = 9 if area.w < 420 else 10
     x, y = area.x, area.y
@@ -88,6 +93,8 @@ def draw_player_badges(surf, f, app, uid, area, offset):
         w = f.small.size(label)[0] + 6 + badge_art.row_width(rad, 4)
         if x > area.x and x + w > area.right:
             x, y = area.x, y + line_h
+        if y + 2 * rad > bottom:
+            break
         text(surf, f.small, label, (x, y + rad - 7), DIM)
         badge_art.draw_row(surf, app, f, x + f.small.size(label)[0] + 6, y, region, summ.get(region) or {},
                            offset, r=rad, gap=4, uid=uid)
@@ -189,12 +196,13 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
                 button(surf, app, f, pygame.Rect(bx + 4 * (bw + 8), y, bw + 14, 34), chal[0], chal[1],
                        offset=offset)
                 y += 44
-            y = draw_player_badges(surf, f, app, uid, pygame.Rect(row.x + 12, y, row.w - 24, 0), offset) + 6
-    badge_art.draw_tip(surf, f, getattr(app, "badge_tip", None), r)
+            y = draw_player_badges(surf, f, app, uid, pygame.Rect(row.x + 12, y, row.w - 24, 0), offset,
+                                   r.bottom - 34) + 6
     foot = "Trade/Gift: Pokémon from your PC, any game  ·  Practice: their team vs the AI"
     if f.small.size(foot)[0] > r.w - 36:
         foot = "Trade/Gift: Pokémon from your PC, any game"
     text(surf, f.small, foot, (r.x + 18, r.bottom - 26), DIM)
+    badge_art.draw_tip(surf, f, getattr(app, "badge_tip", None), r)
 
 
 def draw_servers(surf, f, app, game_w, game_h, offset):
@@ -288,22 +296,29 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
     for region_id, region_name, game_ids in library.REGIONS:
         have = [g for g in game_ids if g in installed]
         here = app.game_info.region == region_id
-        card = pygame.Rect(r.x + 12, y, r.w - 24, 92 if len(have) > 1 else 64)
+        # badge sockets right of the region's name (hover: what it is and how to earn it); in a small window
+        # where they'd reach the Travel button they get their own line under the name
+        card_w = r.w - 24
+        br_x = card_w - (110 if narrow else 140)             # Travel button, relative to the card
+        bx_rel = 14 + f.title.size(region_name)[0] + 12
+        rad = next((rr for rr in (11, 10, 9, 8) if bx_rel + badge_art.row_width(rr, 5) <= br_x - 8), None)
+        extra = 0 if rad else 26
+        card = pygame.Rect(r.x + 12, y, card_w, (92 if len(have) > 1 else 64) + extra)
         if card.bottom > r.bottom - 60:
             break
         box(surf, card, PANEL_HI if here else PANEL, ACCENT if here else PANEL_HI, 8)
         nr = text(surf, f.title, region_name, (card.x + 14, card.y + 8), ACCENT if here else TEXT)
-        br = pygame.Rect(card.right - 110, card.y + 12, 96, 36) if narrow else \
-            pygame.Rect(card.right - 140, card.y + 12, 126, 36)
-        # badge sockets right of the region's name (hover: what it is and how to earn it)
-        bx = nr.right + 12
-        rad = next((rr for rr in (11, 10, 9, 8) if bx + badge_art.row_width(rr, 5) <= br.x - 8), 8)
-        badge_art.draw_row(surf, app, f, bx, nr.centery - rad, region_id, mine.get(region_id) or {}, offset,
-                           r=rad, gap=5, uid=app.cfg["uid"])
+        br = pygame.Rect(card.x + br_x, card.y + 12, 96 if narrow else 126, 36)
+        if rad:
+            badge_art.draw_row(surf, app, f, card.x + bx_rel, nr.centery - rad, region_id,
+                               mine.get(region_id) or {}, offset, r=rad, gap=5, uid=app.cfg["uid"])
+        else:
+            badge_art.draw_row(surf, app, f, card.x + 14, nr.bottom + 4, region_id, mine.get(region_id) or {},
+                               offset, r=10, gap=5, uid=app.cfg["uid"])
         if not have:
             names = [library.GAMES_BY_ID[g].title for g in game_ids]
             text(surf, f.small, fit(f.small, "Add your " + " / ".join(names) + " game file to unlock this region",
-                                    card.w - 28), (card.x + 14, card.y + 40), DIM)
+                                    card.w - 28), (card.x + 14, card.y + 40 + extra), DIM)
         else:
             gid = _region_game(app, region_id, have)
             info = library.GAMES_BY_ID[gid]
@@ -315,21 +330,22 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
                 if f.small.size(status)[0] > br.x - card.x - 22:
                     status = status.replace("Pokémon ", "")
                 status = fit(f.small, status, br.x - card.x - 22)
-            text(surf, f.small, status, (card.x + 14, card.y + 40), GOOD if info.full_support else TEXT)
+            text(surf, f.small, status, (card.x + 14, card.y + 40 + extra), GOOD if info.full_support else TEXT)
             if here and app.game_id == gid:
                 text(surf, f.small, "you are here", br.center, GOOD, anchor="center")
+                app.click_targets.append((br.move(offset), lambda: None, "you are here"))
             else:
                 button(surf, app, f, br, "Travel", lambda g=gid: app.travel(g), offset=offset, primary=True,
                        enabled=not (app.trade or app.battle or app.live),
                        tip="Finish your trade or battle first.")
             if len(have) > 1:
                 # optional: which version to play this region with
-                text(surf, f.small, "Play with:", (card.x + 14, card.y + 64), DIM)
+                text(surf, f.small, "Play with:", (card.x + 14, card.y + 64 + extra), DIM)
                 bx = card.x + 90
                 for g in have:
                     label = library.GAMES_BY_ID[g].title.replace("Pokémon ", "")
                     w = f.small.size(label)[0] + 22
-                    chip = pygame.Rect(bx, card.y + 60, w, 24)
+                    chip = pygame.Rect(bx, card.y + 60 + extra, w, 24)
                     sel = g == gid
                     pygame.draw.rect(surf, ACCENT if sel else PANEL_HI, chip, border_radius=12)
                     text(surf, f.small, label, chip.center, (30, 28, 20) if sel else TEXT, anchor="center")

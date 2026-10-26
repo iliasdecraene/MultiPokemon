@@ -15,8 +15,9 @@ Earned state (what the client keeps and syncs; never loses anything):
 Adapter side (game.py / crystal.py / platinum.py, `self.G`): `progress(mem) -> dict | None` with
   {"champion": bool, "dex_caught": int, "dex_total": int, "dex_complete": bool, "shinies": [key, ...],
    "owner": {"ot": str, "tid": int[, "sid": int]}}
-built with progress_dict() below. Shiny keys are the PC database's mon keys (game.mon_key / crystal.mon_key /
-pk4.mon_key = Gen1PC/Gen2PC/Gen4PC .key()), so a mon seen in the game and in the YellowLink PC store is counted once.
+built with progress_dict() below. Shiny keys are badge keys (gen1_badge_key / gen2_badge_key / pk4.mon_key), the
+same for a mon in the game and in the YellowLink PC store (store_shiny_keys), so it is counted once; identical keys in
+one reading are numbered (number_keys).
 
 Gen 1 has no shinies: a Yellow mon counts as shiny when its DVs would make it shiny in Gen 2 (Def 10, Spd 10,
 Spc 10, Atk in {2, 3, 6, 7, 10, 11, 14, 15}) - gen1_is_shiny().
@@ -137,30 +138,62 @@ def _same_ot(raw_ot: bytes, owner: dict) -> bool:
     return text.decode(raw_ot) == owner.get("ot") and owner.get("ot") not in (None, "")
 
 
-def gen1_shiny_key(data: bytes, ot: bytes, owner: dict):
-    """Yellow: key (game.mon_key) of an own shiny catch, else None. `data` = 44-byte party struct or 33-byte box
-    struct (OT ID 12-13, DVs 27-28 in both), `ot` = its 11-byte OT name. Gen 1 records have no origin game."""
-    from .game import mon_key
-    if len(data) < 29 or data[0] == 0 or not gen1_is_shiny(data[27:29]):
+def family_root(dex: int) -> int:
+    """The evolution family's representative species (soullink.FAMILY: the same for every stage, babies included),
+    so evolving never changes a badge key."""
+    from .soullink import family
+    return family(dex)
+
+
+def gen1_badge_key(data: bytes, dex: int) -> str:
+    """Badge key of a Yellow mon: OT ID + DVs + family root (11 hex digits). Not the PC database's mon_key: that
+    one uses the catch-rate byte, which is the same for many species (255) and is rewritten by the Time Capsule
+    (Yellow -> Crystal -> Yellow), so different shinies merged and one shiny could get two keys."""
+    return "%02x%02x%02x%02x%03x" % (data[12], data[13], data[27], data[28], family_root(dex))
+
+
+def gen1_shiny_key(data: bytes, ot: bytes, owner: dict, dex: int):
+    """Yellow: badge key of an own shiny catch, else None. `data` = 44-byte party struct or 33-byte box struct (OT
+    ID 12-13, DVs 27-28 in both), `ot` = its 11-byte OT name, `dex` = its national dex number (the struct stores
+    Yellow's internal index). Gen 1 records have no origin game."""
+    if len(data) < 29 or data[0] == 0 or not gen1_is_shiny(data[27:29]) or not 1 <= dex <= 251:
         return None
     if ((data[12] << 8) | data[13]) != owner.get("tid") or not _same_ot(ot, owner):
         return None
-    return mon_key(data)
+    return gen1_badge_key(data, dex)
+
+
+def gen2_badge_key(data: bytes) -> str:
+    """Badge key of a Crystal mon: OT ID + DVs + RAW caught data + family root (15 hex digits). Unlike the PC
+    database's mon_key, hatched mons keep their caught data (eggs never count, so no egg/hatch matching is needed)
+    and the species family tells apart two hatched shinies with the same Atk DV."""
+    return "%02x%02x%02x%02x%02x%02x%03x" % (data[6], data[7], data[21], data[22], data[29], data[30],
+                                              family_root(data[0]))
+
+
+def number_keys(keys) -> list:
+    """Identical keys within ONE reading are different mons (same OT, DVs, family and caught data): the k-th copy
+    becomes key-k. The game's boxes are the PC store's view, so callers keep game and store readings apart and
+    merge both (merge() dedupes): that counts max(game, store), never the sum."""
+    seen, out = {}, []
+    for k in keys:
+        n = seen[k] = seen.get(k, 0) + 1
+        out.append(k if n == 1 else "%s-%d" % (k, n))
+    return out
 
 
 def gen2_shiny_key(data: bytes, ot: bytes, owner: dict, egg: bool = False):
-    """Crystal: key (crystal.mon_key) of an own shiny catch, else None. `data` = 48-byte party or 32-byte box struct
-    (OT ID 6-7, DVs 21-22, caught data 29-30). Origin = Crystal: caught data non-zero (Crystal writes it for every
-    catch, gift, hatch and contest prize - pret SetCaughtData / SetGiftMonCaughtData / SetEggMonCaughtData; Gen-1
-    mons converted by YellowLink have none). Eggs don't count until they hatch (same key after hatching)."""
-    from .crystal import mon_key
-    if egg or len(data) < 31 or data[0] == 0 or not gen1_is_shiny(data[21:23]):
+    """Crystal: badge key (gen2_badge_key) of an own shiny catch, else None. `data` = 48-byte party or 32-byte box
+    struct (OT ID 6-7, DVs 21-22, caught data 29-30). Origin = Crystal: caught data non-zero (Crystal writes it for
+    every catch, gift, hatch and contest prize - pret SetCaughtData / SetGiftMonCaughtData / SetEggMonCaughtData;
+    Gen-1 mons converted by YellowLink have none). Eggs don't count until they hatch."""
+    if egg or len(data) < 31 or not 1 <= data[0] <= 251 or not gen1_is_shiny(data[21:23]):
         return None
     if data[29] == 0 and data[30] == 0:
         return None
     if ((data[6] << 8) | data[7]) != owner.get("tid") or not _same_ot(ot, owner):
         return None
-    return mon_key(data)
+    return gen2_badge_key(data)
 
 
 VERSION_PLATINUM = 12
@@ -208,9 +241,10 @@ def entry_is_shiny(entry: dict) -> bool:
 
 
 def entry_shiny_key(entry: dict, region: str, owner: dict | None):
-    """Key of a PC-store Entry if it is one of the player's own shiny catches from `region`'s game (judged on that
-    game's representation in the entry: gen1 for Kanto, gen2 for Johto, gen4 for Sinnoh), else None. `owner` =
-    the "owner" of the last progress() of that game (None = unknown -> None)."""
+    """Badge key of a PC-store Entry if it is one of the player's own shiny catches from `region`'s game (judged on
+    that game's representation in the entry: gen1 for Kanto, gen2 for Johto, gen4 for Sinnoh), else None. `owner` =
+    the "owner" of the last progress() of that game (None = unknown -> None). Use store_shiny_keys() for a whole
+    store (it numbers identical keys)."""
     if not owner:
         return None
     rep = {"kanto": "gen1", "johto": "gen2", "sinnoh": "gen4"}.get(region)
@@ -220,13 +254,19 @@ def entry_shiny_key(entry: dict, region: str, owner: dict | None):
     try:
         data = base64.b64decode(raw)
         if region == "kanto":
-            return gen1_shiny_key(data[:33], data[33:44], owner) if len(data) >= 44 else None
+            dex = int(entry.get("dex") or 0)
+            return gen1_shiny_key(data[:33], data[33:44], owner, dex) if len(data) >= 44 else None
         if region == "johto":
             egg = len(data) > 54 and bool(data[54])
             return gen2_shiny_key(data[:32], data[32:43], owner, egg) if len(data) >= 43 else None
         return gen4_shiny_key(data, owner) if len(data) >= 136 else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def store_shiny_keys(entries, region: str, owner: dict | None) -> list:
+    """Badge keys of the own shiny catches of `region`'s game among PC-store entries, numbered (number_keys)."""
+    return number_keys([k for k in (entry_shiny_key(e, region, owner) for e in entries) if k])
 
 
 # --- earned state --------------------------------------------------------------------------------------------

@@ -1773,8 +1773,8 @@ def owner(cm: "CrystalMemory") -> dict:
 def progress(cm: "CrystalMemory"):
     """Badge progress of this Crystal save (badges.py): champion, Johto dex caught (#1-251 minus Mew and Celebi)
     and the player's own shiny catches (own OT name + ID, Crystal caught data) in the party, the 14 boxes (only the
-    current one before the first save) and the Day Care, keyed like the PC database (mon_key). None while not in
-    game or while the party is half-written."""
+    current one before the first save) and the Day Care, as badge keys (badges.gen2_badge_key, numbered). None
+    while not in game or while the party is half-written."""
     from . import badges
     if not cm.in_game():
         return None
@@ -1786,4 +1786,5 @@ def progress(cm: "CrystalMemory"):
     recs = [r for box in Gen2PC(cm.m, cm.rom).read_boxes() for r in box] + cm.daycare_records()
     keys += [badges.gen2_shiny_key(r[:BOX_MON_SIZE], r[BOX_MON_SIZE:BOX_MON_SIZE + NAME_SIZE], me,
                                    len(r) > REC_SIZE and bool(r[REC_SIZE])) for r in recs]
-    return badges.progress_dict("johto", champion(cm), cm.read(DEX_CAUGHT, 32), [k for k in keys if k], me)
+    return badges.progress_dict("johto", champion(cm), cm.read(DEX_CAUGHT, 32),
+                                badges.number_keys([k for k in keys if k]), me)

@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(_REPO, "client"))
 import pygame
 pygame.quit = lambda: None          # two apps share this process
 from yellowlink.config import Config
-from yellowlink import app as appmod, badgesync, game, panels
+from yellowlink import app as appmod, badge_art, badgesync, game, panels
 
 PORT = 8791
 ROM = os.path.join(STATES, "yellow.gb")
@@ -88,12 +88,17 @@ check("nobody has badges yet", entry(B, ca["uid"]).get("badges") == {} and A.bad
 # 1. main-game badges by RAM edits (Ilias)
 m = A.pyboy.memory
 m[game.NUM_HOF_TEAMS] = 1                                    # entered the Hall of Fame once
-for i in range(18):
-    m[game.DEX_OWNED + i] = 0xFF                             # #1-144 ...
-m[game.DEX_OWNED + 18] = 0x3F                                # ... #145-150 (not Mew)
 party = A.game.party()
 check("Ilias has a party to make shiny", bool(party))
 m[0xD16A + 27], m[0xD16A + 28] = 0xEA, 0xAA                  # first party mon: Gen-2 shiny DVs (Atk 14, 10/10/10)
+ok = run(badgesync.CHECK_EVERY * 3, lambda: len((A.badges.earned.get("kanto") or {})) >= 2)
+run(300, lambda: any("Ilias has" in line[1] for line in B.chat_log))
+check("first report after the update: one summary line, not one per badge",
+      any(line[1] == "Ilias has 2 badges" for line in B.chat_log)
+      and not any("Kanto Champion badge" in line[1] for line in B.chat_log), str(B.chat_log[-5:]))
+for i in range(18):
+    m[game.DEX_OWNED + i] = 0xFF                             # #1-144 ...
+m[game.DEX_OWNED + 18] = 0x3F                                # ... #145-150 (not Mew)
 ok = run(badgesync.CHECK_EVERY * 3, lambda: len((A.badges.earned.get("kanto") or {})) >= 3)
 k = A.badges.earned.get("kanto") or {}
 check("Ilias's book: Champion + Pokédex + 1 shiny", ok and k.get("champion") and k.get("dex")
@@ -108,18 +113,22 @@ run(300, lambda: (entry(B, ca["uid"]).get("badges") or {}).get("kanto", {}).get(
 kb = (entry(B, ca["uid"]).get("badges") or {}).get("kanto", {})
 check("Alex's roster has Ilias's Kanto badges", kb == {"champion": True, "dex": True, "shiny": 1, "soullink": None},
       str(kb))
-check("system message about the badge", any("Kanto Champion badge" in line[1] for line in B.chat_log),
+check("a badge earned just now is announced", any("completed the Kanto Pokédex" in line[1] for line in B.chat_log),
       str(B.chat_log[-5:]))
 check("Alex earned nothing", B.badges.earned == {} and (entry(A, cb["uid"]).get("badges") or {}) == {})
 
 # screenshots: Ilias's Regions panel (Yellow 4x and 3x), the DS 1.5x layout, Alex's Multiplayer panel
 A.toggle_panel("regions")
 mouse = pygame.mouse.get_pos
-for scale in (4, 3):
+for scale in (4, 3, 2):
     shot(A, f"1_regions_{scale}x.png", scale)
     socks = [r for r, _, label in A.click_targets if label.startswith("badge:")]
-    check(f"Regions panel {scale}x: 12 sockets inside the game area", len(socks) == 12
-          and all(pygame.Rect(0, A.game_y, A.game_w, A.game_h).contains(r) for r in socks))
+    here = [r for r, _, label in A.click_targets if label in ("Travel", "you are here")]
+    check(f"Regions panel {scale}x: sockets inside the game area, clear of Travel",
+          len(socks) == (12 if scale > 2 else len(socks)) and socks
+          and all(pygame.Rect(0, A.game_y, A.game_w, A.game_h).contains(r) for r in socks)
+          and not any(r.colliderect(t) for r in socks for t in here))
+shot(A, "1_regions_3x.png", 3)
 # hover over the shiny socket -> tip
 rect = next(r for r, _, label in A.click_targets if label == "badge:kanto:shiny")
 pygame.mouse.get_pos = lambda: rect.center
@@ -138,10 +147,13 @@ B.toggle_panel("multiplayer")
 B.select_player(ca["uid"])
 run(100, lambda: ca["uid"] in B.badge_views)
 check("get_badges: Alex has Ilias's earn dates", (B.badge_views.get(ca["uid"]) or {}).get("kanto", {}).get("champion"))
-for scale in (4, 3):
+for scale in (4, 3, 2):
     shot(B, f"4_multiplayer_{scale}x.png", scale)
-    socks = [label for _, _, label in B.click_targets if label.startswith("badge:")]
-    check(f"Multiplayer {scale}x: Ilias's 12 sockets", len(socks) == 12)
+    socks = [r for r, _, label in B.click_targets if label.startswith("badge:")]
+    panel = next(r for r, _, label in B.click_targets if label == "panel")
+    check(f"Multiplayer {scale}x: Ilias's sockets inside the panel (above the footer)",
+          len(socks) == (12 if scale > 2 else len(socks)) and socks and all(r.bottom <= panel.bottom - 30 for r in socks))
+shot(B, "4_multiplayer_3x.png", 3)
 rect = next(r for r, _, label in B.click_targets if label == "badge:kanto:champion")
 pygame.mouse.get_pos = lambda: rect.center
 shot(B, "5_multiplayer_hover.png")
@@ -215,11 +227,18 @@ A.toggle_panel("regions"); shot(A, "7_regions_after_runs.png", 4); A.close_panel
 # 3. wild shiny tag in a Yellow battle
 A.pyboy.load_state(open(WILD_STATE, "rb"))
 run(400)                                                    # the battle screen with the enemy on it
+for _ in range(3):                                          # past "Wild PIDGEY appeared!" -> Pikachu + both HUDs
+    A.pyboy.button("a"); run(200)
 A.pyboy.memory[game.ENEMY_MON_DVS], A.pyboy.memory[game.ENEMY_MON_DVS + 1] = 0xEA, 0xAA
 run(40, lambda: A.wild_shiny)
 check("wild shiny flagged in battle", A.wild_shiny)
-shot(A, "8_wild_shiny_4x.png", 4)
-shot(A, "8_wild_shiny_3x.png", 3)
+for scale in (4, 3, 2):
+    shot(A, f"8_wild_shiny_{scale}x.png", scale)
+    # the tag must stay clear of the player's name/level HUD (Game Boy rows from y 56) and the enemy's name/HP
+    top = A.game_y + (A.off_y + appmod.SHINY_TAG_Y) * A.scale
+    tag_h = badge_art.SHINY_TAG_H * A.scale
+    check(f"'Shiny!' tag {scale}x between the HUDs", (A.off_y + 28) * A.scale <= top - A.game_y
+          and top - A.game_y + tag_h <= (A.off_y + 40) * A.scale)
 A.pyboy.memory[game.ENEMY_MON_DVS], A.pyboy.memory[game.ENEMY_MON_DVS + 1] = 0x12, 0x34
 run(40, lambda: not A.wild_shiny)
 check("not shiny -> no tag", not A.wild_shiny)

@@ -811,10 +811,22 @@ def platinum_dexmark():
        "FFFFFFFF @0x31C, Shaymin/Giratina FF @0x320, Deoxys nibbles F in caught/seen[15], TURTWIG's language = "
        "English bit @0x128 + 387")
     info = pm.battle_info()
+
+    def page_checksums():
+        sd = pm.save_data()
+        return {i: struct.unpack("<IIIHH", d.read(sd + 0x20024 + 16 * i, 16))[3] for i in (2, 7, 37)}
+    sums0 = page_checksums()
+    boxes0 = d.read(body + P.PAGE_PC_BOXES, 0x200)
     rig.throw()
     rig.finish()
     load_cur(pm, d)
     after = d.read(body + P.PAGE_POKEDEX, P.POKEDEX_SIZE)
+    ok(page_checksums() == sums0 and after != blk,
+       "the game doesn't maintain the page-table checksums while playing: party/Pokédex/PC-boxes entries %s stay "
+       "the same through a real catch although the Pokédex page changed (pret: SavePageInfo.checksum is only "
+       "computed at load, never compared; block footers are recomputed on save) -> mark_dex / write_boxes have "
+       "nothing to fix up" % sums0)
+    note("(boxes page changed during the catch: %s)" % (d.read(body + P.PAGE_PC_BOXES, 0x200) != boxes0))
     party = pm.party_checked()
     rec = platinum_pc.normalise(party[-1][:136])[1]
     mine = bytearray(blk)

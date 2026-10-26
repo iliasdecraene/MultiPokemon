@@ -20,6 +20,7 @@ from .badges import DEX_TOTAL, REGION_NAMES, REGION_OF_GAME, REGIONS
 
 log = logging.getLogger("yellowlink.badges")
 
+MIN_TS = 1e9                      # earn times before 2001 = a wrong clock (stored as this, sent as "now")
 SHINY_MAX = 1000                  # keys the server keeps per region (the book keeps rules.SHINY_KEEP)
 SOCKETS = ("champion", "dex", "shiny", "soullink")
 SOULLINK_RANK = {None: 0, "silver": 1, "gold": 2}
@@ -94,19 +95,25 @@ class BadgeBook:
             return
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            log.error("badge book %s unreadable (%s); keeping a copy", self.path, exc)
+            if not isinstance(raw, dict):
+                raise ValueError("not an object")
+            earned, soullink = raw.get("earned", {}), raw.get("soullink", {})
+            earned, soullink = ({} if earned is None else earned), ({} if soullink is None else soullink)
+            if not isinstance(earned, dict) or not isinstance(soullink, dict) \
+                    or not all(isinstance(v, dict) for v in list(earned.values()) + list(soullink.values())):
+                raise ValueError("wrong types")
+            self.earned = {r: {k: v for k, v in e.items() if k != "soullink"}
+                           for r, e in rules.normalise(earned).items()}
+            self.earned = {r: e for r, e in self.earned.items() if e}
+            self.soullink = {str(sid): {r: t for r, t in regions.items() if r in REGIONS and t in ("gold", "silver")}
+                             for sid, regions in soullink.items()}
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            log.error("badge book %s unreadable (%s); keeping a copy and starting fresh", self.path, exc)
+            self.earned, self.soullink = {}, {}
             try:
                 os.replace(self.path, self.path.with_name(f"badges.bad-{int(time.time())}.json"))
             except OSError:
                 pass
-            return
-        self.earned = {r: {k: v for k, v in e.items() if k != "soullink"}
-                       for r, e in rules.normalise(raw.get("earned")).items()}
-        self.earned = {r: e for r, e in self.earned.items() if e}
-        for sid, regions in (raw.get("soullink") or {}).items():
-            if isinstance(regions, dict):
-                self.soullink[str(sid)] = {r: t for r, t in regions.items() if r in REGIONS and t in ("gold", "silver")}
 
     def save(self) -> bool:
         if self.path is None:
@@ -130,7 +137,8 @@ class BadgeBook:
         if region not in REGIONS or not isinstance(progress, dict):
             return []
         before = json.dumps(self.earned.get(region), sort_keys=True)
-        found = rules.merge(self.earned, region, progress, time.time() if now is None else now)
+        now = time.time() if now is None else now
+        found = rules.merge(self.earned, region, progress, now if now >= MIN_TS else MIN_TS)
         self.changed = json.dumps(self.earned.get(region), sort_keys=True) != before
         if self.changed:
             self.save()
@@ -158,8 +166,14 @@ class BadgeBook:
     def wire(self) -> dict:
         """The `badges` message (SPEC.md section 9)."""
         earned = {}
+        now = time.time()
+
+        def ts(v):          # a time from a wrong clock goes as True (= "now" on the server's clock)
+            if v is None:
+                return None
+            return v if MIN_TS < v <= now + 86400 else True
         for region, r in self.earned.items():
-            earned[region] = {"champion": r.get("champion"), "dex": r.get("dex"),
+            earned[region] = {"champion": ts(r.get("champion")), "dex": ts(r.get("dex")),
                               "shinies": list(r.get("shinies") or [])[:SHINY_MAX]}
         return {"type": "badges", "earned": earned}
 
@@ -186,6 +200,11 @@ class BadgeMixin:
         self.badge_views: dict = {}      # uid -> {region: BadgeView} from badges_data (times for hover)
         self.wild_shiny = False          # Yellow: the wild enemy right now would be shiny in Gen 2
         self._badge_dirty = False        # something new not reported yet
+        self._badge_due = CHECK_EVERY // 2   # frame from which the next progress check runs (first safe frame)
+
+    def badges_due(self):
+        """Check on the next safe frame (e.g. the PC just closed: count a deposited shiny before it can be traded)."""
+        self._badge_due = 0
 
     @property
     def badge_region(self) -> str | None:
@@ -257,19 +276,22 @@ class BadgeMixin:
         """Called every frame from App.step()."""
         if self.frame % WILD_EVERY == 0:
             self._update_wild_shiny()
-        if self.frame % CHECK_EVERY != CHECK_EVERY // 2 or not self.badges_can_check():
+        if self.frame < self._badge_due or not self.badges_can_check():
             self.badges_report()
             return
         g = self.game
         try:
             if not g.in_game() or not g.is_safe():
-                return
+                return                       # due: try again on the next frame (the first safe one runs it)
             prog = self._badge_progress()
         except Exception:  # noqa: BLE001 - a bad read must never stop the game
             log.exception("badge progress check failed")
+            prog, self._badge_due = None, self.frame + CHECK_EVERY
             return
         if prog is None:
+            self._badge_due = self.frame + 30    # couldn't read right now (party half-written...)
             return
+        self._badge_due = self.frame + CHECK_EVERY
         region = self.badge_region
         prog = dict(prog, shinies=list(prog.get("shinies") or []) + self._pc_shiny_keys(region, prog.get("owner")))
         self.badges_merge(region, prog)
@@ -296,7 +318,7 @@ class BadgeMixin:
             log.exception("PC shiny scan failed")
         if len(memo) > 5000:
             memo.clear()
-        return keys
+        return rules.number_keys(keys)       # identical mons in the store: key, key-2, ... (max with the game's own)
 
     def badges_merge(self, region, prog):
         news = self.badges.apply(region, prog)

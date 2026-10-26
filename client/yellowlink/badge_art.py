@@ -208,16 +208,21 @@ def draw_tip(surf, f, tip, bounds: pygame.Rect):
         yy += 18
 
 
+SHINY_TAG_H = 8.5                           # tag height in Game Boy pixels (fits between the two battle HUDs)
+
+
 def draw_shiny_indicator(surf, f, x, y, scale, t=None):
     """'Shiny!' with a twinkling sparkle, drawn near the wild enemy in a Yellow battle: (x, y) = the middle of the
     tag's top edge, in screen pixels."""
     t = time.time() if t is None else t
-    s = max(1.0, scale / 3)
     tw = 0.75 + 0.25 * math.sin(t * 6)
-    img = f.body.render("Shiny!", True, (255, 236, 120))
-    pad = int(4 * s)
-    r = int(9 * s)
-    box = pygame.Rect(0, 0, img.get_width() + 2 * r + 3 * pad, max(img.get_height(), 2 * r) + 2 * pad)
+    h = max(16, int(SHINY_TAG_H * scale))          # at most ~9 Game Boy pixels tall at any window size
+    font = f.body if h >= 26 else f.small
+    img = font.render("Shiny!", True, (255, 236, 120))
+    pad = max(2, int(scale))
+    r = max(5, (h - 2 * pad) // 2)
+    s = r / 9
+    box = pygame.Rect(0, 0, img.get_width() + 2 * r + 3 * pad, h)
     box.midtop = (x, y)
     box.clamp_ip(surf.get_rect())
     shade = pygame.Surface(box.size, pygame.SRCALPHA)

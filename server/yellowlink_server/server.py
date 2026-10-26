@@ -602,11 +602,14 @@ class YellowLinkServer:
         except badgemod.BadgeError as exc:
             raise Invalid(str(exc)) from None
         before = self.badges.summary(client.uid)
-        news = self.badges.merge_report(client.uid, report)
+        news, old = self.badges.merge_report(client.uid, report)
         if self.badges.summary(client.uid) != before:
             await self.broadcast_roster()
         for region, what, tier in news:
             await self.system(badgemod.news_text(client.name, region, what, tier))
+        if old:                       # badges from before (first report after the update): one line, not each
+            n = badgemod.count(self.badges.summary(client.uid))
+            await self.system(f"{client.name} has {n} badge{'s' if n != 1 else ''}")
 
     async def on_get_badges(self, client: Client, msg: dict) -> None:
         uid = msg.get("uid")
@@ -621,7 +624,7 @@ class YellowLinkServer:
         if rec.get("kind") != "soul_link":
             return
         region = badgemod.REGION_OF_GAME.get(rec.get("game"))
-        tier = badgemod.run_tier(rec)
+        tier = badgemod.run_tier(rec, ts)
         if region and self.badges.award_soullink(uid, region, tier, ts):
             name = self.clients[uid].name if uid in self.clients else (self.store.get(uid) or {}).get("name", "?")
             await self.broadcast_roster()

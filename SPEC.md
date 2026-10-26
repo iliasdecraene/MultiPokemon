@@ -664,14 +664,14 @@ Per region (`kanto` = Yellow, `johto` = Crystal, `sinnoh` = Platinum), shown as 
 | Champion | entered the Hall of Fame in that region's game |
 | Pokédex | caught (owned flag) the regional dex: Kanto 150 (all but Mew), Johto 249 (all 251 but Mew + Celebi), Sinnoh 209 (the 210 of Platinum's Sinnoh dex but Manaphy: event-only mythicals are left out, like the in-game diplomas leave out Mew) |
 | Shiny hunter | caught >= 1 shiny in that game; tiers 1/10/25/50/100 by count of distinct own shiny catches (OT + TID, origin that game), remembered for good once seen (party, boxes, Day Care). Yellow: a mon whose DVs would be shiny in Gen 2 (Def/Spd/Spc 10, Atk 2,3,6,7,10,11,14,15) |
-| Soul Link | entered the Hall of Fame in a Soul Link run of that region's game: **gold** = run rule `exp_share` off (or a run from before the rule), **silver** = on. Gold outranks silver |
+| Soul Link | entered the Hall of Fame in a Soul Link run of that region's game: **gold** = run rule `exp_share` off, **silver** = on. Runs without the rule (created before 0.7.4): gold if that Hall of Fame was before 0.7.3 came out (2026-10-26 14:39:30 UTC, unix 1793025570 - no Exp Share All yet), silver from then on (0.7.3 applied the personal setting, default on, inside runs). Gold outranks silver |
 
 Badges are never taken away (a new game, trading a shiny away, releasing it: all kept). Retroactive: a save that
 already has them earns them on first detection.
 
 ### Client (detection + local book)
-Detection is per game (`badges.py` rules + the adapters' `progress(mem)`; badges-game's part). Every ~10 s at a safe
-moment in the main game (`is_safe()`, not in a run, trade or battle) the app calls `self.G.progress(self.game)`,
+Detection is per game (`badges.py` rules + the adapters' `progress(mem)`; badges-game's part). Every ~10 s (on the
+first safe frame once it's due, and right after the PC closes) in the main game (`is_safe()`, not in a run, trade or battle) the app calls `self.G.progress(self.game)`,
 merges it into its **badge book** (`badgesync.BadgeBook.apply`: never removes) and on anything new shows a toast
 ("Badge earned: Kanto Champion!") and reports the book. The book lives next to the save, in the save's folder, named
 like the PC store: `<data_dir>/badges/<save_uid or uid>.json` = `{"version": 1, "earned": {region: {"champion": ts, "dex": ts, "shinies": [key, ...]}},
@@ -692,18 +692,28 @@ older server would answer an unknown type with an error shown in red). Old clien
 BadgeView = `{"champion": ts|null, "dex": ts|null, "shiny": int, "soullink": "gold"|"silver"|null,
 "soullink_ts": ts|null}`; the roster entry carries the compact form (bools + count + soullink, see RosterEntry).
 
-Server validation of `badges` (error otherwise): `earned` an object with at most the three regions (unknown keys =
-error); per region an object; `champion`/`dex` null/absent, `true` (= now) or a unix time 1e9 <= ts <= now + 1 day;
-`shinies` a list of at most 1000 distinct strings matching `[A-Za-z0-9_:-]{1,40}`; other fields (e.g. `soullink`)
-ignored — Soul Link badges only come from the run ledger.
+Server checks of `badges`: only a wrong shape is an error (`earned` not an object, a known region not an object,
+`shinies` not a list). Everything else is tolerated so a player can never get stuck with a red error on every
+connect: unknown regions are skipped (room for new regions later); `champion`/`dex` null/absent/false = not
+earned, `true` or a time outside 1e9 <= ts <= server now + 1 day (a wrong PC clock) = server now; shiny keys that
+aren't strings matching `[A-Za-z0-9_:-]{1,40}` are dropped, duplicates too, at most 1000 kept; other fields (e.g.
+`soullink`) ignored — Soul Link badges only come from the run ledger. The client sends `true` for an earn time its
+own clock got wrong (before 2001, or more than a day ahead) and never stores a time before 2001.
 
 Server storage: `<data_dir>/badges.json` = `{"version": 1, "players": {uid: {region: {"champion": ts, "dex": ts,
-"shinies": [key...], "soullink": "gold"|"silver", "soullink_ts": ts}}}}` (atomic write, debounced). Merging a
-report: union of shiny keys (capped at 1000 per region: the count saturates there), earliest timestamp kept,
-nothing ever removed (only a future admin tool may). When something new arrives the roster is re-sent and a system
-message tells everyone ("Ilias earned the Kanto Champion badge!", "... reached Shiny hunter 10 in Kanto!").
+"shinies": [key...], "soullink": "gold"|"silver", "soullink_ts": ts}}}, "reported": {uid: ts of their first
+report}}` (atomic write, debounced). Merging a report: union of shiny keys (capped at 1000 per region: the count
+saturates there), earliest timestamp kept, nothing ever removed (only a future admin tool may). When something new
+arrives the roster is re-sent and a system message tells everyone ("Ilias earned the Kanto Champion badge!", "...
+completed the Kanto Pokédex!", "... reached Shiny hunter 10 in Kanto!"). Badges from before are not announced one
+by one: everything in a player's FIRST report (e.g. the first connect after updating, with an old save), and any
+Champion/Pokédex earned more than 5 minutes before the report (played offline), gives one line at most:
+"Ilias has 5 badges".
 
 Soul Link: when the ledger gets a `hof` event of player p (section 7), the server awards p the Soul Link badge of
-the run's region (gold/silver by the run's `exp_share` rule), saves it, re-sends the roster and tells everyone. At
+the run's region (gold/silver as in the table above), saves it, re-sends the roster and tells everyone. At
 startup it also awards it for every `hof` already in `challenges.json` (runs completed before 0.7.5). The client
-toasts it when its own roster entry shows a new or better Soul Link badge. `merge.py` (section 8) copies badges.json entries like players.
+toasts it when its own roster entry shows a new or better Soul Link badge (the referee's own Hall of Fame message
+doesn't mention the badge). A server without the `badges` feature: friends' badges show "Badges need a server
+update" instead of empty sockets. A badge book that isn't valid JSON of the right shape is kept aside as
+`badges.bad-<time>.json` and a fresh one is started (detection fills it again). `merge.py` (section 8) copies badges.json entries like players.

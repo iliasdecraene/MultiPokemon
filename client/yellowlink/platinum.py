@@ -1313,14 +1313,14 @@ def owner(pm: PlatinumMemory) -> dict:
 
 
 def progress(pm: PlatinumMemory):
-    """Badge progress of this Platinum save (badges.py): champion, Sinnoh dex caught (the 210) and the player's own
-    shiny catches (origin Platinum, own OT name + TID + SID) in the party, all 18 x 30 box slots and the Day Care,
-    keyed like the PC database (pk4.mon_key). None while not in game, while the party is mid-update
+    """Badge progress of this Platinum save (badges.py): champion, Sinnoh dex caught (the 209 goal) and the player's
+    own shiny catches (origin Platinum, own OT name + TID + SID) in the party, all 18 x 30 box slots and the Day
+    Care, keyed like the PC database (pk4.mon_key; numbered). None while not in game, while the party is mid-update
     (party_checked()) or without a Pokédex page. Box / Day Care slots the game is decrypting right now are read the
     way the game will write them back (platinum_pc.normalise); one that can't be read is skipped this time (shiny
     keys are remembered once seen, so a skipped read never loses anything)."""
     from . import badges
-    from .platinum_pc import Gen4PC, normalise
+    from .platinum_pc import normalise
     if not pm.in_game():
         return None
     party = pm.party_checked()
@@ -1328,11 +1328,24 @@ def progress(pm: PlatinumMemory):
     if party is None or bits is None:
         return None
     me = owner(pm)
+    tid, sid = me["tid"], me["sid"]
+
+    def candidate(pid: int) -> bool:
+        # an own shiny has the player's TID/SID, so (TID ^ SID ^ PID_hi ^ PID_lo) < 8 with the player's ids is
+        # necessary: the PID sits unencrypted at +0 (also mid-decryption), so most slots need one 32-bit read
+        return (tid ^ sid ^ (pid >> 16) ^ (pid & 0xFFFF)) < 8
+    raws = [r[:BOX_MON_SIZE] for r in party if candidate(struct.unpack_from("<I", r, 0)[0])]
+    base = pm.box_slot_addr(0, 0)
+    r32 = pm.m.r32
+    for i in range(NUM_BOXES * BOX_SLOTS):
+        a = base + i * BOX_MON_SIZE
+        if candidate(r32(a)):
+            raws.append(pm.m.read(a, BOX_MON_SIZE))
     recs = []
-    for raw in list(party) + [r for box in Gen4PC(pm, None).read_slots() for r in box]:
-        kind, rec = normalise(raw[:BOX_MON_SIZE])     # a party record starts with its box record
+    for raw in raws:
+        kind, rec = normalise(raw)
         if kind == "mon":
             recs.append(rec)
     recs += pm.daycare_records() or []
     keys = [badges.gen4_shiny_key(r, me) for r in recs]
-    return badges.progress_dict("sinnoh", champion(pm), bits, [k for k in keys if k], me)
+    return badges.progress_dict("sinnoh", champion(pm), bits, badges.number_keys([k for k in keys if k]), me)

@@ -55,7 +55,9 @@ PAD_BUTTONS = {0: "a", 1: "b", 6: "select", 7: "start", 4: "select", 9: "start"}
 DS_KEYMAP = {**KEYMAP, pygame.K_d: "x", pygame.K_c: "y", pygame.K_q: "l", pygame.K_w: "r"}
 DS_PAD_BUTTONS = {**PAD_BUTTONS, 2: "x", 3: "y", 4: "l", 5: "r"}
 DS_FAST_TICKS = 4           # DS frames per host frame while fast-forward is on
-SHINY_TAG_X, SHINY_TAG_Y = 124, 57  # Game Boy pixels: the "Shiny!" tag, centred under the wild enemy's picture
+# Game Boy pixels: the "Shiny!" tag sits centred under the wild enemy's HUD (its HP bar's frame ends at y 28),
+# above the player's Pokémon (back picture from y 40) and clear of the player's name/level HUD (y 56+)
+SHINY_TAG_X, SHINY_TAG_Y = 48, 30
 DS_SAVE_POLL = 180          # frames (~3 s) between battery save checks (Platinum)
 
 
@@ -1094,6 +1096,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin):
         if party is None:
             party = self.G.party_records(self.game)
         report = self.pcsync.close_session(self.game_id, self.pc_codec, party)
+        self.badges_due()        # count a shiny just deposited on the next safe frame (before it can be traded)
         if self.ds:
             # Platinum: party mons are taken out (by their exact bytes) and items given back once the game isn't
             # in the middle of updating the party (_pt_fix_party)

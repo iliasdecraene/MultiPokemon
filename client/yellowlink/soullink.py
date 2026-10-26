@@ -549,8 +549,8 @@ class Referee:
                                "auto": True})
         if not sl.mine()["hof"] and (self.view.hof() or self._run_champion()):
             self.send({"t": "hof"})          # the server also awards the Soul Link badge on it (SPEC.md section 9)
-            self.notify("Hall of Fame! Soul Link badge earned. When your partner gets here too, the run is "
-                        "complete.", "good")
+            # the Soul Link badge is toasted when the server confirms it (our roster entry), see badgesync.py
+            self.notify("Hall of Fame! When your partner gets here too, the Soul Link is complete.", "good")
         badges = self.view.badges()
         if badges != self.last_badges:
             self.last_badges = badges
