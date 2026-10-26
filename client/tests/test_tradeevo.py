@@ -61,7 +61,7 @@ def test_yellow_nickname_kept_and_missing_mon():
     key = game.mon_key(kad.data)
     assert tradeevo.options("gen1", g, g.rom)[0].label() == "SPOONY (Kadabra)"
     assert tradeevo.evolve("gen1", g, g.rom, key).new_nick == "SPOONY"
-    with pytest.raises(tradeevo.EvoFailed, match="not in your party"):
+    with pytest.raises(tradeevo.EvoFailed, match="not in the party"):
         tradeevo.evolve("gen1", g, g.rom, "ffffffffff")
 
 
@@ -284,9 +284,15 @@ class FlowApp(tradeevo.TradeEvoMixin):
         self.mode = "play"
         self.frame = 0
         self.server_features = {"badges", "trade_evo"}
-        self.roster = [{"uid": partner, "challenge_rules": ["exp_share", "trade_evo"]}]
+        self.roster = [{"uid": partner, "online": True, "challenge_rules": ["exp_share", "trade_evo"]}]
         self.partner = partner
         self.toasts, self.notes = [], []
+        self._chal_leaving = False
+        self.saves = []                      # autosave(force) calls: (force, net messages sent before it)
+
+    def autosave(self, force=False):
+        self.saves.append((force, [m["type"] for m in self.net.sent]))
+        return True
 
     def chal_partner(self, rec=None):
         return self.partner, "Alex"
@@ -486,3 +492,171 @@ def test_item_names_are_short_enough_for_the_server():
     for name in tradeevo.CRYSTAL_ITEMS.values():
         assert len(name) <= 20 and name.isprintable()
     assert text and ndsrom and struct                    # (imports used by the fakes)
+
+
+# --- review fixes -------------------------------------------------------------------------------------------------
+def asked(app):
+    app.request_tradeevo(app.tradeevo_options()[0])
+    return app.net.take("challenge_evo_request")[0]["evo_id"]
+
+
+def test_own_failure_after_go_is_not_toasted_twice():
+    """M1: our own failure (after go) is told once, by us; the server's end for it is then quiet."""
+    app = FlowApp(yellow([tg.make_mon(0x26)]))
+    eid = asked(app)
+    app.on_challenge_evo_go({"evo_id": eid})
+    app.game.write_party_slot(0, tg.make_mon(0x54, nick="PIKACHU"))          # gone from the party
+    app.tradeevo_step()
+    done = app.net.take("challenge_evo_done")[0]
+    assert done["ok"] is False and done["why"] == "not in the party anymore"
+    n = len(app.toasts)
+    app.on_challenge_evo_end({"challenge_id": "c1", "evo_id": eid, "ok": False, "reason": done["why"]})
+    assert len(app.toasts) == n                          # nothing more: no "Alex's trade evolution didn't happen"
+    # cancelling: the server's end for it is quiet too
+    app.game.write_party_slot(0, tg.make_mon(0x26))
+    eid = asked(app)
+    app.cancel_tradeevo()
+    n = len(app.toasts)
+    app.on_challenge_evo_end({"challenge_id": "c1", "evo_id": eid, "ok": False, "reason": "cancelled"})
+    assert len(app.toasts) == n
+
+
+def test_partner_is_told_whose_mon_failed():
+    """M1: the partner's toast names the requester's mon (not 'your party')."""
+    app = FlowApp(yellow([tg.make_mon(0x54, nick="PIKACHU")]), me="you", partner="me")
+    app.on_challenge_evo_request({"challenge_id": "c1", "evo_id": "e1", "name": "Alex", "key": "k", "dex": 64,
+                                  "into": 65, "nick": "KADABRA", "item": None})
+    app.respond_tradeevo(True)
+    app.prompt, app.mode = None, "play"                  # (what _answer_prompt does)
+    app.on_challenge_evo_end({"challenge_id": "c1", "evo_id": "e1", "ok": False,
+                              "reason": "not in the party anymore"})
+    assert app.toasts[-1] == "Alex's Kadabra didn't evolve (not in the party anymore)."
+    # a stranger end (not ours, not one we helped with) says nothing
+    n = len(app.toasts)
+    app.on_challenge_evo_end({"challenge_id": "c1", "evo_id": "zz", "ok": False, "reason": "timed out"})
+    assert len(app.toasts) == n
+
+
+def test_giving_up_tells_the_server():
+    """M2: no answer seen for 75 s -> done ok:false 'no answer' (the server frees the run right away)."""
+    app = FlowApp(yellow([tg.make_mon(0x26)]))
+    eid = asked(app)
+    app.evo_out["since"] = time.time() - tradeevo.ASK_WITHIN - 1
+    app.tradeevo_step()
+    done = app.net.take("challenge_evo_done")
+    assert done == [{"type": "challenge_evo_done", "challenge_id": "c1", "evo_id": eid, "ok": False,
+                     "why": "no answer"}]
+    assert app.evo_out is None and app.mode == "play"
+
+
+def test_reconnect_cancels_an_open_one():
+    """M2: after a reconnect (challenge_state) an evolution still asking / at go is cancelled, not left running."""
+    for state in ("asking", "go"):
+        app = FlowApp(yellow([tg.make_mon(0x26)]))
+        eid = asked(app)
+        if state == "go":
+            app.on_challenge_evo_go({"evo_id": eid})
+        app.tradeevo_reset()
+        done = app.net.take("challenge_evo_done")
+        assert done and done[0]["ok"] is False and done[0]["evo_id"] == eid and done[0]["why"] == "connection lost"
+        assert app.evo_out is None and app.mode == "play"
+        app.tradeevo_step()
+        assert app.game.party()[0].species == 0x26       # never evolved
+
+
+def test_dead_at_go_is_refused():
+    """L1: the mon died between asking and go -> no evolution."""
+    kad = tg.make_mon(0x26)
+    app = FlowApp(yellow([kad]))
+    key = game.mon_key(kad.data)
+    app.sl = SoulLink("me", "you", ledger=[{"seq": 1, "p": "me", "t": "enc", "area": "A", "dex": 64,
+                                            "status": "caught", "key": key}])
+    eid = asked(app)
+    app.sl.add({"seq": 2, "p": "me", "t": "dead", "key": key, "why": "fainted"})
+    app.on_challenge_evo_go({"evo_id": eid})
+    app.tradeevo_step()
+    assert app.game.party()[0].species == 0x26
+    assert app.net.take("challenge_evo_done")[0]["ok"] is False
+    with pytest.raises(tradeevo.EvoFailed):
+        tradeevo.evolve("gen1", app.game, app.rom, key, app.sl)
+
+
+def test_snapshot_before_done():
+    """L3: the resume snapshot is taken right after the write, before `done` goes out."""
+    app = FlowApp(yellow([tg.make_mon(0x26)]))
+    eid = asked(app)
+    app.on_challenge_evo_go({"evo_id": eid})
+    app.tradeevo_step()
+    assert app.saves == [(True, [])]                     # forced, and nothing sent before it
+    assert app.net.take("challenge_evo_done")[0]["ok"] is True
+
+
+def test_pause_does_not_count_against_the_go_limit():
+    """L4: while the run is paused (partner reconnecting...) the 30 s limit stands still."""
+    app = FlowApp(yellow([tg.make_mon(0x26)]))
+    eid = asked(app)
+    app.on_challenge_evo_go({"evo_id": eid})
+    app.chal_wait = "lost"
+    app.evo_out["since"] -= tradeevo.APPLY_WITHIN + 5     # 35 s go by while paused...
+    app.evo_out["tick"] -= tradeevo.APPLY_WITHIN + 5
+    app.tradeevo_step()
+    app.chal_wait = None
+    app.game.m[game.FONT_LOADED] = 1                     # (not safe yet)
+    app.tradeevo_step()
+    assert app.evo_out is not None and not app.net.take("challenge_evo_done")
+    app.game.m[game.FONT_LOADED] = 0
+    app.tradeevo_step()
+    assert app.game.party()[0].species == 0x95
+
+
+def test_busy_partner_says_busy():
+    """L5: the automatic decline says 'busy'; the requester is told so (not 'said no')."""
+    app = FlowApp(yellow([tg.make_mon(0x54, nick="PIKACHU")]), me="you", partner="me")
+    app.prompt = {"kind": "challenge", "id": "x"}
+    app.on_challenge_evo_request({"challenge_id": "c1", "evo_id": "e1", "name": "Alex", "key": "k", "dex": 64,
+                                  "into": 65, "nick": "KADABRA", "item": None})
+    assert app.net.take("challenge_evo_respond") == [{"type": "challenge_evo_respond", "challenge_id": "c1",
+                                                      "evo_id": "e1", "accept": False, "busy": True}]
+    req = FlowApp(yellow([tg.make_mon(0x26)]))
+    eid = asked(req)
+    req.on_challenge_evo_end({"challenge_id": "c1", "evo_id": eid, "ok": False, "reason": "partner busy"})
+    assert req.toasts[-1] == "Trade evolution: Alex is busy right now - try again in a moment."
+    eid = asked(req)
+    req.on_challenge_evo_end({"challenge_id": "c1", "evo_id": eid, "ok": False, "reason": "wait a moment"})
+    assert "wait a moment" in req.toasts[-1]
+
+
+def test_blocker_order():
+    """L6: a partner who is offline / not in the run is reported as such before 'needs to update'."""
+    app = FlowApp(yellow([tg.make_mon(0x26)]))
+    app.roster = [{"uid": "you", "online": False, "challenge_rules": None}]
+    assert "both need to be in the run" in app.tradeevo_blocker()
+    app.roster = [{"uid": "you", "online": True, "challenge_rules": ["exp_share"]}]
+    app.chal_wait = "lost"
+    assert "both need to be in the run" in app.tradeevo_blocker()
+    app.chal_wait = None
+    assert "needs to update" in app.tradeevo_blocker()
+
+
+def test_options_keep_the_last_good_list():
+    """L8: a frame where the party can't be read (Platinum mid-update) keeps the last list (no flicker)."""
+    app = FlowApp(yellow([tg.make_mon(0x26)]))
+    good = app.tradeevo_options()
+    assert len(good) == 1
+    app.game.m[game.PARTY_SPECIES + 1] = 0x00            # mid-update
+    app.frame += 10
+    assert app.tradeevo_options() == good
+    app.game.m[game.PARTY_SPECIES + 1] = 0xFF
+    app.game.write_party_slot(0, tg.make_mon(0x54, nick="PIKACHU"))
+    app.frame += 10
+    assert app.tradeevo_options() == []
+
+
+def test_leaving_stops_the_flow():
+    """L9: while leaving the run nothing is written."""
+    app = FlowApp(yellow([tg.make_mon(0x26)]))
+    eid = asked(app)
+    app.on_challenge_evo_go({"evo_id": eid})
+    app._chal_leaving = True
+    app.tradeevo_step()
+    assert app.game.party()[0].species == 0x26 and not app.net.take("challenge_evo_done")

@@ -157,7 +157,7 @@ class Driven:
 def trade_evolve(A, B, run, opt, answer=True, label=""):
     """The real flow: Ilias asks from the Soul Link panel's picker, Alex answers the prompt (Y/N)."""
     A.toggle_panel("soullink")
-    A.evo_pick = True
+    A.open_tradeevo_picker()
     A.render()
     pygame.image.save(A.screen, str(tmp / f"picker{label}.png"))
     A.request_tradeevo(opt)
@@ -210,6 +210,14 @@ def phase_yellow():
     check("Alex said no: nothing changed", A.game.party()[0].species == 0x26 and not ledger_evos(A)
           and any("said no" in t[0] for t in A.toasts), [t[0] for t in A.toasts][-3:])
 
+    # asking again right away: the server says "wait a moment" (cooldown after a no), quietly - no question for Alex
+    declined_at = time.time()
+    A.request_tradeevo(A.tradeevo_options()[0])
+    run(300, lambda: A.evo_out is None)
+    check("asking again right after a no: 'wait a moment', Alex isn't asked", A.evo_out is None
+          and B.prompt is None and "wait a moment" in A.toasts[-1][0], [t[0] for t in A.toasts][-2:])
+    while time.time() - declined_at < 21:              # (server EVO_COOLDOWN = 20 s)
+        run(30)
     trade_evolve(A, B, run, A.tradeevo_options()[0])
     new = A.game.party()[0]
     check("Kadabra evolved into Alakazam in Ilias's game", new.species == 0x95 and new.nick_str() == "ALAKAZAM"
@@ -552,7 +560,7 @@ def phase_platinum():
 
     def evolve(opt, label):
         A.toggle_panel("soullink")
-        A.evo_pick = True
+        A.open_tradeevo_picker()
         A.render()
         pygame.image.save(A.screen, str(tmp / f"picker_{label}.png"))
         A.request_tradeevo(opt)

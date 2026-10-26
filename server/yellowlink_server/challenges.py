@@ -16,7 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from .pcstore import G4_TRADE_EVOS
+from .pcstore import G2_TRADE_EVOS, G4_TRADE_EVOS
 
 log = logging.getLogger("yellowlink.challenges")
 
@@ -38,12 +38,23 @@ ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 AREA_RE = re.compile(r"^[A-Za-z0-9_*-]{1,40}$")   # "*" marks a shiny-clause bonus catch ("ROUTE_1*1")
 CID_RE = re.compile(r"^[A-Za-z0-9]{1,16}$")
 EVENT_TYPES = {"enc", "dead", "loc", "swap", "hof", "blackout", "balls"}     # what clients may post ("evo": server)
-# Trade evolutions in a run (SPEC.md section 7, 0.7.6): (national dex, evolution) pairs of every game we support -
-# Platinum's list is a superset of Yellow's and Crystal's.
-TRADE_EVO_PAIRS = {(dex, into) for dex, evos in G4_TRADE_EVOS.items() for into, *_ in evos}
+# Trade evolutions in a run (SPEC.md section 7, 0.7.6): (national dex, evolution) pairs per game of the run
+TRADE_EVO_GAME_PAIRS = {
+    # Gen 1: Kadabra, Machoke, Graveler, Haunter = the Gen-2 trade evolutions without a held item
+    "yellow": {(dex, into) for dex, (into, item, *_n) in G2_TRADE_EVOS.items() if item is None},
+    "crystal": {(dex, into) for dex, (into, *_r) in G2_TRADE_EVOS.items()},
+    "platinum": {(dex, into) for dex, evos in G4_TRADE_EVOS.items() for into, *_ in evos},
+}
+TRADE_EVO_PAIRS = set().union(*TRADE_EVO_GAME_PAIRS.values())       # every game's
 TRADE_EVO_CAP = "trade_evo"  # in `library.challenge_rules`: the client can do (and help with) trade evolutions
 EVO_ASK_TIMEOUT = 60.0       # the partner must answer within this
 EVO_GO_TIMEOUT = 180.0       # after "go" the requester's `done` must arrive within this
+EVO_COOLDOWN = 20.0          # after the partner said no (or was busy) the requester waits this long before asking again
+
+
+def trade_evo_pairs(game: str) -> set:
+    """The (dex, evolution) trade evolutions of a run's game."""
+    return TRADE_EVO_GAME_PAIRS.get(game, set())
 ENC_STATUS = {"open", "caught", "failed", "skipped"}
 
 
@@ -196,6 +207,7 @@ class ChallengeHub:
         self.requests: dict[str, Request] = {}
         self.sessions: dict[str, Session] = {}
         self.evos: dict[str, Evo] = {}                # challenge id -> its open trade evolution
+        self.evo_cooldown: dict[str, float] = {}      # requester uid -> no new request before this time
         self._save_task = None
         self._load()
 
@@ -442,6 +454,9 @@ class ChallengeHub:
         old = self.sessions.pop(rec["id"], None)
         if old:
             self._cancel_timers(old)
+        evo = self.evos.get(rec["id"])
+        if evo is not None:
+            await self._end_evo(evo, False, "session over")
         s = Session(rec["id"])
         self.sessions[rec["id"]] = s
         s.load_timer = asyncio.get_running_loop().create_task(self._load_deadline(s))
@@ -627,7 +642,7 @@ class ChallengeHub:
         eid = _str(msg.get("evo_id"), "evo_id", 16, CID_RE)
         key = _str(msg.get("key"), "key")
         dex, into = _dex(msg.get("dex"), "dex"), _dex(msg.get("into"), "into")
-        if (dex, into) not in TRADE_EVO_PAIRS:
+        if (dex, into) not in trade_evo_pairs(rec["game"]):
             raise ChallengeError("that Pokémon doesn't evolve by trade")
         nick = _evo_text(msg.get("nick", ""), "nick", 12) or ""
         item = _evo_text(msg.get("item"), "item", 20) or None
@@ -641,6 +656,8 @@ class ChallengeHub:
             refuse = f"{partner.name} needs a newer YellowLink (press U to update)"
         elif rec["id"] in self.evos:
             refuse = "busy"
+        elif time.monotonic() < self.evo_cooldown.get(client.uid, 0):
+            refuse = "wait a moment"                  # the partner just said no / was busy: don't nag
         else:
             refuse = None
         if refuse:
@@ -662,12 +679,20 @@ class ChallengeHub:
             evo.timer = None                          # (this task: don't cancel ourselves in _end_evo)
             await self._end_evo(evo, False, reason)
 
-    async def _end_evo(self, evo, ok, reason):
-        if self.evos.get(evo.challenge_id) is evo:
+    def _close_evo(self, evo) -> bool:
+        """Take an evolution off the open list (and stop its timer). False if it was closed already."""
+        was_open = self.evos.get(evo.challenge_id) is evo
+        if was_open:
             del self.evos[evo.challenge_id]
         if evo.timer:
             evo.timer.cancel()
             evo.timer = None
+        return was_open
+
+    async def _end_evo(self, evo, ok, reason, closed=False):
+        """Close it (unless the caller did) and tell both players - once."""
+        if not self._close_evo(evo) and not closed:
+            return
         log.info("challenge %s: trade evolution %s ended (%s)", evo.challenge_id, evo.id, reason)
         out = {"type": "challenge_evo_end", "challenge_id": evo.challenge_id, "evo_id": evo.id, "ok": ok,
                "reason": reason}
@@ -680,7 +705,10 @@ class ChallengeHub:
             return                                    # expired / not ours / already answered: ignore quietly
         rec = self.records.get(evo.challenge_id)
         if not msg.get("accept"):
-            await self._end_evo(evo, False, "declined")
+            # a client that can't show the question right now answers "busy" (SPEC.md section 7)
+            busy = bool(msg.get("busy"))
+            self.evo_cooldown[evo.frm] = time.monotonic() + EVO_COOLDOWN
+            await self._end_evo(evo, False, "partner busy" if busy else "declined")
             return
         if rec is None or rec["status"] != "active" or not self._both_in(rec):
             await self._end_evo(evo, False, "not both in the run")
@@ -707,10 +735,11 @@ class ChallengeHub:
             return
         if evo.state != "go":
             raise ChallengeError("wait for your partner's answer first")
+        self._close_evo(evo)                          # first: nothing can end it twice while we await below
         rec = self.records.get(evo.challenge_id)
         if rec is not None:
             ev = {"t": "evo", "key": evo.key, "dex": evo.dex, "into": evo.into, "nick": evo.nick, "evo": evo.id}
             if evo.item:
                 ev["item"] = evo.item
             await self._append(rec, client.uid, ev)
-        await self._end_evo(evo, True, "evolved")
+        await self._end_evo(evo, True, "evolved", closed=True)

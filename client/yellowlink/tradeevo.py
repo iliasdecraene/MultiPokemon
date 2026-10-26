@@ -161,19 +161,20 @@ class EvoFailed(Exception):
     """The evolution can't happen (anymore): the text goes to the player and the partner."""
 
 
-def evolve(kind: str, mem, rom, key: str) -> Option:
+def evolve(kind: str, mem, rom, key: str, sl=None) -> Option:
     """Evolve the party mon with Soul Link key `key` in the game's RAM, like a trade and trade back. Returns the
     Option it was (label() = the mon before, `new_nick` = its name now). Raises EvoFailed if it isn't in the party or
     can't evolve; returns None if the party can't be read right now (try again next frame). Call only while the
-    game is safe (and on Platinum when observe_stable() said so)."""
-    opts = options(kind, mem, rom)
+    game is safe (and on Platinum when observe_stable() said so). With `sl` (the run's SoulLink) a mon that died
+    in the run meanwhile is refused. The EvoFailed text is neutral (the partner sees it too)."""
+    opts = options(kind, mem, rom, sl)
     if opts is None:
         return None
     opt = next((o for o in opts if o.key == key), None)
     if opt is None:
-        raise EvoFailed("it's not in your party anymore")
+        raise EvoFailed("not in the party anymore")
     if not opt.ok:
-        raise EvoFailed(f"it {opt.why}")
+        raise EvoFailed(opt.why if opt.why.startswith("lost") else f"it {opt.why}")
     if kind == "gen1":
         nick = _evolve_gb(mem, rom, opt, game.evolve_for_trade)
     elif kind == "gen2":
@@ -236,7 +237,13 @@ class TradeEvoMixin:
         self.server_features: set = set()   # welcome.features
         self.evo_out: dict | None = None    # my trade evolution in progress (see SPEC.md section 7)
         self.evo_pick = False                # the Soul Link panel shows the picker
+        self.evo_page = 0                    # ...which page of it (small windows)
         self._evo_opts = (-99, None)         # (frame, options) cache for the panel
+        self._evo_closed: set = set()        # my evolutions I ended myself: the server's end for them is quiet
+        self._evo_help: dict = {}            # evo id -> (name, mon) of a partner's evolution I said yes to
+
+    def open_tradeevo_picker(self):
+        self.evo_pick, self.evo_page = True, 0
 
     def evo_kind(self) -> str:
         return "gen4" if getattr(self, "ds", False) else ("gen2" if self.gen2 else "gen1")
@@ -249,10 +256,12 @@ class TradeEvoMixin:
         f, opts = self._evo_opts
         if self.frame - f >= 10 or self.frame < f:
             try:
-                opts = options(self.evo_kind(), self.game, self.evo_rom(), self.sl)
+                new = options(self.evo_kind(), self.game, self.evo_rom(), self.sl)
             except Exception:  # noqa: BLE001 - never break the panel over a read
                 log.exception("reading trade evolution options failed")
-                opts = None
+                new = None
+            if new is not None or opts is None or self.frame < f:
+                opts = new                       # (a frame the party can't be read keeps the last list: no flicker)
             self._evo_opts = (self.frame, opts)
         return opts
 
@@ -264,10 +273,10 @@ class TradeEvoMixin:
             return "The server needs an update for trade evolutions (ask the host)."
         uid, partner = self.chal_partner()
         e = next((r for r in self.roster if r.get("uid") == uid), {}) or {}
+        if self.net.status != "online" or self.chal_wait or self.sl is None or e.get("online") is False:
+            return f"You both need to be in the run ({partner} too)."
         if CAP not in (e.get("challenge_rules") or []):
             return f"{partner} needs to update YellowLink (press U) to help with trade evolutions."
-        if self.net.status != "online" or self.chal_wait or self.sl is None:
-            return f"You both need to be in the run ({partner} too)."
         if self.evo_out:
             return "A trade evolution is going on."
         return ""
@@ -300,6 +309,7 @@ class TradeEvoMixin:
             return
         self.net.send({"type": "challenge_evo_done", "challenge_id": o["cid"], "evo_id": o["id"], "ok": False,
                        "why": "cancelled"})
+        self._evo_closed.add(o["id"])
         self.evo_out = None
         if self.mode == "evo_wait":
             self.mode = "play"
@@ -311,7 +321,10 @@ class TradeEvoMixin:
         # (asking ourselves at the same moment is fine: the server took the partner's first and ends ours with
         # "busy" - this question shows once our wait is over)
         if not self.chal or cid != self.chal["id"] or self.prompt:
-            self.net.send({"type": "challenge_evo_respond", "challenge_id": cid, "evo_id": eid, "accept": False})
+            msg = {"type": "challenge_evo_respond", "challenge_id": cid, "evo_id": eid, "accept": False}
+            if self.chal and cid == self.chal["id"]:
+                msg["busy"] = True                       # another question is up: "Alex is busy right now"
+            self.net.send(msg)
             return
         self.prompt = {"kind": "tradeevo", "id": eid, "cid": cid, "name": msg.get("name", "?"),
                        "dex": msg.get("dex", 0), "into": msg.get("into", 0), "nick": str(msg.get("nick") or ""),
@@ -332,15 +345,21 @@ class TradeEvoMixin:
         self.net.send({"type": "challenge_evo_respond", "challenge_id": p["cid"], "evo_id": p["id"],
                        "accept": accept})
         if accept:
+            name, nick = self.dex_name(p.get("dex", 0)), p.get("nick") or ""
+            self._evo_help[p["id"]] = (p["name"], name if not nick or nick.upper() == name.upper() else nick)
             self.toast(f"Helping {p['name']}...", 3, ui.ACCENT)
 
     def on_challenge_evo_go(self, msg):
         o = self.evo_out
         if o and msg.get("evo_id") == o["id"] and o["state"] == "asking":
             o["state"], o["since"] = "go", time.time()
+            o["tick"] = o["since"]
 
     def on_challenge_evo_end(self, msg):
         eid, ok, reason = msg.get("evo_id"), bool(msg.get("ok")), str(msg.get("reason") or "")
+        if eid in self._evo_closed:
+            self._evo_closed.discard(eid)                # one I ended myself (and told the player about)
+            return
         o = self.evo_out
         if o and eid == o["id"]:
             self.evo_out = None
@@ -349,6 +368,8 @@ class TradeEvoMixin:
             if not ok and o["state"] != "applied" and reason not in ("cancelled", "expired"):
                 _, partner = self.chal_partner()
                 text = {"declined": f"{partner} said no.", "no answer": f"{partner} didn't answer.",
+                        "partner busy": f"{partner} is busy right now - try again in a moment.",
+                        "wait a moment": "wait a moment before asking again.",
                         "not both in the run": f"{partner} isn't in the run right now.",
                         "busy": "another one is going on - try again in a moment.",
                         "the run is over": "the run is over.",
@@ -364,10 +385,11 @@ class TradeEvoMixin:
                 self.mode = "play"
             if reason == "cancelled":
                 self.toast(f"{p['name']} cancelled the trade evolution.", 4, ui.DIM)
-        elif not ok and reason not in ("declined", "cancelled", "no answer", "expired", "session over"):
-            if self.chal and msg.get("challenge_id") == self.chal["id"]:
-                _, partner = self.chal_partner()
-                self.toast(f"{partner}'s trade evolution didn't happen ({reason}).", 5, ui.BAD)
+            return
+        helped = self._evo_help.pop(eid, None)
+        if helped and not ok and reason not in ("declined", "cancelled", "no answer", "expired", "session over"):
+            name, mon = helped
+            self.toast(f"{name}'s {mon} didn't evolve ({reason}).", 5, ui.BAD)
 
     def tradeevo_event(self, ev, partner):
         """A partner's `evo` ledger event (on_challenge_event): tell the player."""
@@ -380,20 +402,24 @@ class TradeEvoMixin:
     # --- per frame (from chal_step) -----------------------------------------------------------------------------
     def tradeevo_step(self):
         o = self.evo_out
-        if not o:
+        if not o or getattr(self, "_chal_leaving", False):
             return
         if o.get("unsent") and self.net.status == "online" and self.net.send(o["unsent"]):
             o["unsent"] = None
-        if o["state"] == "asking" and time.time() - o["since"] > ASK_WITHIN:
-            self.evo_out = None                          # the server's answer got lost (connection blip)
-            if self.mode == "evo_wait":
-                self.mode = "play"
+        now = time.time()
+        if o["state"] == "asking" and now - o["since"] > ASK_WITHIN:
+            self._evo_finish(False, "no answer")         # the answer got lost: free the run on the server too
             self.toast("Trade evolution: no answer.", 4, ui.BAD)
             return
-        if o["state"] != "go" or self.chal_wait or self.chal_popup:
+        if o["state"] != "go":
             return
-        if time.time() - o["since"] > APPLY_WITHIN:
-            self._evo_finish(False, "no quiet moment to evolve")
+        if self.chal_wait or self.chal_popup:
+            o["since"] += now - o.get("tick", now)       # a paused run doesn't count against the time limit
+            o["tick"] = now
+            return
+        o["tick"] = now
+        if now - o["since"] > APPLY_WITHIN:
+            self._evo_finish(False, "no quiet moment")
             self.toast("Couldn't find a quiet moment to evolve - try again standing still.", 5, ui.BAD)
             return
         try:
@@ -401,7 +427,7 @@ class TradeEvoMixin:
                 return
             if getattr(self, "ds", False) and not self.game.observe_stable():
                 return                                   # Platinum: the game may be working on the party record
-            done = evolve(self.evo_kind(), self.game, self.evo_rom(), o["opt"].key)
+            done = evolve(self.evo_kind(), self.game, self.evo_rom(), o["opt"].key, self.sl)
         except EvoFailed as e:
             self._evo_finish(False, str(e)[:30])
             self.toast(f"Couldn't evolve {o['opt'].label()}: {e}.", 5, ui.BAD)
@@ -412,6 +438,10 @@ class TradeEvoMixin:
             return
         if done is None:
             return                                       # party mid-update: next frame
+        try:
+            self.autosave(force=True)                    # resume = the evolved state, even if the app dies now
+        except Exception:  # noqa: BLE001
+            log.exception("snapshot after the trade evolution failed")
         self._evo_finish(True)
         self._evo_opts = (-99, None)
         item = f" ({done.item} used up)" if done.item else ""
@@ -428,13 +458,22 @@ class TradeEvoMixin:
                 o["unsent"] = msg
         else:
             self.net.send(msg)
+            self._evo_closed.add(o["id"])                # (told the player here; the server's end is quiet)
             self.evo_out = None
         if self.mode == "evo_wait":
             self.mode = "play"
 
     def tradeevo_reset(self):
         """Back in the run after a reconnect (challenge_state): resend a `done` the server may not have seen (it
-        answers "expired" if it already had it). Asking/go states run on (their own time limits end them)."""
+        answers "expired" if it already had it); an evolution still asking / at go is cancelled (the question or
+        the go may have been lost with the connection)."""
         o = self.evo_out
-        if o and o["state"] == "applied" and not o.get("unsent"):
-            o["unsent"] = {"type": "challenge_evo_done", "challenge_id": o["cid"], "evo_id": o["id"], "ok": True}
+        if not o:
+            return
+        if o["state"] == "applied":
+            if not o.get("unsent"):
+                o["unsent"] = {"type": "challenge_evo_done", "challenge_id": o["cid"], "evo_id": o["id"],
+                               "ok": True}
+            return
+        self._evo_finish(False, "connection lost")
+        self.toast("Trade evolution cancelled (connection lost) - ask again.", 4, ui.BAD)

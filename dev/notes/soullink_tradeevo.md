@@ -46,10 +46,17 @@ family root, so neither changes. The `evo` ledger event is display only (pairs l
 - `go` -> the requester writes at the next safe (and on Platinum stable) frame within 30 s, then `done ok:true`.
   The server appends `evo` to the ledger and ends it for both. If `done` can't be sent (offline), it's kept and
   resent; a reconnect (`challenge_state`) resends it too; a server that no longer knows it answers "expired".
-- Client-side limits: no answer within 75 s -> give up waiting; no safe moment within 30 s of `go` -> `done
-  ok:false`. Server: 60 s to answer, 180 s from `go` to `done`, session end -> "session over".
-- Known gap: if the app is killed in the same frame as the write, the evolution is in the resume snapshot but the
-  ledger misses the `evo` event (display only, rules unaffected).
+- Client-side limits: no answer within 75 s -> give up (`done ok:false` "no answer"); no safe moment within 30 s of
+  `go` (paused time not counted) -> `done ok:false`. Server: 60 s to answer, 180 s from `go` to `done`, session end
+  or a replaced session -> "session over", 20 s cooldown after a no/busy.
+- Right after the write the app takes a resume snapshot (`autosave(force=True)`) before sending `done`, so a crash
+  can't bring back the unevolved mon. If it dies before `done` leaves, the ledger misses the `evo` line (display
+  only, rules unaffected).
+- Review fixes (after the first merge): per-game (dex, into) sets on the server; "partner busy" + a 20 s cooldown
+  ("wait a moment") after a no/busy; giving up / reconnecting sends `done ok:false` so the run isn't held "busy";
+  the 30 s go limit doesn't count paused time; a mon that died meanwhile is refused at go; the server closes an
+  evolution before awaiting the ledger write; a replaced session ends an open one; nothing runs while leaving;
+  the picker keeps its last list when Platinum's party can't be read for a frame and pages in small windows.
 
 ## Verified on the real ROMs (`python dev/e2e/soullink_tradeevo.py`)
 - Yellow, two clients: decline then accept; Kadabra -> Alakazam (key, OT, link kept; `evo` on both ledgers; both

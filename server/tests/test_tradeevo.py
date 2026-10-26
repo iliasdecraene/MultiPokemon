@@ -6,13 +6,14 @@ from yellowlink_server import challenges as chal
 from test_challenges import join_both, start_challenge
 
 
-async def run_with_caps(connect_client, a_caps=("exp_share", "trade_evo"), b_caps=("exp_share", "trade_evo")):
+async def run_with_caps(connect_client, a_caps=("exp_share", "trade_evo"), b_caps=("exp_share", "trade_evo"),
+                        game="yellow"):
     a = await connect_client("Ilias")
     b = await connect_client("Alex")
     await a.send(type="library", games=["yellow", "crystal"], challenge_rules=list(a_caps))
     await b.send(type="library", games=["yellow", "crystal"], challenge_rules=list(b_caps))
     await asyncio.sleep(0.05)
-    c = await start_challenge(a, b)
+    c = await start_challenge(a, b, game=game)
     await join_both(a, b, c["id"])
     return a, b, c["id"]
 
@@ -28,7 +29,7 @@ async def test_feature_is_announced(server, connect_client):
 
 
 async def test_full_flow_writes_the_ledger_and_tells_both(server, connect_client):
-    a, b, cid = await run_with_caps(connect_client)
+    a, b, cid = await run_with_caps(connect_client, game="crystal")
     await a.send(**ask(cid, item=None))
     req = await b.expect("challenge_evo_request")
     assert req == {"type": "challenge_evo_request", "challenge_id": cid, "evo_id": "e1", "from": a.uid,
@@ -69,6 +70,7 @@ async def test_clients_cannot_post_evo_events_themselves(server, connect_client)
 
 
 async def test_decline_and_no_answer(server, connect_client, monkeypatch):
+    monkeypatch.setattr(chal, "EVO_COOLDOWN", 0.0)
     a, b, cid = await run_with_caps(connect_client)
     await a.send(**ask(cid))
     await b.expect("challenge_evo_request")
@@ -205,3 +207,80 @@ async def test_session_end_ends_it(server, connect_client):
     await a.send(**ask(cid, evo_id="e2"))
     assert (await a.expect("challenge_evo_end", evo_id="e2"))["reason"] == "not both in the run"
     await a.expect_none("error", wait=0.05)
+
+
+# --- review fixes ---------------------------------------------------------------------------------------------
+async def test_pairs_follow_the_run_game(server, connect_client):
+    """Yellow runs only know the four Gen-1 trade evolutions, Crystal the Gen-2 ones; Platinum all of them."""
+    a, b, cid = await run_with_caps(connect_client)                 # a Yellow run
+    await a.send(**ask(cid, dex=95, into=208, item="Metal Coat"))  # Onix -> Steelix doesn't exist in Yellow
+    assert "trade" in (await a.expect("error"))["message"]
+    await a.send(**ask(cid, dex=125, into=466))                     # Electabuzz -> Electivire: Gen 4 only
+    assert "trade" in (await a.expect("error"))["message"]
+    assert chal.trade_evo_pairs("crystal") >= {(95, 208), (117, 230), (64, 65)}
+    assert (125, 466) not in chal.trade_evo_pairs("crystal")
+    assert {(125, 466), (366, 367), (366, 368), (95, 208)} <= chal.trade_evo_pairs("platinum")
+    assert chal.trade_evo_pairs("yellow") == {(64, 65), (67, 68), (75, 76), (93, 94)}
+
+
+async def test_partner_busy_and_cooldown(server, connect_client, monkeypatch):
+    monkeypatch.setattr(chal, "EVO_COOLDOWN", 0.4)
+    a, b, cid = await run_with_caps(connect_client)
+    await a.send(**ask(cid))
+    await b.expect("challenge_evo_request")
+    await b.send(type="challenge_evo_respond", challenge_id=cid, evo_id="e1", accept=False, busy=True)
+    assert (await a.expect("challenge_evo_end"))["reason"] == "partner busy"
+    # asking again right away: a quiet "wait a moment" (no request reaches the partner, no red error)
+    await a.send(**ask(cid, evo_id="e2"))
+    end = await a.expect("challenge_evo_end", evo_id="e2")
+    assert end["ok"] is False and end["reason"] == "wait a moment"
+    await b.expect_none("challenge_evo_request", evo_id="e2", wait=0.05)
+    await a.expect_none("error", wait=0.0)
+    # the partner isn't held up by it
+    await b.send(**ask(cid, evo_id="f1"))
+    await a.expect("challenge_evo_request", evo_id="f1")
+    await a.send(type="challenge_evo_respond", challenge_id=cid, evo_id="f1", accept=False)
+    await b.expect("challenge_evo_end", evo_id="f1")
+    await asyncio.sleep(0.45)
+    await a.send(**ask(cid, evo_id="e3"))
+    await b.expect("challenge_evo_request", evo_id="e3")
+
+
+async def test_giving_up_ends_it_quietly(server, connect_client):
+    """The requester stops waiting (no answer seen / reconnect): done ok:false ends it for both right away."""
+    a, b, cid = await run_with_caps(connect_client)
+    await a.send(**ask(cid))
+    await b.expect("challenge_evo_request")
+    await a.send(type="challenge_evo_done", challenge_id=cid, evo_id="e1", ok=False, why="no answer")
+    assert (await b.expect("challenge_evo_end"))["reason"] == "no answer"
+    assert not server.challenges.evos
+    await a.send(**ask(cid, evo_id="e2"))                          # no cooldown after giving up
+    await b.expect("challenge_evo_request", evo_id="e2")
+
+
+async def test_done_twice_gives_one_event_and_one_end(server, connect_client):
+    a, b, cid = await run_with_caps(connect_client)
+    await a.send(**ask(cid))
+    await b.expect("challenge_evo_request")
+    await b.send(type="challenge_evo_respond", challenge_id=cid, evo_id="e1", accept=True)
+    await a.expect("challenge_evo_go")
+    done = dict(type="challenge_evo_done", challenge_id=cid, evo_id="e1", ok=True)
+    await a.send(**done)
+    await a.send(**done)                                           # a resend right behind it
+    await asyncio.sleep(0.3)
+    assert [e["t"] for e in server.challenges.records[cid]["ledger"]].count("evo") == 1
+    ends_b = [m for m in b.inbox if m.get("type") == "challenge_evo_end"]
+    assert len(ends_b) == 1 and ends_b[0]["ok"] is True
+    ends_a = [m for m in a.inbox if m.get("type") == "challenge_evo_end"]
+    assert [m["reason"] for m in ends_a] == ["evolved", "expired"]
+
+
+async def test_new_session_ends_an_open_one(server, connect_client):
+    """_start_session replacing a session (e.g. a continue request racing a stale one) ends its trade evolution."""
+    a, b, cid = await run_with_caps(connect_client)
+    await a.send(**ask(cid))
+    await b.expect("challenge_evo_request")
+    await server.challenges._start_session(server.challenges.records[cid])
+    assert (await a.expect("challenge_evo_end"))["reason"] == "session over"
+    await b.expect("challenge_evo_end")
+    assert not server.challenges.evos

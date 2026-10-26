@@ -720,12 +720,15 @@ def draw_soullink(surf, f, app, game_w, game_h, offset):
             y += 20
     evo_ok = hasattr(app, "tradeevo_blocker")
     if narrow:
-        bw = (r.w - 36 - 8) // 2
-        button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 50, bw, 36), "Pause & go back",
+        bw = (r.w - 36 - 8) // 2 if evo_ok else 210
+        fits = lambda s: f.body.size(s)[0] <= bw - 14          # noqa: E731
+        button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 50, bw, 36),
+               "Pause & go back" if fits("Pause & go back") else "Pause",
                lambda: app.leave_to_main("paused"), offset=offset, primary=True)
         if evo_ok:
-            button(surf, app, f, pygame.Rect(r.x + 26 + bw, r.bottom - 50, bw, 36), "Trade evolution",
-                   lambda: setattr(app, "evo_pick", True), offset=offset)
+            button(surf, app, f, pygame.Rect(r.x + 26 + bw, r.bottom - 50, bw, 36),
+                   "Trade evolution" if fits("Trade evolution") else "Trade evo",
+                   app.open_tradeevo_picker, offset=offset)
         text_wrapped(surf, f.small, "Your run is saved. Continue it together any time from Multiplayer > "
                      "Challenges.", (r.x + 18, r.bottom - 92), r.w - 36, DIM, 18)
         return
@@ -733,21 +736,35 @@ def draw_soullink(surf, f, app, game_w, game_h, offset):
            lambda: app.leave_to_main("paused"), offset=offset, primary=True)
     if evo_ok:
         button(surf, app, f, pygame.Rect(r.x + 240, r.bottom - 50, 190, 36), "Trade evolution",
-               lambda: setattr(app, "evo_pick", True), offset=offset)
+               app.open_tradeevo_picker, offset=offset)
     text(surf, f.small, fit(f.small, "Your run is saved. Continue it together any time from Multiplayer > "
                                      "Challenges.", r.w - 36), (r.x + 18, r.bottom - 80), DIM)
 
 
 def _draw_tradeevo_picker(surf, f, app, r, y, offset, narrow):
-    """Soul Link panel, "Trade evolution": the party mons that evolve by trade (SPEC.md section 7)."""
+    """Soul Link panel, "Trade evolution": the party mons that evolve by trade (SPEC.md section 7). Small windows
+    (Game Boy 2x, ...) get compact rows and pages."""
     _, partner = app.chal_partner()
     w = r.w - 36
-    y = text_wrapped(surf, f.small, f"Trade and trade back with {partner}: your Pokémon goes over and comes straight "
-                     f"back, evolved. It stays yours and keeps its Soul Link.", (r.x + 18, y), w, DIM, 18) + 8
+    compact = r.h < 420
+    if compact:
+        text(surf, f.small, fit(f.small, f"Trade and trade back with {partner} - it stays yours and linked.", w),
+             (r.x + 18, y), DIM)
+        y += 22
+    else:
+        y = text_wrapped(surf, f.small, f"Trade and trade back with {partner}: your Pokémon goes over and comes "
+                         f"straight back, evolved. It stays yours and keeps its Soul Link.", (r.x + 18, y), w, DIM,
+                         18) + 8
     blocker = app.tradeevo_blocker()
     if blocker:
-        y = text_wrapped(surf, f.small, blocker, (r.x + 18, y), w, BAD, 18) + 6
+        if compact:
+            text(surf, f.small, fit(f.small, blocker, w), (r.x + 18, y), BAD)
+            y += 22
+        else:
+            y = text_wrapped(surf, f.small, blocker, (r.x + 18, y), w, BAD, 18) + 6
     opts = app.tradeevo_options()
+    bottom = r.bottom - 58                                   # (the Back button row below)
+    page_buttons = False
     if opts is None:
         text(surf, f.body, "Reading your party...", (r.x + 18, y), DIM)
     elif not opts:
@@ -757,22 +774,29 @@ def _draw_tradeevo_picker(surf, f, app, r, y, offset, narrow):
                 "(Onix + Metal Coat...).")
         text_wrapped(surf, f.small, hint, (r.x + 18, y), w, DIM, 18)
     else:
-        bw = 110
-        row_h = 44 if narrow else 40
-        for o in opts:
-            if y > r.bottom - 100:
-                text(surf, f.small, "...", (r.x + 18, y), DIM)
-                break
+        bw, row_h, bh = (96, 36, 30) if compact else (110, 40, 34)
+        per = max(1, (bottom - y) // row_h)
+        pages = (len(opts) + per - 1) // per
+        page = min(max(0, getattr(app, "evo_page", 0)), pages - 1)
+        for o in opts[page * per:(page + 1) * per]:
             label = f"{o.label()} -> {o.into_name}"
             text(surf, f.body, fit(f.body, label, w - bw - 10), (r.x + 18, y), TEXT if o.ok else DIM)
             note = (f"uses up its {o.item}" if o.item else "") if o.ok else o.why
             if note:
-                text(surf, f.small, fit(f.small, note, w - bw - 10), (r.x + 18, y + 20), DIM if o.ok else BAD)
-            button(surf, app, f, pygame.Rect(r.right - 18 - bw, y - 2, bw, 34), "Evolve",
+                text(surf, f.small, fit(f.small, note, w - bw - 10), (r.x + 18, y + 19), DIM if o.ok else BAD)
+            button(surf, app, f, pygame.Rect(r.right - 18 - bw, y - 2, bw, bh), "Evolve",
                    lambda o=o: app.request_tradeevo(o), enabled=o.ok and not blocker, offset=offset,
                    tip=(blocker or (f"{o.label()} {o.why}." if o.why else "")))
             y += row_h
-    button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 50, 120, 36), "Back",
+        if pages > 1:
+            page_buttons = True
+            x = r.x + 18 + 100 + 10
+            button(surf, app, f, pygame.Rect(x, r.bottom - 50, 44, 36), "<",
+                   lambda: setattr(app, "evo_page", page - 1), enabled=page > 0, offset=offset)
+            text(surf, f.small, f"{page + 1}/{pages}", (x + 66, r.bottom - 32), DIM, anchor="center")
+            button(surf, app, f, pygame.Rect(x + 88, r.bottom - 50, 44, 36), ">",
+                   lambda: setattr(app, "evo_page", page + 1), enabled=page < pages - 1, offset=offset)
+    button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 50, 100 if page_buttons or compact else 120, 36), "Back",
            lambda: setattr(app, "evo_pick", False), offset=offset)
 
 
