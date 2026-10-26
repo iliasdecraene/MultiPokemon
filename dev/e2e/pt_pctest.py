@@ -180,7 +180,22 @@ check("egg added to the store (committed)", P.autosave(force=True) and "EGG" in 
 party0 = party_species(P)
 check("Platinum party: 2 x TURTWIG", party0 == [387, 387], party0)
 
+
+def dex_bits(a, off):
+    from yellowlink import platinum as PL
+    return a.game.m.read(a.game.save_body() + PL.PAGE_POKEDEX + off, 64)
+
+
+def has(bits, sp):
+    return bool(bits[(sp - 1) // 8] >> ((sp - 1) % 8) & 1)
+
+
+check("Platinum Pokédex before: PIDGEY and DITTO not caught", not has(dex_bits(P, 4), 16) and
+      not has(dex_bits(P, 4), 132))
 check("SOMEONE'S PC > WITHDRAW opens the box UI", pt_open(P, "withdraw"))
+check("the converted PIDGEY in the PC counts in Platinum's Pokédex like a received trade (caught + seen); the ?EGG "
+      "stand-in (DITTO) doesn't", has(dex_bits(P, 4), 16) and has(dex_bits(P, 0x44), 16)
+      and not has(dex_bits(P, 4), 132) and not has(dex_bits(P, 0x44), 132))
 check("open hook started a PC session", P.pcsync.session_open and P._pt_pc == "open", P._pt_pc)
 view = box_view(P)
 check("Platinum box 1 shows PIDGEY (converted) + ?EGG", view == [(16, "PIDGEY"), (132, "?EGG")], view)

@@ -3,7 +3,7 @@
 Per region (Kanto = Yellow, Johto = Crystal, Sinnoh = Platinum), earned in the player's MAIN game only:
   champion  entered the Hall of Fame in that game
   dex       caught (owned flag) the whole regional dex: Kanto 150 (all but Mew), Johto 249 (all 251 but Mew and
-            Celebi), Sinnoh the 210 of Platinum's Sinnoh dex
+            Celebi), Sinnoh 209 (Platinum's 210-entry Sinnoh dex but Manaphy)
   shinies   distinct shiny mons the player caught in that game (own OT name + TID, origin = that game); tiers
             1 / 10 / 25 / 50 / 100; remembered for good once seen, so trading/releasing it never lowers the count
   soullink  "gold" (run played with Exp Share All off) or "silver" (on) - set by the Soul Link award, not here
@@ -45,8 +45,8 @@ JOHTO_DEX = tuple(d for d in range(1, 252) if d not in (MEW, CELEBI))
 # listed first there, is left out by tools/dataproc speciesproc.c LoadSinnohDex -> 210 entries, = REGIONAL_DEX_COUNT)
 # converted to national numbers with generated/species.txt. Checked against the ROM's own list
 # (/application/zukanlist/zkn_data/zukan_data.narc member 12) by dev/badges/verify.py.
-# NOTE: #151 of this list is MANAPHY (490): Platinum's own Sinnoh diploma only needs it SEEN; it can't be caught in
-# Platinum without a Pokémon Ranger egg. SINNOH_DEX_EXCLUDED lets the coordinator drop it from the "caught all" goal.
+# #151 of this list is MANAPHY (490): Platinum's own Sinnoh diploma only needs it SEEN and it can't be caught in
+# Platinum without a Pokémon Ranger egg, so - like Mew and Celebi - the "caught all" goal leaves it out (209).
 SINNOH_DEX = (
     387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 63,
     64, 65, 129, 130, 406, 315, 407, 41, 42, 169, 74, 75, 76, 95, 208, 408, 409, 410, 411, 66,
@@ -60,13 +60,13 @@ SINNOH_DEX = (
     114, 465, 193, 469, 357, 111, 112, 464, 355, 356, 477, 137, 233, 474, 123, 212, 239, 125, 466, 240,
     126, 467, 220, 221, 473, 361, 362, 478, 359, 487,
 )
-SINNOH_DEX_EXCLUDED = ()          # e.g. (MANAPHY,) to make the Sinnoh goal 209 - see the note above
+SINNOH_DEX_EXCLUDED = (MANAPHY,)  # event-only mythical (like Mew/Celebi): the Sinnoh goal is 209
 REGIONAL_DEX = {
     "kanto": KANTO_DEX,
     "johto": JOHTO_DEX,
     "sinnoh": tuple(d for d in SINNOH_DEX if d not in SINNOH_DEX_EXCLUDED),
 }
-DEX_TOTAL = {r: len(v) for r, v in REGIONAL_DEX.items()}          # 150 / 249 / 210
+DEX_TOTAL = {r: len(v) for r, v in REGIONAL_DEX.items()}          # 150 / 249 / 209
 
 # --- shinies -----------------------------------------------------------------------------------------------------
 SHINY_TIERS = (1, 10, 25, 50, 100)

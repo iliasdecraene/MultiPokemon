@@ -80,9 +80,24 @@ print("crystal app:", C.game_id, C.full, C.gen2, C.pc_codec, C.game_info)
 check("Crystal runs with multiplayer on", C.full and C.gen2 and C.pc_codec is not None)
 print("crystal party:", [m.nick_str() for m in C.game.party()])
 pb = C.pyboy
+
+
+def caught(a, dex):
+    return bool(a.game.r(crystal.DEX_CAUGHT + (dex - 1) // 8) >> ((dex - 1) % 8) & 1)
+
+
+def seen(a, dex):
+    return bool(a.game.r(crystal.DEX_SEEN + (dex - 1) // 8) >> ((dex - 1) % 8) & 1)
+
+
+before = crystal.progress(C.game)["dex_caught"]
+check("Crystal Pokédex: RATTATA not caught yet", not caught(C, 19) and caught(C, 16))
 cp.pc_open(pb)
 check("PC open hook started a session", C.pcsync.session_open)
 check("Crystal PC shows the Yellow mons", crystal_box(C) == ["PIDGEY", "RATTATA"])
+check("the Yellow RATTATA arriving in the PC counts in Crystal's Pokédex like a trade (seen + caught; Johto %d -> %d)"
+      % (before, crystal.progress(C.game)["dex_caught"]),
+      caught(C, 19) and seen(C, 19) and crystal.progress(C.game)["dex_caught"] == before + 1)
 cp.pc_withdraw(pb, "RATTATA")
 names = [m.nick_str() for m in C.game.party()]
 check("RATTATA withdrawn into the Crystal party", "RATTATA" in names)
@@ -106,6 +121,8 @@ pa.open_pc(Y2.pyboy)
 box = [n for _, n in pa.box(Y2.pyboy)]
 print("yellow box:", box)
 check("Yellow PC: PIDGEY + ?SENTRET", box == ["PIDGEY", "?SENTRET"])
+owned = [d for d in range(1, 152) if Y2.pyboy.memory[0xD2F6 + (d - 1) // 8] >> ((d - 1) % 8) & 1]
+check("the ?SENTRET stand-in (a DITTO) is not added to Yellow's Pokédex", 132 not in owned)
 pa.close_pc(Y2.pyboy)
 check("database unchanged by a look-only visit", sorted(db(Y2)) == ["PIDGEY", "SENTRET"])
 Y2.shutdown()

@@ -262,6 +262,27 @@ class Gen1PC:
         return rec[0] == DITTO and rec[12] == 0 and rec[13] == 0 and \
             text.decode(rec[G1_STRUCT:G1_STRUCT + G1_NAME]) == STANDIN_OT
 
+    def mark_dex(self, boxes) -> list:
+        """Pokédex for the mons YellowLink shows in the boxes, like the game's own trade receive (pret AddPartyMon:
+        FlagAction FLAG_SET on wPokedexOwned + wPokedexSeen): seen + owned for every species there (stand-ins
+        left out). Call right after write_boxes (PC open hook, main game only). Returns the dex numbers newly
+        owned."""
+        from .game import DEX_OWNED, DEX_SEEN
+        new = set()
+        for box in boxes:
+            for rec in box:
+                if self.is_standin(rec):
+                    continue
+                dex = self.rom.dex_no(rec[0])
+                if not 1 <= dex <= 151:
+                    continue
+                i, bit = (dex - 1) // 8, 1 << ((dex - 1) % 8)
+                if not self.m[DEX_OWNED + i] & bit:
+                    new.add(dex)
+                for base in (DEX_OWNED, DEX_SEEN):
+                    self.m[base + i] = self.m[base + i] | bit
+        return sorted(new)
+
 
 # ---------------------------------------------------------------------------------------------------------------
 # Store + sync bookkeeping (game-agnostic apart from the codec passed in)

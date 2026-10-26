@@ -1064,9 +1064,25 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin):
                        10, ui.BAD)
             return
         self.pc_trust = True
+        self._pc_mark_dex(boxes)
         if self.ds:
             self._pt_pc_report(opening=True)
         log.info("PC opened: %d mons in the database", self.pcsync.count())
+
+    def _pc_mark_dex(self, boxes):
+        """Badges (0.7.5): the mons YellowLink just put into this game's PC view (trades, gifts, the player's other
+        games) count in its Pokédex like a received trade does in the real game (codec.mark_dex: seen + caught;
+        Crystal Unown letters; Platinum Pokedex_Capture). Main game only - pc_codec is None inside a challenge."""
+        mark = getattr(self.pc_codec, "mark_dex", None)
+        if mark is None:
+            return
+        try:
+            new = mark(boxes)
+        except Exception:  # noqa: BLE001 - the dex is a bonus; never break the PC sync over it
+            log.exception("marking the Pokédex for the PC view failed")
+            return
+        if new:
+            log.info("Pokédex: %d species now caught through YellowLink's PC: %s", len(new), new)
 
     def on_pc_close(self, party=None):
         if self.chal:

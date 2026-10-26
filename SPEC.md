@@ -329,7 +329,13 @@ Entry   = {"id": "<uuid4 hex>", "origin": "yellow"|"crystal", "dex": int, "level
 - Open (hook `BillsPC_` 08:546F): (1) **reconcile** — diff the game's current boxes against `last_view` (what we
   last wrote/saw) and apply any changes to the store; (2) **materialise** — write the store's view into all 12 boxes
   (current box → WRAM `wBoxDataStart`, others → SRAM bank 2/3 slots with per-box + per-bank checksums; set
-  `wCurrentBoxNum` bit 7); (3) remember that as `last_view`.
+  `wCurrentBoxNum` bit 7); (3) remember that as `last_view`; (4) **Pokédex** (0.7.5) — every species in the view
+  counts in that game's Pokédex like a received trade does in the real game (`codec.mark_dex`, all three games, at
+  the same hook, main game only; stand-ins and eggs left out): Yellow seen + owned (pret AddPartyMon), Crystal
+  SetSeenAndCaughtMon + Unown letter (UpdateUnownDex, wFirstUnownSeen), Platinum a port of Pokedex_Capture (gender
+  seen, Spinda pattern, Unown/Burmy/Wormadam/Shellos/Gastrodon/Deoxys/Shaymin/Giratina/Rotom forms, language,
+  caught + seen; equal byte for byte to the game's own catch, `dev/badges/verify.py`). Without it, Pokémon that
+  only come by trade could never complete a Pokédex badge.
 - Close (hook `ExitBillsPC` 08:553E): diff the game's boxes against `last_view` → **pending** changes:
   appear = new Entry (deposit), vanish = removed (withdraw/release), identical bytes = same Entry (moves).
   Stand-in rules applied. `last_view` := game's boxes.
@@ -415,18 +421,24 @@ Origin = Crystal: caught data (bytes 29-30) non-zero - the game writes it for ev
 trainer OT goes through SetCaughtData), contest prize and hatch; YellowLink's Gen-1 conversions have 0000. A real
 Route 29 catch got caught data 8202. Eggs don't count until hatched (same `mon_key`). Read from the party, the 14 boxes
 (Gen2PC: only the live sBox before the first save) and both Day Care slots (wBreedMon1/2).
+Pokédex for mons arriving through the PC view (section 5): wUnownDex 1:DED9 (26 letters 1-26, 0 = free),
+wFirstUnownSeen 1:DEF4; letter = pret GetUnownLetter (`crystal.unown_letter`).
 
 ### Badges (0.7.5) — Platinum, `platinum.progress` / `champion` (full memory map: dev/platinum/MEMORY_MAP.md)
 | name | where | notes |
 |---|---|---|
 | Pokedex | save body + 0x1328 (save page 7, 812 bytes) | u32 magic 0xBEEFCAFE, then caughtPokemon u32[16] (+0x04), seenPokemon (+0x44); bit species−1 (pret include/pokedex.h) |
-| Sinnoh dex | ROM `/application/zukanlist/zkn_data/zukan_data.narc` member 12 | the 210 species = `badges.SINNOH_DEX`; `/poketool/pl_pokezukan.narc` member 0 = national→Sinnoh number. #151 is MANAPHY (490), which Platinum alone can't catch |
+| Sinnoh dex | ROM `/application/zukanlist/zkn_data/zukan_data.narc` member 12 | the 210 species = `badges.SINNOH_DEX`; `/poketool/pl_pokezukan.narc` member 0 = national→Sinnoh number. #151 is MANAPHY (490): event-only, so the goal leaves it out (`SINNOH_DEX_EXCLUDED`) = 209 |
 | Champion | FLAG_GAME_COMPLETED 2404 / TrainerInfo.isMainStoryCleared / RECORD_TIMES_ENTERED_HALL_OF_FAME | `champion()` = `entered_hall_of_fame()` (all set by ClearGame, saved) or standing in the Hall of Fame room (map 187); checked alone + the real scene |
 
 Own catch = origin game 12 (Platinum) + OT name + TID + SID equal to TrainerInfo (a real catch has all of them;
 converted Gen-1/2 mons are origin 4/7 with SID 0). Shiny = (TID ^ SID ^ PID_hi ^ PID_lo) < 8; eggs don't count until
 hatched. Read from `party_checked()` (None -> progress None), all 18 x 30 box slots and the Day Care
 (`platinum_pc.normalise`; a slot that can't be read is skipped that time).
+Pokedex block layout used by `platinum.pokedex_capture` (checked on the ROM): +0x84 recordedGenders[2][64 bytes],
++0x104 spindaForm, +0x108..0x10B Shellos/Gastrodon/Burmy/Wormadam forms, +0x10C unownFormsSeen[28] (0xFF free),
++0x128 recordedLanguages[496] (bit per language JP EN FR DE IT ES), +0x31C Rotom forms (3 bits each, 7 free),
++0x320/0x321 Shaymin/Giratina forms, Deoxys forms in the top nibbles of caught[15]/seen[15]; size 0x324.
 
 ### Exp Share All hooks (Yellow + Crystal) — `client/yellowlink/expshare_gb.py`
 Modern rule (Gen 6+): participants get the full single-participant exp + stat exp (no split), other party mons with
@@ -650,7 +662,7 @@ Per region (`kanto` = Yellow, `johto` = Crystal, `sinnoh` = Platinum), shown as 
 | badge | earned when (main game only, never inside a Soul Link run) |
 |---|---|
 | Champion | entered the Hall of Fame in that region's game |
-| Pokédex | caught (owned flag) the regional dex: Kanto 150 (all but Mew), Johto 249 (all 251 but Mew + Celebi), Sinnoh 210 |
+| Pokédex | caught (owned flag) the regional dex: Kanto 150 (all but Mew), Johto 249 (all 251 but Mew + Celebi), Sinnoh 209 (the 210 of Platinum's Sinnoh dex but Manaphy: event-only mythicals are left out, like the in-game diplomas leave out Mew) |
 | Shiny hunter | caught >= 1 shiny in that game; tiers 1/10/25/50/100 by count of distinct own shiny catches (OT + TID, origin that game), remembered for good once seen (party, boxes, Day Care). Yellow: a mon whose DVs would be shiny in Gen 2 (Def/Spd/Spc 10, Atk 2,3,6,7,10,11,14,15) |
 | Soul Link | entered the Hall of Fame in a Soul Link run of that region's game: **gold** = run rule `exp_share` off (or a run from before the rule), **silver** = on. Gold outranks silver |
 

@@ -162,6 +162,10 @@ BREED_MON1_NICK = 0xDEF6         # wBreedMon1Nickname; OT at +11 (DF01), box str
 DAYCARE_LADY = 0xDF2C            # wDayCareLady: bit 0 HAS_MON
 BREED_MON2_NICK = 0xDF2F         # wBreedMon2Nickname; OT DF3A, struct DF45
 CAUGHT_EGG_LEVEL = 1            # caught level written when an egg hatches (SetEggMonCaughtData)
+UNOWN_DEX = 0xDED9               # wUnownDex: 26 letters (1-26) in the order first seen, 0 = free
+FIRST_UNOWN_SEEN = 0xDEF4        # wFirstUnownSeen
+NUM_UNOWN = 26
+UNOWN = 201
 
 # wBattleType values (constants/battle_constants.asm) and how Soul Link treats them
 BATTLETYPE_NORMAL, BATTLETYPE_CANLOSE, BATTLETYPE_DEBUG, BATTLETYPE_TUTORIAL = 0, 1, 2, 3
@@ -597,6 +601,19 @@ class CrystalMemory:
         for base in (DEX_CAUGHT, DEX_SEEN):
             self.w(base + i, self.r(base + i) | (1 << bit))
 
+    def note_unown(self, letter: int):
+        """pret UpdateUnownDex (letter 1-26 appended to wUnownDex unless listed) + wFirstUnownSeen if still 0 (as
+        AddTempmonToParty does for a received UNOWN)."""
+        for i in range(NUM_UNOWN):
+            v = self.r(UNOWN_DEX + i)
+            if v == letter:
+                break
+            if v == 0:
+                self.w(UNOWN_DEX + i, letter)
+                break
+        if self.r(FIRST_UNOWN_SEEN) == 0:
+            self.w(FIRST_UNOWN_SEEN, letter)
+
     def heal_party(self):
         for i, mon in enumerate(self.party()):
             self.write_party_slot(i, full_heal(mon, self.rom))
@@ -888,6 +905,12 @@ def party_records(cm: CrystalMemory) -> list:
 # ---------------------------------------------------------------------------------------------------------
 # Soul Link helpers
 # ---------------------------------------------------------------------------------------------------------
+def unown_letter(dvs: int) -> int:
+    """pret GetUnownLetter: the middle 2 bits of each DV (atk def spd spc) as one byte, / 10, + 1 -> 1-26."""
+    atk, dfn, spd, spc = dvs >> 12, (dvs >> 8) & 15, (dvs >> 4) & 15, dvs & 15
+    return (((atk & 6) << 5) | ((dfn & 6) << 3) | ((spd & 6) << 1) | ((spc & 6) >> 1)) // 10 + 1
+
+
 def is_shiny(dvs: int) -> bool:
     """Gen-2 shiny rule: Def, Speed and Special DV = 10 and Attack DV in {2,3,6,7,10,11,14,15}."""
     return (dvs >> 8) & 0x2F == 0x2A and dvs & 0xFF == 0xAA
@@ -1144,6 +1167,27 @@ class Gen2PC:
     def is_standin(rec: bytes) -> bool:
         return rec[0] == DITTO and rec[6] == 0 and rec[7] == 0 and \
             text.decode(rec[BOX_MON_SIZE:BOX_MON_SIZE + NAME_SIZE]) == STANDIN_OT
+
+    def mark_dex(self, boxes) -> list:
+        """Pokédex for the mons YellowLink shows in the boxes, like the game's own trade receive (pret
+        AddTempmonToParty: SetSeenAndCaughtMon, and for UNOWN GetUnownLetter + UpdateUnownDex, wFirstUnownSeen):
+        stand-ins and eggs left out. Call right after write_boxes (PC open hook, main game only). Returns the dex
+        numbers newly caught."""
+        cm = self.cm
+        new = set()
+        for box in boxes:
+            for rec in box:
+                if self.is_standin(rec) or (len(rec) > REC_SIZE and rec[REC_SIZE]):
+                    continue
+                species = rec[0]
+                if not 1 <= species <= NUM_SPECIES:
+                    continue
+                if not cm.r(DEX_CAUGHT + (species - 1) // 8) & (1 << ((species - 1) % 8)):
+                    new.add(species)
+                cm.set_dex(species)
+                if species == UNOWN:
+                    cm.note_unown(unown_letter((rec[21] << 8) | rec[22]))
+        return sorted(new)
 
 
 # ---------------------------------------------------------------------------------------------------------

@@ -72,3 +72,21 @@ OPEN for the coordinator / Ilias:
    are unique (PID). Fine for tiers in practice; documented.
 4. Yellow has no origin field: a mon converted from Crystal/Platinum into Yellow counts for Kanto if its OT name +
    ID equal the Yellow save's (only with identical trainer IDs).
+
+## 2026-10-26 badges-game (coordinator decisions 1 + 2 done)
+1. Manaphy excluded: `badges.SINNOH_DEX_EXCLUDED = (MANAPHY,)` -> DEX_TOTAL sinnoh 209 (SINNOH_DEX itself stays the
+   game's 210 list). how_to text: "Catch all 209 Pokémon of the Sinnoh dex (all but Manaphy) in Platinum."
+   SPEC section 9 + badges subsection, tests and verify.py updated.
+2. Pokédex marking for mons arriving through YellowLink: `codec.mark_dex(boxes)` on Gen1PC / Gen2PC / Gen4PC, called
+   by `App._pc_mark_dex` right after `write_boxes` in `on_pc_open` (the only place YellowLink puts mons into a game;
+   trades, gifts and the player's other games all arrive there; pc_codec is None in a Soul Link run). Stand-ins and
+   eggs are skipped. Yellow: owned + seen (pret AddPartyMon). Crystal: SetSeenAndCaughtMon + Unown letter in
+   wUnownDex 1:DED9 / wFirstUnownSeen 1:DEF4 (as AddTempmonToParty). Platinum: `platinum.pokedex_capture`, a port of
+   pret Pokedex_Capture (what SaveData_UpdateCatchRecords does for a received trade: gender seen, Spinda, all
+   form tables, language, caught + seen), written back in one go.
+   Verified (dev/badges/verify.py, now 3 extra sections): Yellow real App + Bill's PC: a Crystal GEODUDE arrives,
+   the game's own Pokédex screen OWN 4 -> 5, the ?SENTRET stand-in isn't marked; Crystal: mark_dex == the game's own
+   caught/seen bytes after a real catch, Unown letter + egg skip; Platinum: Pokedex layout on the ROM, and
+   pokedex_capture() on the pre-catch block == the game's own 804-byte block after a real catch; a converted Crystal
+   UNOWN in box 1 -> caught + form. e2e: crossgame.py (Yellow RATTATA -> Crystal dex 3 -> 4, no DITTO in Yellow for
+   ?SENTRET) and pt_pctest.py (converted PIDGEY -> caught + seen in Platinum, ?EGG/DITTO not) got new checks.

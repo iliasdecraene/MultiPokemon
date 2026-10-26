@@ -1149,6 +1149,151 @@ POKEDEX_CAUGHT = 0x04             # caughtPokemon: 64 bytes, bit (species - 1), 
 POKEDEX_SEEN = 0x44
 
 
+# Pokedex layout (pret include/pokedex.h; checked on the ROM by dev/badges/verify.py)
+DEX_GENDERS = 0x84                # recordedGenders[2][16 u32]: [0] shown gender, [1] the other one seen
+DEX_SPINDA = 0x104                # u32 spindaForm (personality of the first Spinda seen)
+DEX_SHELLOS, DEX_GASTRODON, DEX_BURMY, DEX_WORMADAM = 0x108, 0x109, 0x10A, 0x10B
+DEX_UNOWN = 0x10C                 # unownFormsSeen[28], 0xFF = free
+DEX_LANGUAGES = 0x128             # recordedLanguages[496], bit per language index
+DEX_ROTOM = 0x31C                 # u32, 3 bits per form seen, 7 = free
+DEX_SHAYMIN, DEX_GIRATINA = 0x320, 0x321
+POKEDEX_SIZE = 0x324
+DEX_LANGUAGE_ORDER = (1, 2, 3, 5, 4, 7)    # pokedex_language.c languageArray: JP EN FR DE IT ES
+SPECIES_UNOWN, SPECIES_SPINDA, SPECIES_DEOXYS = 201, 327, 386
+SPECIES_BURMY, SPECIES_WORMADAM, SPECIES_SHELLOS, SPECIES_GASTRODON = 412, 413, 422, 423
+SPECIES_ROTOM, SPECIES_GIRATINA = 479, 487
+GENDER_MALE, GENDER_NONE = 0, 2
+
+
+def _bit(buf, off, n):            # ReadBit_2Forms (n is 1-based)
+    n -= 1
+    return (buf[off + (n >> 3)] >> (n & 7)) & 1
+
+
+def _set_bit(buf, off, n, v):     # SetBit_2Forms
+    n -= 1
+    buf[off + (n >> 3)] = (buf[off + (n >> 3)] & ~(1 << (n & 7))) | ((v & 1) << (n & 7))
+
+
+def _two_forms(dex, species, off, form):
+    """UpdateForms_TwoForms (Shellos, Gastrodon, Shaymin, Giratina)."""
+    seen = _bit(dex, 0x44, species)
+    n = 0 if not seen else (1 if _bit(dex, off, 1) == _bit(dex, off, 2) else 2)
+    if any(_bit(dex, off, i + 1) == form for i in range(n)):
+        return
+    if n < 2:
+        _set_bit(dex, off, n + 1, form)
+        if n == 0:
+            _set_bit(dex, off, n + 2, form)
+
+
+def _three_forms(dex, species, off, form):
+    """UpdateForms_ThreeForms (Burmy, Wormadam): 2 bits per slot, 3 = free."""
+    def rd(i):
+        return (dex[off + (i >> 2)] >> ((i & 3) * 2)) & 3
+    seen = _bit(dex, 0x44, species)
+    if seen and any(rd(i) == form for i in range(3)):
+        return
+    n = 0
+    if seen:
+        while n < 3 and rd(n) != 3:
+            n += 1
+    if n < 3:
+        dex[off + (n >> 2)] = (dex[off + (n >> 2)] & ~(3 << ((n & 3) * 2))) | ((form & 3) << ((n & 3) * 2))
+
+
+def _deoxys(dex, form):
+    """UpdateForms_Deoxys: 4 slots of 4 bits in the spare top bits of caughtPokemon[15] / seenPokemon[15]."""
+    def slot(i):
+        return (POKEDEX_CAUGHT if i < 2 else POKEDEX_SEEN) + 15 * 4, 24 + (i % 2) * 4
+    vals = []
+    for i in range(4):
+        base, sh = slot(i)
+        vals.append((struct.unpack_from("<I", dex, base)[0] >> sh) & 0xF)
+    if form in vals:
+        return
+    n = next((i for i, v in enumerate(vals) if v == 0xF), 4)
+    if n < 4:
+        base, sh = slot(n)
+        w = struct.unpack_from("<I", dex, base)[0]
+        struct.pack_into("<I", dex, base, (w & ~(0xF << sh)) | ((form & 0xF) << sh))
+
+
+def _rotom(dex, species, form):
+    w = struct.unpack_from("<I", dex, DEX_ROTOM)[0]
+    n = 0
+    if _bit(dex, 0x44, species):
+        while n < 6 and (w >> (n * 3)) & 7 != 7:
+            n += 1
+    if any((w >> (i * 3)) & 7 == form for i in range(n)):
+        return
+    if n < 6:
+        struct.pack_into("<I", dex, DEX_ROTOM, (w & ~(7 << (n * 3))) | ((form & 7) << (n * 3)))
+
+
+def pokedex_capture(dex: bytearray, record: bytes, rom=None) -> bool:
+    """pret Pokedex_Capture (what receiving a traded Pokémon does via SaveData_UpdateCatchRecords) on a copy of the
+    Pokedex block: gender seen, Spinda pattern, forms (Unown, Burmy, Wormadam, Shellos, Gastrodon, Deoxys, Shaymin,
+    Giratina, Rotom), language, then caught + seen. `record` = a valid encrypted box/party record; eggs are left out
+    (UpdateCatchRecords skips them). Gender from the ROM's gender ratio + PID like Pokemon_GetGender (the record's
+    own gender bits without the ROM data). True if the species was newly caught."""
+    pk = pk4.PK4(pk4.decrypt(bytes(record)[:pk4.BOX_SIZE]))
+    species = pk.species
+    if pk.is_egg or not 1 <= species <= 493:
+        return False
+    gender = pk4.gender_of(rom.gender_ratio(species), pk.pid) if rom is not None else pk.gender_bits
+    if not _bit(dex, POKEDEX_SEEN, species):
+        if species == SPECIES_SPINDA:
+            struct.pack_into("<I", dex, DEX_SPINDA, pk.pid)
+        g = GENDER_MALE if gender == GENDER_NONE else gender
+        _set_bit(dex, DEX_GENDERS + 64, species, g)
+        _set_bit(dex, DEX_GENDERS, species, g)
+    elif _bit(dex, DEX_GENDERS, species) != gender:
+        _set_bit(dex, DEX_GENDERS + 64, species, GENDER_MALE if gender == GENDER_NONE else gender)
+    form = pk.form
+    if species == SPECIES_UNOWN:
+        forms = dex[DEX_UNOWN:DEX_UNOWN + 28]
+        if form not in forms:
+            n = next((i for i, v in enumerate(forms) if v == 0xFF), 28)
+            if n < 28:
+                dex[DEX_UNOWN + n] = form
+    elif species in (SPECIES_BURMY, SPECIES_WORMADAM):
+        _three_forms(dex, species, DEX_BURMY if species == SPECIES_BURMY else DEX_WORMADAM, form)
+    elif species in (SPECIES_SHELLOS, SPECIES_GASTRODON, SPECIES_SHAYMIN, SPECIES_GIRATINA):
+        off = {SPECIES_SHELLOS: DEX_SHELLOS, SPECIES_GASTRODON: DEX_GASTRODON, SPECIES_SHAYMIN: DEX_SHAYMIN,
+               SPECIES_GIRATINA: DEX_GIRATINA}[species]
+        _two_forms(dex, species, off, form)
+    elif species == SPECIES_DEOXYS:
+        _deoxys(dex, form)
+    elif species == SPECIES_ROTOM:
+        _rotom(dex, species, form)
+    if pk.language in DEX_LANGUAGE_ORDER:
+        dex[DEX_LANGUAGES + species] |= 1 << DEX_LANGUAGE_ORDER.index(pk.language)
+    new = not _bit(dex, POKEDEX_CAUGHT, species)
+    _set_bit(dex, POKEDEX_CAUGHT, species, 1)
+    _set_bit(dex, POKEDEX_SEEN, species, 1)
+    return new
+
+
+def mark_dex(pm: PlatinumMemory, records, rom=None) -> list:
+    """Pokedex_Capture for each record (valid encrypted records; stand-ins and eggs left out), written back in one
+    go if anything changed. Returns the species newly caught. No-op without a Pokédex page."""
+    body = pm.save_body()
+    if not body or pm.m.r32(body + PAGE_POKEDEX) != POKEDEX_MAGIC:
+        return []
+    old = pm.m.read(body + PAGE_POKEDEX, POKEDEX_SIZE)
+    dex = bytearray(old)
+    new = set()
+    for rec in records:
+        if pk4.is_standin(rec):
+            continue
+        if pokedex_capture(dex, rec, rom):
+            new.add(pk4.PK4(pk4.decrypt(bytes(rec)[:pk4.BOX_SIZE])).species)
+    if bytes(dex) != bytes(old):
+        pm.m.write(body + PAGE_POKEDEX, bytes(dex))
+    return sorted(new)
+
+
 def pokedex_caught_bits(pm: PlatinumMemory):
     """The 64-byte caught bitfield, or None when the Pokédex page isn't there (no save loaded / wrong magic)."""
     body = pm.save_body()

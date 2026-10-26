@@ -400,3 +400,16 @@ class Gen4PC:
     @staticmethod
     def is_standin(rec: bytes) -> bool:
         return pk4.is_standin(rec)
+
+    def mark_dex(self, boxes) -> list:
+        """Pokédex for the mons YellowLink shows in the boxes, like receiving a trade in the game
+        (platinum.mark_dex = pret Pokedex_Capture: seen/caught, gender, forms, language); stand-ins and eggs left
+        out. Call right after write_boxes (PC open hook, main game only). Returns the species newly caught."""
+        from .platinum import mark_dex
+        recs = []
+        for box in boxes:
+            for rec in box:
+                kind, rec = normalise(rec)
+                if kind == "mon":
+                    recs.append(rec)
+        return mark_dex(self.pm, recs, self.rom)

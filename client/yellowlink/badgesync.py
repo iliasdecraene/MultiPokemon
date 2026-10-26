@@ -38,7 +38,8 @@ def how_to(kind: str, region: str) -> str:
     if kind == "champion":
         return f"Beat the Champion and enter the Hall of Fame in {game}."
     if kind == "dex":
-        extra = {"kanto": " (all but Mew)", "johto": " (all but Mew and Celebi)", "sinnoh": " (Sinnoh dex)"}
+        extra = {"kanto": " (all but Mew)", "johto": " (all but Mew and Celebi)",
+                 "sinnoh": " of the Sinnoh dex (all but Manaphy)"}
         return f"Catch all {DEX_TOTAL.get(region, '?')} Pokémon{extra.get(region, '')} in {game}."
     if kind == "shiny":
         note = " (Gen-2 shiny DVs count)" if region == "kanto" else ""

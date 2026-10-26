@@ -40,7 +40,8 @@ def test_regional_dex_sizes():
     assert all(1 <= d <= 493 for d in badges.SINNOH_DEX)
     assert badges.SINNOH_DEX[:3] == (387, 388, 389) and badges.SINNOH_DEX[-1] == 487     # Turtwig .. Giratina
     assert 493 not in badges.SINNOH_DEX                                                  # Arceus isn't in it
-    assert badges.DEX_TOTAL == {"kanto": 150, "johto": 249, "sinnoh": 210 - len(badges.SINNOH_DEX_EXCLUDED)}
+    assert badges.SINNOH_DEX_EXCLUDED == (badges.MANAPHY,)
+    assert badges.DEX_TOTAL == {"kanto": 150, "johto": 249, "sinnoh": 209}
 
 
 @pytest.mark.skipif(not os.path.exists(os.path.join(PRET_PT, "res", "pokemon", "sinnoh_pokedex.json")),
@@ -87,7 +88,8 @@ def test_dex_caught_bits():
         bits[(d - 1) // 8] |= 1 << ((d - 1) % 8)
     assert badges.dex_caught(bits, "kanto") == 2
     assert badges.dex_caught(bits, "johto") == 2              # 1, 150 (Mew and Celebi don't count)
-    assert badges.dex_caught(bits, "sinnoh") == 2             # Turtwig, Manaphy
+    assert badges.dex_caught(bits, "sinnoh") == 1             # Turtwig (Manaphy isn't part of the goal)
+    assert badges.MANAPHY in badges.SINNOH_DEX and badges.MANAPHY not in badges.REGIONAL_DEX["sinnoh"]
     assert badges.dex_caught(bytes(19), "kanto") == 0
     full = bytes([0xFF] * 19)
     p = badges.progress_dict("kanto", False, full, ["a", "a", "b"], {"ot": "X", "tid": 1})
@@ -450,7 +452,7 @@ def test_platinum_progress():
         a = body + P.PAGE_POKEDEX + P.POKEDEX_CAUGHT + (d - 1) // 8
         bus.w8(a, bus.r8(a) | 1 << ((d - 1) % 8))
     p = P.progress(pm)
-    assert p["shinies"] == [pk4.mon_key(own)] and p["dex_caught"] == 2 and p["dex_total"] == 210
+    assert p["shinies"] == [pk4.mon_key(own)] and p["dex_caught"] == 1 and p["dex_total"] == 209
     assert p["owner"] == {"ot": "LUCAS", "tid": TID, "sid": SID} and not p["champion"]
     # a box slot + a Day Care slot; an unreadable box slot is skipped, not fatal
     boxed, day = pt_rec(pid=shiny_pid(0x2222)), pt_rec(pid=shiny_pid(0x3333), species=399)
@@ -490,3 +492,123 @@ def test_run_champion_uses_the_adapter():
     broken = types.SimpleNamespace(champion=lambda g: 1 / 0)
     view.G = broken
     assert view.run_champion() is False
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Pokédex marking for mons that arrive through YellowLink's PC view (like a received trade)
+# ---------------------------------------------------------------------------------------------------------------
+def test_yellow_mark_dex():
+    m, gm = yellow_world([g1_rec(dvs=PLAIN)])
+    pc = pcdb.Gen1PC(m, FakeYRom())
+    standin = pc.standin({"id": "s", "nick": "TOGEPI", "level": 5})
+    pid = g1_rec(species=0x24)                                       # PIDGEY (16)
+    assert pc.mark_dex([[pid, standin], [g1_rec(species=0x54)]]) == [16, 25]
+    owned = [d for d in range(1, 152) if m[game.DEX_OWNED + (d - 1) // 8] >> ((d - 1) % 8) & 1]
+    seen = [d for d in range(1, 152) if m[game.DEX_SEEN + (d - 1) // 8] >> ((d - 1) % 8) & 1]
+    assert owned == seen == [16, 25]                                  # the stand-in DITTO isn't marked
+    assert pc.mark_dex([[pid]]) == []                                 # already owned
+
+
+def test_crystal_unown_letter_matches_pk4_form():
+    for v in range(0, 0x10000, 7):
+        assert crystal.unown_letter(v) == pk4._unown_form(v) + 1
+    assert crystal.unown_letter(0x0000) == 1 and crystal.unown_letter(0xFFFF) == 26
+
+
+def test_crystal_mark_dex():
+    mem, cm = crystal_world([g2_rec(dvs=PLAIN)])
+    pc = crystal.Gen2PC(mem)
+    standin = pc.standin({"id": "s", "nick": "MUDKIP", "level": 5})
+    unown_a = g2_rec(species=crystal.UNOWN, dvs=bytes([0, 0]))
+    unown_z = g2_rec(species=crystal.UNOWN, dvs=bytes([0xFF, 0xFF]))
+    egg = g2_rec(species=175, egg=True)
+    assert pc.mark_dex([[unown_z, standin, egg], [unown_a, unown_z, g2_rec(species=16)]]) == [16, 201]
+    caught = [d for d in range(1, 252) if cm.r(crystal.DEX_CAUGHT + (d - 1) // 8) >> ((d - 1) % 8) & 1]
+    seen = [d for d in range(1, 252) if cm.r(crystal.DEX_SEEN + (d - 1) // 8) >> ((d - 1) % 8) & 1]
+    assert caught == seen == [16, 201]                                # no DITTO (stand-in), no TOGEPI (egg)
+    assert cm.read(crystal.UNOWN_DEX, 3) == bytes([26, 1, 0]) and cm.r(crystal.FIRST_UNOWN_SEEN) == 26
+
+
+class FakeGenderRom:
+    def gender_ratio(self, dex):
+        return {25: 127, 132: 255, 412: 127, 422: 127}.get(dex, 127)
+
+
+def dex_block():
+    from yellowlink.platinum import POKEDEX_SIZE, DEX_UNOWN, DEX_ROTOM
+    b = bytearray(POKEDEX_SIZE)                                       # pret Pokedex_Init
+    struct.pack_into("<I", b, 0, P.POKEDEX_MAGIC)
+    b[DEX_UNOWN:DEX_UNOWN + 28] = b"\xff" * 28
+    b[0x108:0x10C] = b"\xff" * 4
+    struct.pack_into("<I", b, DEX_ROTOM, 0xFFFFFFFF)
+    b[0x320] = b[0x321] = 0xFF
+    for off in (P.POKEDEX_CAUGHT + 60, P.POKEDEX_SEEN + 60):         # InitDeoxys: 4 nibbles of 0xF
+        struct.pack_into("<I", b, off, struct.unpack_from("<I", b, off)[0] | 0xFF000000)
+    return b
+
+
+def g4(species, pid=0x100, form=0, egg=False, language=2):
+    from test_pk4 import native
+    pk = pk4.PK4(pk4.decrypt(native(species=species, pid=pid, egg=egg)))
+    pk.form = form
+    pk.language = language
+    return pk.box_bytes()
+
+
+def bit(b, off, n):
+    return (b[off + (n - 1) // 8] >> ((n - 1) % 8)) & 1
+
+
+def test_platinum_pokedex_capture():
+    b, rom = dex_block(), FakeGenderRom()
+    # gender: first one (female: ratio 127 > pid & 0xFF) sets both gender bits; a male later sets the "other" one
+    assert P.pokedex_capture(b, g4(25, pid=0x10), rom)
+    assert bit(b, P.POKEDEX_CAUGHT, 25) and bit(b, P.POKEDEX_SEEN, 25)
+    assert bit(b, P.DEX_GENDERS, 25) == 1 and bit(b, P.DEX_GENDERS + 64, 25) == 1
+    assert not P.pokedex_capture(b, g4(25, pid=0xF0), rom)            # already caught
+    assert bit(b, P.DEX_GENDERS, 25) == 1 and bit(b, P.DEX_GENDERS + 64, 25) == 0
+    assert b[P.DEX_LANGUAGES + 25] == 0b10                            # English = language index 1
+    P.pokedex_capture(b, g4(25, pid=0x10, language=5), rom)           # German = index 3
+    assert b[P.DEX_LANGUAGES + 25] == 0b1010
+    # genderless (ratio 255 -> GENDER_NONE recorded as male)
+    P.pokedex_capture(b, g4(132), rom)
+    assert bit(b, P.DEX_GENDERS, 132) == 0 and bit(b, P.DEX_GENDERS + 64, 132) == 0
+    # Unown: forms appended in order, no duplicates
+    for f in (3, 7, 3):
+        P.pokedex_capture(b, g4(201, form=f), rom)
+    assert b[P.DEX_UNOWN:P.DEX_UNOWN + 3] == bytes([3, 7, 0xFF])
+    # Burmy (3 forms, 2 bits per slot) and Shellos (2 forms)
+    for f in (2, 0, 2, 1):
+        P.pokedex_capture(b, g4(412, form=f), rom)
+    assert b[P.DEX_BURMY] == (2 | 0 << 2 | 1 << 4 | 3 << 6)
+    P.pokedex_capture(b, g4(422, form=1), rom)
+    assert b[P.DEX_SHELLOS] & 3 == 0b11                                # first form written to both slots
+    P.pokedex_capture(b, g4(422, form=0), rom)
+    assert b[P.DEX_SHELLOS] & 3 == 0b01
+    # Deoxys forms in the spare nibbles, Rotom 3 bits per form, Spinda pattern
+    P.pokedex_capture(b, g4(386, form=2), rom)
+    P.pokedex_capture(b, g4(386, form=1), rom)
+    w = struct.unpack_from("<I", b, P.POKEDEX_CAUGHT + 60)[0]
+    assert (w >> 24) & 0xF == 2 and (w >> 28) & 0xF == 1 and bit(b, P.POKEDEX_CAUGHT, 386)
+    P.pokedex_capture(b, g4(479, form=4), rom)
+    assert struct.unpack_from("<I", b, P.DEX_ROTOM)[0] & 0x3F == (4 | 7 << 3)
+    P.pokedex_capture(b, g4(327, pid=0xCAFEBABE), rom)
+    assert struct.unpack_from("<I", b, P.DEX_SPINDA)[0] == 0xCAFEBABE
+    # eggs aren't recorded
+    before = bytes(b)
+    assert not P.pokedex_capture(b, g4(175, egg=True), rom) and bytes(b) == before
+
+
+def test_platinum_mark_dex_writes_back():
+    bus, pm = platinum_world([pt_rec(pid=0x12345678)])
+    body = pm.save_body()
+    bus.write(body + P.PAGE_POKEDEX, bytes(dex_block()))
+    standin = pk4.standin({"id": "x", "nick": "TOGEPI", "level": 5})
+    from yellowlink import platinum_pc
+    codec = platinum_pc.Gen4PC(pm, FakeGenderRom())
+    assert codec.mark_dex([[g4(25), standin], [g4(201, form=9)]]) == [25, 201]
+    blk = bus.read(body + P.PAGE_POKEDEX, P.POKEDEX_SIZE)
+    assert bit(blk, P.POKEDEX_CAUGHT, 25) and bit(blk, P.POKEDEX_CAUGHT, 201) and not bit(blk, P.POKEDEX_CAUGHT, 132)
+    assert blk[P.DEX_UNOWN] == 9
+    bus.w32(body + P.PAGE_POKEDEX, 0)                                  # no Pokédex page: nothing written
+    assert codec.mark_dex([[g4(26)]]) == []

@@ -303,6 +303,100 @@ def yellow():
     pb.stop(save=False)
 
 
+def yellow_dexmark():
+    """A Crystal-caught GEODUDE in the YellowLink PC store shows up in Yellow's PC (real App, Bill's PC hook): the
+    game's own Pokédex OWN count goes up by one; a ?STAND-IN does nothing."""
+    print("=== Yellow: Pokédex for mons arriving through YellowLink ===", flush=True)
+    import pathlib
+    from yellowlink import app as appmod
+    from yellowlink.config import Config
+    Y = load_module("sl_yellow2", os.path.join(REPO, "dev", "e2e", "soullink_mem_yellow.py"))
+    pa = sys.modules["pc_actions"]
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="ylbadges_y_"))
+    crom = crystal.RomData.from_file(os.path.join(STATES, "crystal.gbc"))
+
+    class Cfg(Config):
+        def __init__(self, d, rom):
+            d.mkdir(parents=True, exist_ok=True)
+            self.d = d
+            super().__init__(d / "config.json")
+            self.update(name="Ash", server_url="ws://127.0.0.1:1", room_key="x", rom_path=rom, seen_help=True,
+                        games={"yellow": rom}, current_game="yellow")
+        save_path = property(lambda self: self.d / "game.sav")
+        resume_path = property(lambda self: self.d / "resume.state")
+
+        @property
+        def backup_dir(self):
+            p = self.d / "bk"
+            p.mkdir(exist_ok=True)
+            return p
+
+    geo = crystal.make_mon(crom, 74, 12, [33], 0x4242, "KRIS", dvs=0x9888)
+    rec2 = crystal.record(geo.data[:32], geo.ot, geo.nick)
+    store = pcdb.empty_store()
+    store["boxes"][0] = [{"id": "geo", "origin": "crystal", "dex": 74, "level": 12, "nick": "GEODUDE", "ot": "KRIS",
+                          "otid": 0x4242, "gen1": None, "gen2": pcdb._b64(rec2), "gen4": None},
+                         {"id": "sen", "origin": "crystal", "dex": 161, "level": 5, "nick": "SENTRET", "ot": "KRIS",
+                          "otid": 0x4242, "gen1": None, "gen2": pcdb._b64(crystal.record(
+                              crystal.make_mon(crom, 161, 5, [33], 0x4242, "KRIS").data[:32], text.encode("KRIS", 11),
+                              text.encode("SENTRET", 11))), "gen4": None}]
+    store["linked"] = ["crystal"]
+    path = tmp / "pc.json"
+    os.environ["YL_DEV_LOAD_STATE"] = os.path.join(STATES, "pokecenter_pc.state")
+    a = appmod.App(Cfg(tmp / "y", os.path.join(STATES, "yellow.gb")))
+    os.environ.pop("YL_DEV_LOAD_STATE", None)
+    a.pcsync = pcdb.PCSync(path)
+    a.pcsync.working = json.loads(json.dumps(store))
+    a.pcsync.committed = json.loads(json.dumps(store))
+    for _ in range(60):
+        a.step()
+    pb, m = a.pyboy, a.pyboy.memory
+
+    def owned(d):
+        return bool(m[game.DEX_OWNED + (d - 1) // 8] >> ((d - 1) % 8) & 1)
+    ok(a.full and not a.chal and isinstance(a.pc_codec, pcdb.Gen1PC) and not owned(74) and not owned(132),
+       "Yellow App (main game, PC database on); GEODUDE and DITTO not owned")
+    snap = io.BytesIO()
+    pb.save_state(snap)
+    before = Y_own_count(pa, Y, pb)
+    snap.seek(0)
+    pb.load_state(snap)
+    pa.open_pc(pb)
+    names = [n for _, n in pa.box(pb)]
+    pa.close_pc(pb)
+    ok("GEODUDE" in names and "?SENTRET" in names and owned(74) and not owned(132)
+       and m[game.DEX_SEEN + (74 - 1) // 8] >> ((74 - 1) % 8) & 1,
+       "Bill's PC shows the Crystal GEODUDE + ?SENTRET; the open hook set GEODUDE's owned + seen bits, the stand-in "
+       "(DITTO) left out (box: %s)" % names)
+    for _ in range(60):
+        a.step()
+    after = Y_own_count(pa, Y, pb)
+    ok(before is not None and after == before + 1, "the game's own Pokédex screen: OWN %s -> %s" % (before, after))
+    a.shutdown()
+
+
+def Y_own_count(pa, Y, pb):
+    m = pb.memory
+    m[EVENT_FLAGS_Y + EVENT_GOT_POKEDEX // 8] |= 1 << (EVENT_GOT_POKEDEX % 8)
+    for _ in range(60):
+        Y.tick(pb, 1)
+    pa._press(pb, "start")
+    pa._settle(pb, 30)
+    out = None
+    for _ in range(4):
+        pa._press(pb, "a", hold=6)
+        Y.tick(pb, 120)
+        lines = pa.screen_lines(pb)
+        idx = next((i for i, ln in enumerate(lines) if "OWN" in ln), None)
+        if idx is not None:
+            out = int(lines[idx + 1].split(".")[-1].strip() or -1)
+            break
+    for _ in range(6):                                      # back out to the overworld
+        pa._press(pb, "b", hold=6)
+        Y.tick(pb, 60)
+    return out
+
+
 EVENT_FLAGS_Y = 0xD746        # wEventFlags
 EVENT_GOT_POKEDEX = 37        # pret constants/event_constants.asm (index of EVENT_GOT_POKEDEX)
 
@@ -465,9 +559,8 @@ def crystal_checks():
 # =====================================================================================================================
 def platinum_checks():
     print("=== Platinum ===", flush=True)
-    S = load_module("sl_platinum", os.path.join(REPO, "dev", "platinum", "soullink_verify.py"))
+    S, rig = platinum_rig()
     from yellowlink import ndsrom, platinum_pc
-    rig = S.Rig()
     pm, d = rig.pm, rig.d
     nr = ndsrom.NDSRom(S.ROM)
     z = nr.narc("/application/zukanlist/zkn_data/zukan_data.narc")
@@ -500,7 +593,7 @@ def platinum_checks():
 
     def manual():
         b = dexbits()
-        return sum(1 for s in range(1, 494) if n2r[s] and b[(s - 1) // 8] >> ((s - 1) % 8) & 1)
+        return sum(1 for s in range(1, 494) if n2r[s] and s != badges.MANAPHY and b[(s - 1) // 8] >> ((s - 1) % 8) & 1)
 
     for st in ("pt_town.dsst", "pt_pc.dsst", "pt_sl_route202.dsst", "pt_sl_wild.dsst", "pt_sl_caught.dsst",
                "pt_sl_party6.dsst", "pt_sl_pc6.dsst", "pt_sl_daycare.dsst"):
@@ -511,10 +604,10 @@ def platinum_checks():
             pid, size, off, _c, blk = struct.unpack("<IIIHH", d.read(sd + 0x20024 + 16 * i, 16))
             pages[pid] = (off, size, blk)
         ok(p is not None and pages[7] == (P.PAGE_POKEDEX, 812, 0) and d.r32(pm.save_body() + P.PAGE_POKEDEX)
-           == P.POKEDEX_MAGIC and not p["champion"] and p["shinies"] == [] and p["dex_total"] == 210
+           == P.POKEDEX_MAGIC and not p["champion"] and p["shinies"] == [] and p["dex_total"] == 209
            and p["dex_caught"] == manual(),
            "%s: save page 7 (POKEDEX) at body+0x1328 (812 bytes, magic BEEFCAFE); progress() champion False, no "
-           "shinies, Sinnoh %s/210 == count over the ROM's Sinnoh numbers (owner %s/%s/%s)"
+           "shinies, Sinnoh %s/209 == count over the ROM's Sinnoh numbers (Manaphy left out) (owner %s/%s/%s)"
            % (st, p and p["dex_caught"], p and p["owner"]["ot"], p and p["owner"]["tid"], p and p["owner"]["sid"]))
 
     # a real catch sets the caught bit and makes an own mon (origin Platinum, OT name + TID + SID)
@@ -616,9 +709,13 @@ def platinum_checks():
     b[(badges.MANAPHY - 1) // 8] &= ~(1 << ((badges.MANAPHY - 1) % 8))
     d.write(at, bytes(b))
     pb_ = P.progress(pm)
-    ok((pa_["dex_caught"], pa_["dex_complete"], pb_["dex_caught"], pb_["dex_complete"]) == (210, True, 209, False),
-       "dex: all 210 Sinnoh species caught -> complete; without MANAPHY 209 -> not complete "
-       "(SINNOH_DEX_EXCLUDED is empty)")
+    b[(387 - 1) // 8] &= ~(1 << ((387 - 1) % 8))
+    d.write(at, bytes(b))
+    pc_ = P.progress(pm)
+    ok((pa_["dex_caught"], pa_["dex_complete"], pb_["dex_caught"], pb_["dex_complete"], pc_["dex_caught"],
+        pc_["dex_complete"]) == (209, True, 209, True, 208, False),
+       "dex: all 210 Sinnoh species caught -> 209/209 complete; without MANAPHY still complete; without TURTWIG "
+       "too -> 208, not complete")
 
     # champion: the saved proofs, then the real Hall of Fame scene
     load("pt_sl_pc6.dsst")
@@ -655,6 +752,109 @@ def platinum_checks():
        "(%d frames in), HoF count 1 (survives power-off + CONTINUE: dev/platinum/soullink_verify.py hof)" % (first or -1))
 
 
+def crystal_dexmark():
+    """Gen2PC.mark_dex (= pret SetSeenAndCaughtMon) gives the same Pokédex bytes as the game's own catch code."""
+    print("=== Crystal: Pokédex marking == the game's own ===", flush=True)
+    C = load_module("sl_crystal2", os.path.join(REPO, "dev", "crystal", "soullink_verify.py"))
+    from common import ROM as CROM, ticks
+    rom = crystal.RomData.from_file(CROM)
+    pb = C.load("crystal_sl_wild.state")
+    cm = crystal.CrystalMemory(pb.memory, rom)
+    ticks(pb, 2)
+    sp = cm.r(crystal.TEMP_ENEMY_MON_SPECIES)
+    for base in (crystal.DEX_CAUGHT, crystal.DEX_SEEN):          # make it a species the save doesn't have yet
+        a = base + (sp - 1) // 8
+        cm.w(a, cm.r(a) & ~(1 << ((sp - 1) % 8)))
+    before = cm.read(crystal.DEX_CAUGHT, 64)
+    C.throw_ball(pb, "MASTER BALL")
+    ok(C.finish_battle(pb, cm), "caught the wild %s with the game's MASTER BALL" % rom.species_name(sp))
+    game_after = cm.read(crystal.DEX_CAUGHT, 64)
+    caught = cm.party()[-1]
+    cm.write(crystal.DEX_CAUGHT, before)
+    pc = crystal.Gen2PC(pb.memory, rom)
+    new = pc.mark_dex([[crystal.record(caught.data[:32], caught.ot, caught.nick)]])
+    ok(new == [sp] and cm.read(crystal.DEX_CAUGHT, 64) == game_after,
+       "mark_dex on the dex as it was before the catch == the game's own caught + seen bytes afterwards (64 bytes)")
+    letters = [crystal.unown_letter(v) for v in range(0x10000)]
+    ok(min(letters) == 1 and max(letters) == 26, "unown_letter (pret GetUnownLetter) gives letters 1-26")
+    cm.write(crystal.UNOWN_DEX, bytes(26))
+    cm.w(crystal.FIRST_UNOWN_SEEN, 0)
+    un = crystal.make_mon(rom, crystal.UNOWN, 10, [237], 0x4242, "KRIS", dvs=0xFFFF)
+    egg = crystal.make_mon(rom, 25, 5, [33], 0x4242, "KRIS")
+    pc.mark_dex([[crystal.record(un.data[:32], un.ot, un.nick),
+                  crystal.record(egg.data[:32], egg.ot, egg.nick, egg=True)]])
+    want = crystal.unown_letter(0xFFFF)
+    ok(cm.read(crystal.UNOWN_DEX, 2) == bytes([want, 0]) and cm.r(crystal.FIRST_UNOWN_SEEN) == want
+       and cm.r(crystal.DEX_CAUGHT + 200 // 8) >> (200 % 8) & 1,
+       "an UNOWN arriving: caught + wUnownDex gets its letter (%d) + wFirstUnownSeen (UpdateUnownDex); "
+       "an egg in the view is left out" % want)
+    ok(not (cm.r(crystal.DEX_CAUGHT + 24 // 8) >> (24 % 8)) & 1, "the PIKACHU egg in that view didn't mark PIKACHU")
+    pb.stop(False)
+
+
+def platinum_dexmark():
+    """platinum.pokedex_capture (port of pret Pokedex_Capture) == what the game's own catch writes."""
+    print("=== Platinum: Pokédex marking == the game's own ===", flush=True)
+    S, rig = platinum_rig()
+    from yellowlink import ndsrom, platinum_pc
+    pm, d = rig.pm, rig.d
+    rom = ndsrom.platinum(S.ROM)
+    rig.load("pt_sl_wild.dsst")
+    load_cur(pm, d)
+    body = pm.save_body()
+    blk = d.read(body + P.PAGE_POKEDEX, P.POKEDEX_SIZE)
+    ok(blk[P.DEX_UNOWN:P.DEX_UNOWN + 28] == b"\xff" * 28 and blk[P.DEX_SHELLOS:P.DEX_WORMADAM + 1] == b"\xff" * 4
+       and struct.unpack_from("<I", blk, P.DEX_ROTOM)[0] == 0xFFFFFFFF and blk[P.DEX_SHAYMIN:P.DEX_GIRATINA + 1]
+       == b"\xff\xff" and blk[P.POKEDEX_CAUGHT + 63] == 0xFF and blk[P.POKEDEX_SEEN + 63] == 0xFF
+       and blk[P.DEX_LANGUAGES + 387] == 1 << P.DEX_LANGUAGE_ORDER.index(2),
+       "Pokedex layout on the ROM: unown forms FF x 28 @0x10C, Shellos/Gastrodon/Burmy/Wormadam FF @0x108, Rotom "
+       "FFFFFFFF @0x31C, Shaymin/Giratina FF @0x320, Deoxys nibbles F in caught/seen[15], TURTWIG's language = "
+       "English bit @0x128 + 387")
+    info = pm.battle_info()
+    rig.throw()
+    rig.finish()
+    load_cur(pm, d)
+    after = d.read(body + P.PAGE_POKEDEX, P.POKEDEX_SIZE)
+    party = pm.party_checked()
+    rec = platinum_pc.normalise(party[-1][:136])[1]
+    mine = bytearray(blk)
+    new = P.pokedex_capture(mine, rec, rom)
+    ok(new and bytes(mine) == after and after != blk,
+       "real catch of species %d: pokedex_capture() on the block from before the catch == the game's own block "
+       "afterwards (all %d bytes: caught, seen, gender, language)" % (info["dex"], P.POKEDEX_SIZE))
+    # a converted Crystal UNOWN arriving in the PC view (Gen4PC.write_boxes + mark_dex, like the app's open hook)
+    rig.load("pt_pc.dsst")
+    load_cur(pm, d)
+    crom = crystal.RomData.from_file(os.path.join(STATES, "crystal.gbc"))
+    un = crystal.make_mon(crom, crystal.UNOWN, 10, [237], 0x4242, "KRIS", dvs=0xFFFF)
+    g4 = pk4.from_gen2(crystal.record(un.data[:32], un.ot, un.nick), rom)
+    form = pk4.PK4(pk4.decrypt(g4)).form
+    standin = pk4.standin({"id": "x", "nick": "TOGEPI", "level": 5}, rom)
+    codec = platinum_pc.Gen4PC(pm, rom)
+    boxes = [[] for _ in range(14)]
+    boxes[0] = [g4, standin]
+    codec.write_boxes(boxes)
+    new = codec.mark_dex(boxes)
+    blk2 = d.read(pm.save_body() + P.PAGE_POKEDEX, P.POKEDEX_SIZE)
+    ok(new == [201] and blk2[P.DEX_UNOWN] == form and blk2[P.DEX_UNOWN + 1] == 0xFF
+       and blk2[P.POKEDEX_CAUGHT + 200 // 8] >> (200 % 8) & 1 and not blk2[P.POKEDEX_CAUGHT + 131 // 8] >> (131 % 8) & 1,
+       "a converted Crystal UNOWN written into box 1: caught + its form (%d) in unownFormsSeen; the ?TOGEPI "
+       "stand-in (DITTO) left out" % form)
+    d.run(30)
+    ok(P.progress(pm) is not None, "the game keeps running with the updated Pokédex (progress() readable)")
+
+
+_PT = []
+
+
+def platinum_rig():
+    """(dev/platinum/soullink_verify module, its Rig) - created once: only ONE DeSmuME can exist per process."""
+    if not _PT:
+        S = load_module("sl_platinum", os.path.join(REPO, "dev", "platinum", "soullink_verify.py"))
+        _PT.extend([S, S.Rig()])
+    return _PT[0], _PT[1]
+
+
 def load_cur(pm, d):
     for _ in range(240):
         p = P.progress(pm)
@@ -666,7 +866,8 @@ def load_cur(pm, d):
 
 def main():
     names = [a for a in sys.argv[1:] if not a.startswith("-")] or ["yellow", "crystal", "platinum"]
-    for name, fn in (("yellow", yellow), ("crystal", crystal_checks), ("platinum", platinum_checks)):
+    for name, fn in (("yellow", yellow), ("yellow", yellow_dexmark), ("crystal", crystal_checks),
+                     ("crystal", crystal_dexmark), ("platinum", platinum_checks), ("platinum", platinum_dexmark)):
         if name in names:
             fn()
     bad = [w for c, w in RESULTS if not c]
