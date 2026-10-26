@@ -35,3 +35,9 @@ MEMORY.md
 
 # --- Dev harness inputs (ROM + save states, see dev/README.md) ---
 dev/states/
+
+# Nintendo DS (never commit ROMs, saves or save states)
+*.nds
+*.dsv
+*.dsst
+*.ds[0-9]
