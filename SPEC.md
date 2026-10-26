@@ -385,6 +385,30 @@ RTC: PyBoy's RTC advances with emulated frames while running (not wall time) and
 was saved when a `.rtc` file or save state is loaded. Keep a `.rtc` next to each `.sav` (`stop(rtc_file=...)`), or
 PyBoy silently reads/writes `<rom>.rtc` next to the ROM. `rtc_file=io.BytesIO()` (empty) raises "No data".
 
+### Exp Share All hooks (Yellow + Crystal) — `client/yellowlink/expshare_gb.py`
+Modern rule (Gen 6+): participants get the full single-participant exp + stat exp (no split), other party mons with
+HP > 0 that aren't eggs get `floor(full / 2)` exp (after all x1.5 boosts) and `floor(base / 2)` stat exp; fainted mons
+and eggs get 0; it replaces Yellow's EXP.ALL / Crystal's held Exp. Share while on. `install_exp_share(pyboy, enabled)`
+in `game` / `crystal`; `enabled()` is read once per award (when the enemy faints), False = the original game. It steers
+the games' own two-pass award (EXP.ALL / Exp. Share machinery), so level-ups, moves, evolution are native.
+
+| game | hook | where (pret) | what |
+|---|---|---|---|
+| Yellow | 0F:461C | FaintEnemyPokemon `push af` after IsItemInBag(EXP_ALL) | decide; force Z (no halving, no EXP.ALL pass) |
+| Yellow | 0F:4637 | FaintEnemyPokemon `ret z` after GainExperience | clear Z when someone sat out -> game's 2nd pass |
+| Yellow | 15:525F | GainExperience entry | 2nd pass: wPartyGainExpFlags D057 = ours, wBoostExpByExpAll CC5B = 0, wEnemyMonBaseStats D001 (5) halved |
+| Yellow | 15:547B | DivideExpDataByNumMonsGainingExp | emulate `ret` (no split) |
+| Yellow | 15:52EF | GainExperience `inc hl` after the trainer BoostExp | 2nd pass: hQuotient+2/+3 (FF97/8) halved |
+| Yellow | 15:545F | GainExperience.done | end of pass |
+| Crystal | 0F:4E65 | UpdateBattleStateAndExperienceAfterEnemyFaint `jr z` after IsAnyMonHoldingExpShare | decide; force Z |
+| Crystal | 0F:4E88 | same, `ret z` after the 2nd IsAnyMonHoldingExpShare | clear Z, D = our mask (-> wBattleParticipantsNotFainted C664), wBackupEnemyMonBaseStats C720 (5) halved |
+| Crystal | 0F:70D4 | GiveExperiencePoints.EvenlyDivideExpAmongParticipants | emulate `ret` |
+| Crystal | 0F:6EF8 | GiveExperiencePoints `ldh a, [hQuotient+3]` after the Lucky Egg BoostExp | 2nd pass (C71F = 1): FFB5/6 halved |
+| Crystal | 0F:70D1 | GiveExperiencePoints.done | end of pass |
+
+Passive in link battles (Yellow wLinkState D12A = 4, Crystal wLinkMode C2DC != 0) and the Battle Tower. The opcode
+byte at every hook is checked before installing. Verified by `dev/e2e/expshare_gb.py` (real battles, ALL PASS).
+
 ## 7. Challenges (Soul Link) — added in 0.6.0
 
 A challenge is a co-op run between two players on **fresh, separate saves** of the same game (Yellow or Crystal).

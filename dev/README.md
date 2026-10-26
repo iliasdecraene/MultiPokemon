@@ -42,3 +42,7 @@ Expected output: see the `print` lines; screenshots go to a temp dir printed at 
 - `soullink_yellow.py` / `soullink_crystal.py` — Soul Link referee in the real games with two clients (catches, links, faints, PC rule, blackout).
 - `soullink_mem_yellow.py` and `../crystal/soullink_verify.py` — verify the game-memory helpers the referee uses.
 - `pctrade_e2e.py` — PC trades + gifts between a Yellow and a Crystal player (real PC menus, server swap, no re-import).
+- `expshare_gb.py` — Exp Share All on the real Yellow and Crystal ROMs: wild / two participants / trainer x1.5 / level-up,
+  move learning + forget prompt, evolution / EXP.ALL + held Exp. Share, hooks off == no hooks (whole WRAM).
+- `expshare_forced.py [--off|--none] <script>` — runs another e2e script with Exp Share All forced on (or off / not
+  installed) and checks link battles never get the rule.

@@ -204,3 +204,16 @@
 
 ## Exp Share All (2026-10-26 afternoon) - branch exp-share-all, checkout /home/claude/yl-exp
 - coordinator: modern rule (Gen 6+): participants 100% each (no split), non-participants 50%, fainted/eggs 0. Interface: each adapter module gets install_exp_share(emu, enabled) -> handle (handle.remove()); enabled() is checked at every exp award. Coordinator owns app.py/panels.py/ui.py/config.py (Settings panel + wiring).
+- 2026-10-26 gb-exp agent: Yellow + Crystal DONE (not committed). game.install_exp_share / crystal.install_exp_share ->
+  handle (.remove(), .awards); logic + hook docs in client/yellowlink/expshare_gb.py (SPEC.md section 6 table). Steers
+  the games' own EXP.ALL / Exp. Share second pass with PyBoy hooks (Yellow 0F:461C 0F:4637 15:525F 15:547B 15:52EF
+  15:545F, Crystal 0F:4E65 0F:4E88 0F:70D4 0F:6EF8 0F:70D1; opcode bytes checked before install). 50 % = floor(full/2)
+  after all x1.5 boosts, stat exp floor(base/2). enabled() read once per award (at the enemy faint). Passive in link
+  battles / Battle Tower. Real ROM: dev/e2e/expshare_gb.py ALL PASS (57 checks both games: solo/half/fainted/egg/
+  traded/Lucky Egg, 2 participants no split, trainer x1.5, level-up + stats + HP + "grew to level", learn move, forget
+  prompt, evolution, EXP.ALL/Exp. Share no stacking on + original off, hooks-off WRAM == no hooks). Unit:
+  client/tests/test_expshare_gb.py (14; suite 354 pass). Forced-on runs (dev/e2e/expshare_forced.py): pvp_e2e OK
+  (hook fired twice in the link battle, stayed passive), e2e.py OK, soullink_yellow ALL PASS. soullink_crystal.py is
+  FLAKY on this loaded box with or without the feature (failed also with --off and --none: "Cyndaquil fainted in a
+  real battle" / an assert) - not caused by Exp Share. Note: app default exp_share_all=True means plain e2e runs of
+  the app now have the rule on.
