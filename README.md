@@ -46,7 +46,7 @@ Everyone plays their **own** game with their own save and story. On top of that:
 | **Tab** | Multiplayer panel (or click **Multiplayer** in the sidebar): click a trainer, then Battle, Trade or Practice |
 | F4 | Leave a live battle |
 | **T** | Chat |
-| Space (hold) | Fast-forward |
+| Space | Fast-forward on/off |
 | M | Mute |
 | − / + | Volume (or drag the slider in the sidebar) |
 | **V** | Wide view on/off |

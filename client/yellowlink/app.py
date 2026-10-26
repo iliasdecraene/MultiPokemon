@@ -1123,8 +1123,6 @@ class App(ChallengeMixin, TradeMixin):
             elif ev.type == pygame.KEYUP:
                 if ev.key in KEYMAP:
                     self.press(KEYMAP[ev.key], False)
-                if ev.key == pygame.K_SPACE:
-                    self.fast = False
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if self.volume_rect and self.volume_rect.collidepoint(ev.pos):
                     self.dragging_volume = True
@@ -1321,8 +1319,8 @@ class App(ChallengeMixin, TradeMixin):
         elif k == pygame.K_F1:
             self.release_all()
             self.mode = "help"
-        elif k == pygame.K_SPACE:
-            self.fast = True
+        elif k == pygame.K_SPACE:                  # toggle (press once = fast, again = normal)
+            self.fast = not self.fast
         elif k in (pygame.K_MINUS, pygame.K_KP_MINUS, pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
             step = -10 if k in (pygame.K_MINUS, pygame.K_KP_MINUS) else 10
             self.set_volume(int(round(self.audio.volume * 100)) + step)
@@ -1595,7 +1593,7 @@ class App(ChallengeMixin, TradeMixin):
         ui.draw_toasts(sub, self.fonts, self.toasts, self.game_w,
                        bottom=self.mode in ("panel", "chal_popup", "prompt", "battle_confirm"))
         if self.fast:
-            ui.text(sub, self.fonts.body, ">> fast", (self.game_w - 10, 10), ui.ACCENT, anchor="topright")
+            ui.text(sub, self.fonts.body, ">> fast (Space)", (self.game_w - 10, 10), ui.ACCENT, anchor="topright")
         ui.draw_sidebar(self.screen, self.fonts, self, self.game_w, self.screen.get_height())
         pygame.display.flip()
 

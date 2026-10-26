@@ -322,7 +322,7 @@ def draw_help(surf, f, game_w, game_h):
         "",
         ("YellowLink", ACCENT),
         "  Tab: link menu - battle (B), trade (R), practice (P)",
-        "  T: chat     Space (hold): fast-forward     M: mute",
+        "  T: chat     Space: fast-forward on/off     M: mute",
         "  V: wide view     F5/F6: window size     -/+: volume",
         "  F3: report a problem     F2: settings",
         "",
