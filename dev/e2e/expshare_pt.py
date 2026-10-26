@@ -13,7 +13,10 @@ Fixture (built at the start from dev/states/pt_pc.dsst, nothing is written to de
 Cases: A wild, lead alone vs 2 benched + fainted + egg; B wild, two participants (switch once); C trainer
 (Youngster Tristan, Route 202); D a benched mon levels up (move-learn prompt) and one evolves after battle;
 E a benched mon holds Exp. Share.
-Run: python dev/e2e/expshare_pt.py      (ends with ALL PASS; ~3-4 min; screenshots in a temp folder)
+Run: python dev/e2e/expshare_pt.py      (ends with ALL PASS; ~4 min; screenshots of the level-up / move-learn
+steps in the temp folder printed at the end, or $YL_SHOTS)
+Other Platinum tests with the hooks installed: python dev/e2e/with_expshare.py dev/platinum/verify.py (or
+dev/e2e/platinum_boot.py).
 """
 import io
 import os
@@ -35,11 +38,11 @@ from yellowlink.platinum import PlatinumMemory, PAGE_PARTY  # noqa: E402
 
 ROM = os.path.join(STATES, "platinum.nds")
 FAILS = []
-SHOTS = os.environ.get("YL_SHOTS")
+SHOTS = os.environ.get("YL_SHOTS") or os.path.join(TMP, "shots")
 
 
 def check(label, ok, detail=""):
-    print(("PASS " if ok else "FAIL ") + label + (f"  [{detail}]" if detail else ""), flush=True)
+    print(("PASS " if ok else "FAIL ") + label + (f"  [{detail}]" if detail and not ok else ""), flush=True)
     if not ok:
         FAILS.append(label)
 
@@ -54,7 +57,7 @@ VARS_FLAGS = 0xDAC
 data = PlatinumData(ROM)
 _rom = NDSRom(ROM)
 _pers = _rom.narc("poketool/personal/pl_personal.narc")
-BASE_EXP = {i: lz77_decompress(_pers[i])[9] for i in (TURTWIG, STARLY, BIDOOF, 16, 396, 399, 163, 25)}
+BASE_EXP = {}                    # SpeciesData.baseExpReward = personal byte 9
 
 
 def base_exp(dex):
@@ -71,9 +74,10 @@ handle = X.install_exp_share(core, lambda: ON["v"])
 
 
 def shot(name):
-    if not SHOTS:
+    try:
+        from PIL import Image
+    except ImportError:
         return
-    from PIL import Image
     os.makedirs(SHOTS, exist_ok=True)
     Image.frombytes("RGB", (256, 384), core.screen_rgb()).save(os.path.join(SHOTS, name + ".png"))
 
@@ -217,13 +221,6 @@ def make_mon(template, species, level, *, exp=None, moves=None, item=0, hp=None,
 
 
 # --- battles -------------------------------------------------------------------------------------------------
-def task_seq():
-    """The running GetExp task's (seqNum, party slot) or None."""
-    if not pm.in_battle():
-        return None
-    return None
-
-
 def wild_encounter(max_steps=80):
     """Step up/down in the grass until a wild battle starts."""
     d = "up"
@@ -262,15 +259,18 @@ def wait_menu(maxf=2400):
     return False
 
 
-def run_battle(plan=(), max_iter=400, label="b"):
-    """Mash A through a battle (fight with move 1); `plan` = callables run first, once the menu is up."""
-    i = 0
+def run_battle(max_iter=400, label="b"):
+    """Mash A through a battle (FIGHT, move 1; A also answers the move-learn prompts: forget the first move),
+    then through the evolution scene etc. until the field is back."""
+    i, seen = 0, set()
     for i in range(max_iter):
         if not pm.in_battle():
             break
         press("a", 24)
-        if i == 30:
-            shot(label + "_mid")
+        step = handle.trace[-1] if handle.trace else None
+        if step and step[1] in (7, 11, 17, 21) and step not in seen:      # level-up text/stats, move prompts
+            seen.add(step)
+            shot(f"{label}_slot{step[0]}_seq{step[1]}")
     shot(label + "_end")
     # after battle: evolution scene etc. -> mash A until the field is back
     for _ in range(200):
@@ -322,10 +322,6 @@ def party_E(t):
     return [lead(t), make_mon(t, TURTWIG, 10, item=ITEM_EXP_SHARE, pid=0x12345678),
             make_mon(t, STARLY, 10, item=ITEM_LUCKY_EGG, moves=[TACKLE, 45, 98, 0], pid=0x2345678A),
             make_mon(t, BIDOOF, 8, moves=[TACKLE, 0, 0, 0], pid=0x3456789B)]
-
-
-def item_of(p):
-    return p.item
 
 
 # --- expected numbers ------------------------------------------------------------------------------------------
@@ -500,5 +496,6 @@ if __name__ == "__main__":
     check("after handle.remove(): Platinum's own numbers again (bench 0) and no hook records",
           deltas(r)[1:3] == [0, 0] and deltas(r)[0] > 0 and not r["awards"], str(deltas(r)))
 
+    print("screenshots in", SHOTS)
     print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}", flush=True)
     os._exit(0 if not FAILS else 1)

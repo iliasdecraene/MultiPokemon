@@ -156,6 +156,7 @@ class ExpShareAll:
         self.enabled = enabled
         self.regs = _Regs(core)
         self.pending = None          # (ctx, mask index, participant mask M, E) for the award in progress
+        self._orig = None            # the game's own (gainedExp, sharedExp) of that award
         self.awards = []             # dicts, newest last (max 32)
         self.given = []              # (slot, base exp set) per task step, for tests
         self.trace = None            # tests: set to [] to record the exp task's (search slot, seqNum) steps
@@ -181,7 +182,22 @@ class ExpShareAll:
             except Exception:  # noqa: BLE001
                 log.exception("removing exp hook %08X", addr)
         self._installed = []
-        self.pending = None
+        pend, self.pending = self.pending, None
+        if pend is not None:
+            self._undo(pend)
+
+    def _undo(self, pend):
+        """Removed in the middle of an award: give the rest of it back to the game's own rule (mask = the real
+        participants still to do, the game's own gainedExp / sharedExp)."""
+        ctx, idx, parts, _exp = pend
+        try:
+            mask_addr = ctx + CTX_EXP_MASK + 4 * idx
+            self.core.w32(mask_addr, self.core.r32(mask_addr) & parts)
+            if self._orig is not None:
+                self.core.w32(ctx + CTX_GAINED_EXP, self._orig[0])
+                self.core.w32(ctx + CTX_SHARED_EXP, self._orig[1])
+        except Exception:  # noqa: BLE001
+            log.exception("exp share: undo failed")
 
     def _code_ok(self, addr) -> bool:
         return self.core.read(addr, len(_CODE[addr])) == _CODE[addr]
@@ -221,6 +237,7 @@ class ExpShareAll:
             return
         m.w32(mask_addr, parts | elig)
         self.pending = (ctx, idx, parts, exp)
+        self._orig = None
 
     # 2. BattleScript_GetExpTask, every frame while it runs
     def _on_task(self):
@@ -246,6 +263,8 @@ class ExpShareAll:
         if slot is None:                 # the task is finishing (no slot left): award done
             self.pending = None
             return
+        if self._orig is None:           # the game's own values (computed after HOOK_CALC), kept for _undo
+            self._orig = (m.r32(ctx + CTX_GAINED_EXP), m.r32(ctx + CTX_SHARED_EXP))
         give = full_share(exp) if parts >> slot & 1 else half_share(exp)
         m.w32(ctx + CTX_GAINED_EXP, give)
         m.w32(ctx + CTX_SHARED_EXP, 0)

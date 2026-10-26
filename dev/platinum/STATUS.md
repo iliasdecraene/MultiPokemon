@@ -217,3 +217,15 @@
   FLAKY on this loaded box with or without the feature (failed also with --off and --none: "Cyndaquil fainted in a
   real battle" / an assert) - not caused by Exp Share. Note: app default exp_share_all=True means plain e2e runs of
   the app now have the rule on.
+- 2026-10-26 exp agent (Platinum): Exp. Share All done in client/yellowlink/platinum_exp.py (new module, no other
+  client file touched): install_exp_share(core, enabled) -> handle (.remove()). Two exec hooks in battle overlay 16
+  (HOOK_CALC 0x02241E30 inside BtlCmd_CalcExpGain: r0 = E; HOOK_TASK 0x02248E74 = BattleScript_GetExpTask entry),
+  guarded by 12-byte code signatures. At each award (enabled() asked once) the participant mask is widened to every
+  alive non-egg party slot, and per slot the task's gainedExp is set to E (participant) / max(E//2, 1) (others),
+  sharedExp 0; the game does multipliers, messages, level-up, moves, EVs, evolution. Addresses/how found:
+  MEMORY_MAP.md "Exp. Share All". Tests: client/tests/test_platinum_exp.py (16, no ROM: fake DS running a model of
+  the game's award code), dev/e2e/expshare_pt.py (real ROM, ON vs OFF from the same state: wild lead-alone, switch,
+  trainer Youngster Tristan, level-up + move-learn prompt + evolution on the bench, Exp. Share / Lucky Egg holders,
+  remove(); ALL PASS, ~4 min), dev/e2e/with_expshare.py runs verify.py (83/83) and platinum_boot.py (ALL PASS) with
+  the hooks installed. Fixture is built at run time from pt_pc (Route 202, VAR_ROUTE_202_STATE=1, battle style SET,
+  party written to save RAM) - no new files in dev/states.

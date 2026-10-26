@@ -150,3 +150,26 @@ afterwards). There is no good main-ARM9 "close" function → poll `pc_open()` ea
 | `sMapHeaders[id].mapMatrixID` (+2 u16) | 0 = outdoor Sinnoh grid (84 maps); interiors have own matrices, some shared by several maps (e.g. 116 for Pokémon Centers) | read from RAM table |
 | mmodel.narc (/data/mmodel/mmodel.narc) | member 90 pl_boy01c, 91 pl_girl01c (32 frames), 92 pl_cyclehero, 93 pl_cycheroine (24 frames); BTX0, 4bpp 32x32, colour 0 transparent | decoded frames match the player sprite pixel-for-pixel indoors; time-of-day lighting = per-channel gain (Twinleaf at night ≈ 0.53/0.52/0.88) |
 | shadow | ellipse ~13x6 px ending at the anchor, ~10 % darker | screen diff with/without an NPC |
+
+## Exp. Share All (client/yellowlink/platinum_exp.py) — verified 2026-10-26
+
+Battle overlay 16 is loaded at 0x0223B140 (pret: `Overlay battle`). Found in a RAM dump taken in pt_battle: the battle
+script command table `sBattleCommands` (battle_script.c) = the only run of 223 odd pointers into the overlay, at
+**0x0226E72C**; entry 39 = BtlCmd_CalcExpGain **0x02241D35**, 40 = BtlCmd_StartGetExpTask 0x02241EB1, whose literal
+pool gives BattleScript_GetExpTask **0x02248E75** (the SysTask fn). Disassembled (capstone, Thumb) and matched with pret.
+
+| what | value | verified |
+|---|---|---|
+| HOOK_CALC | 0x02241E30 in CalcExpGain: `cmp r1,#0` right after `exp = baseExp*level/7` → r0 = E (u16), r5 = BattleContext, r7 = BattleSystem, [sp] = Exp. Share holders, [sp+4] = participants | exec hook: E = 16 (Bidoof Lv2, pt_battle), 24 (Bidoof Lv3), 40 (Starly Lv5, Youngster Tristan) = floor(personal baseExp * level / 7) from the ROM |
+| HOOK_TASK | 0x02248E74 = BattleScript_GetExpTask entry, r1 = BattleScriptTaskData | fires once per frame while the exp task runs; never in the field / PC / town states (counted over 600 frames each) |
+| code signatures | 12 bytes at each hook (`002920d044080199201ca0f6`, `f8b5b6b00c1c05902068f5f7`) | differ outside battles (other overlays at those addresses) |
+| BattleContext | +0x74 faintedMon, +0x9C gainedExp, +0xA0 sharedExp, +0xA4 sideGetExpMask[2] (index (faintedMon>>1)&1), +0x178 taskData, +0x2D40 battleMons[4] (0xC0 each; species +0, level +0x34) | offsets from the compiled code; masks/E/species read back as expected |
+| BattleSystem | +0x2C battleType (bit 0 trainer), +0x30 battleCtx, +0x68 parties[4] (Party: capacity, count, 236-byte Pokémon) | party decrypts to the battle's mons |
+| BattleScriptTaskData | +0x04 battleCtx, +0x28 seqNum (0 START … 37 CHECK_DONE), +0x48 tmpData[GET_EXP_PARTY_SLOT] | level-up (6, 7, 9-14), move learn (15-30, 36) states seen for a benched mon |
+
+Behaviour with the rule ON, measured (dev/e2e/expshare_pt.py): wild Bidoof Lv3 (E 24) lead alone → lead 24, benched
+12 / 12, fainted 0, egg 0 (OFF: 24 / 0 / 0); switch once → 24 / 24 / bench 12 (OFF 12 / 12 / 0); Youngster Tristan's
+Starly Lv5 (E 40) → lead 60, bench 30 / 30 (OFF 60 / 0 / 0); Exp. Share holder on the bench → 12 (OFF: lead 12,
+holder 12); Lucky Egg on the bench → 18. EVs: every mon that gets exp gets the full yield.
+After a battle the field keeps working on party records for ~2 s: a record reads alternately valid / half
+re-encrypted (flags 0) on every other frame — read the party only when two *valid* reads agree.
