@@ -206,18 +206,27 @@ def yellow():
     base = io.BytesIO()
     pb, g = Y.emu("soullink_route1_grass.state")
     pb.save_state(base)
-    stable = 0
+    stable = waited = 0
     for trial in range(6):
         base.seek(0)
         pb.load_state(base)
         Y.tick(pb, 3 + 11 * trial)
+        view = challenge_view.ChallengeView(fake_app(game=g, G=game, gen2=False, ds=False, pyboy=pb, rom=RD))
+        view.battle()                                       # overworld: the view sees no battle
         if not Y.step_until_battle(pb, ("up", "down")):
             continue
         first = (game.wild_is_shiny(g), g.read(game.ENEMY_MON_DVS, 2))
+        v0 = view.battle()                                  # frame 0: the referee's view waits
+        pb.tick()
+        v1 = view.battle()
         samples = Y.advance_record(pb, Y.in_battle_menu, lambda: (game.wild_is_shiny(g), g.read(game.ENEMY_MON_DVS, 2)))
         stable += first[0] is not None and all(s == first for s in samples)
+        waited += v0 is None and v1 is not None and v1["shiny"] == badges.gen1_is_shiny(samples[-1][1]) \
+            and v1 == g.battle_info()
     ok(stable == 6, "6 real Route 1 encounters: wild_is_shiny() is a bool from wIsInBattle's first frame and the "
        "DVs it reads never change up to the battle menu (%d/6)" % stable)
+    ok(waited == 6, "... the referee's view (ChallengeView.battle) gives None on frame 0 and from frame 1 the "
+       "battle_info with 'shiny' = the Gen-2 rule on the final DVs (%d/6)" % waited)
     pb.stop(save=False)
 
     pb, g = emu("soullink_wild_battle.state")              # frame 0 of a real wild battle (Route 1)
@@ -225,7 +234,9 @@ def yellow():
     ok(game.wild_is_shiny(g) is badges.gen1_is_shiny(g.read(game.ENEMY_MON_DVS, 2)),
        "real wild battle: wild_is_shiny() = Gen-2 rule on wEnemyMonDVs %s" % g.read(game.ENEMY_MON_DVS, 2).hex())
     g.write(game.ENEMY_MON_DVS, SHINY_DVS)
-    ok(game.wild_is_shiny(g) is True, "shiny DVs EA AA written into wEnemyMonDVs: wild_is_shiny() True")
+    ok(game.wild_is_shiny(g) is True and g.battle_info()["shiny"] is True,
+       "shiny DVs EA AA written into wEnemyMonDVs: wild_is_shiny() True, battle_info()['shiny'] True (Soul Link "
+       "shiny clause)")
     samples = Y.advance_record(pb, Y.in_battle_menu, lambda: game.wild_is_shiny(g))
     ok(samples and all(s is True for s in samples), "... and True on every frame up to the battle menu")
     # the wild mon uses Transform (all its moves = TRANSFORM): wEnemyMonDVs become the player's, the original
@@ -251,13 +262,19 @@ def yellow():
     caught = party[-1]
     p = game.progress(g)
     rec = caught.data[:33] + caught.ot + caught.nick
-    key = game.mon_key(caught.data)
+    key = badges.gen1_badge_key(caught.data, RD.dex_no(caught.species))
     ok(len(party) == n0 + 1 and caught.data[27:29] == SHINY_DVS and caught.ot_id == p["owner"]["tid"]
        and caught.ot_str() == p["owner"]["ot"],
        "the caught mon (%s) has the original shiny DVs EA AA and the player's OT name + ID"
        % RD.species_name(caught.species))
-    ok(p["shinies"] == [key] and key == pcdb.Gen1PC.key(rec) and before["shinies"] == [],
-       "progress(): the catch is an own shiny, key %s == the PC database key" % key)
+    entry = pcdb.Gen1PC(m, RD).entry_from_record(rec)
+    c2 = crystal.gen1_to_gen2(rec, RD.dex_no(caught.species))
+    back = pcdb.gen2_to_gen1(c2, RD)
+    ok(p["shinies"] == [key] and badges.entry_shiny_key(entry, "kanto", p["owner"]) == key and before["shinies"] == []
+       and badges.entry_shiny_key(dict(entry, gen1=pcdb._b64(back)), "kanto", p["owner"]) == key,
+       "progress(): the catch is an own shiny, badge key %s == the key of its PC-store entry, also after a "
+       "Yellow -> Crystal -> Yellow round trip (Time Capsule catch-rate byte %02X -> item %02X -> %02X)"
+       % (key, rec[7], c2[1], back[7]))
     ok(p["dex_caught"] == before["dex_caught"] + (0 if before["dex_caught"] == p["dex_caught"] else 1) and
        g.m[game.DEX_OWNED + (RD.dex_no(caught.species) - 1) // 8] >> ((RD.dex_no(caught.species) - 1) % 8) & 1,
        "the game set the caught species' wPokedexOwned bit (Kanto %d -> %d)" % (before["dex_caught"], p["dex_caught"]))
@@ -288,9 +305,14 @@ def yellow():
     boxes[other].append(bytes(rec3))
     pc.write_boxes(boxes)
     p = game.progress(g)
-    ok(p["shinies"] == [key, game.mon_key(bytes(rec3))],
+    key3 = badges.gen1_badge_key(bytes(rec3), RD.dex_no(rec3[0]))
+    ok(p["shinies"] == [key, key3],
        "box %d (SRAM bank %d, written with checksums): own shiny found, the other OT's skipped" % (other + 1,
                                                                                                   2 if other < 6 else 3))
+    boxes = pc.read_boxes()
+    boxes[(other + 1) % 12].append(bytes(rec3))             # an identical twin of that one in yet another box
+    pc.write_boxes(boxes)
+    ok(game.progress(g)["shinies"] == [key, key3, key3 + "-2"], "an identical twin counts as a second mon (key-2)")
     pb.stop(save=False)
 
     pb, g = emu("soullink_daycare.state")
@@ -299,7 +321,8 @@ def yellow():
        "Day Care state: one mon in the Day Care, not shiny")
     g.write(game.DAYCARE_MON + 27, SHINY_DVS)
     rec = g.daycare_records()[0]
-    ok(game.progress(g)["shinies"] == [game.mon_key(rec)], "its DVs made shiny: counted from the Day Care")
+    ok(game.progress(g)["shinies"] == [badges.gen1_badge_key(rec, RD.dex_no(rec[0]))],
+       "its DVs made shiny: counted from the Day Care")
     pb.stop(save=False)
 
 
@@ -500,14 +523,15 @@ def crystal_checks():
     party = cm.party_checked()
     caught = party[-1]
     p = crystal.progress(cm)
-    key = crystal.mon_key(caught.data)
+    key = badges.gen2_badge_key(caught.data)
     ok(len(party) == n0 + 1 and caught.data[21:23] == SHINY_DVS and caught.ot_id == cm.player_id()
        and caught.ot_str() == cm.player_name() and (caught.data[29] or caught.data[30]),
        "the caught %s: DVs EA AA, the player's OT name + ID, caught data %02X%02X written by the game"
        % (rom.species_name(caught.species), caught.data[29], caught.data[30]))
     rec = crystal.record(caught.data[:32], caught.ot, caught.nick)
-    ok(p["shinies"] == [key] and key == crystal.Gen2PC.key(rec) and before["shinies"] == [],
-       "progress(): own shiny, key %s == the PC database key" % key)
+    entry = crystal.Gen2PC(pb.memory, rom).entry_from_record(rec)
+    ok(p["shinies"] == [key] and badges.entry_shiny_key(entry, "johto", p["owner"]) == key and before["shinies"] == [],
+       "progress(): own shiny, badge key %s == the key of its PC-store entry" % key)
     snap = io.BytesIO()
     pb.save_state(snap)
     i = len(party) - 1
@@ -533,7 +557,7 @@ def crystal_checks():
     r2[21] = 0xAA                                           # another own shiny (Atk 10)
     boxes[other].append(bytes(r2))
     pc.write_boxes(boxes)
-    ok(crystal.progress(cm)["shinies"] == [key, crystal.mon_key(bytes(r2))],
+    ok(crystal.progress(cm)["shinies"] == [key, badges.gen2_badge_key(bytes(r2))],
        "an own shiny written into SRAM box %d: found too" % (other + 1))
     pb.stop(False)
 
@@ -549,7 +573,7 @@ def crystal_checks():
     cm.write(struct_at + 29, bytes([0x82, 0x02]))           # caught data like the real Route 29 catch above
     rec = cm.daycare_records()[0]
     own = rec[6:8] == cm.read(crystal.PLAYER_ID, 2)
-    ok(own and crystal.progress(cm)["shinies"] == [crystal.mon_key(rec)],
+    ok(own and crystal.progress(cm)["shinies"] == [badges.gen2_badge_key(rec)],
        "with caught data 8202 (wBreedMon%d struct +29): counted from the Day Care" % (2 if lady else 1))
     pb.stop(False)
 
