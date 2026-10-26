@@ -8,7 +8,7 @@
 
 import os
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs, collect_submodules
 
 # SPECPATH is the directory containing this spec file (= client/).
 CLIENT_DIR = os.path.abspath(SPECPATH)
@@ -61,6 +61,14 @@ _add("sdl2dll", required=False)
 _add("pygame")
 _add("websockets")
 _add("numpy")
+# py-desmume (Pokémon Platinum): the Python wrapper + libdesmume.dll and the SDL2.dll it ships with. Its GTK
+# frontend (desmume.frontend, *.glade) is never used. At runtime nds_core.py loads
+# <bundle>/desmume/libdesmume.dll explicitly; libdesmume then shares pygame's already loaded SDL2.dll.
+_ds_libs = collect_dynamic_libs("desmume")
+if not any(os.path.basename(src).lower().startswith("libdesmume") for src, _ in _ds_libs):
+    raise SystemExit("[yellowlink.spec] py-desmume's libdesmume library not found (pip install py-desmume)")
+binaries.extend(_ds_libs)
+hiddenimports += ["desmume", "desmume.emulator", "desmume.controls", "desmume.i18n_util"]
 
 # Our own package (also discovered via analysis; this makes it explicit).
 hiddenimports += collect_submodules("yellowlink")
@@ -92,9 +100,11 @@ a = Analysis(
     # them even if they happen to be installed on the build machine.
     # yaml/cryptography get dragged in by optional imports (numpy.__config__, ...).
     # NOTE: do not exclude tkinter; yellowlink/setup_dialog.py uses it.
+    # PIL: py-desmume imports it only for screenshot(), which we don't use (nds_core installs a stand-in).
     excludes=[
         "matplotlib", "IPython", "pytest", "cv2", "PIL",
         "yaml", "cryptography",
+        "desmume.frontend", "gi", "cairo",
     ],
     noarchive=False,
     optimize=0,

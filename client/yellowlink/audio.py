@@ -57,7 +57,8 @@ class AudioOut:
                 pygame.mixer.init(SAMPLE_RATE, -16, CHANNELS, 1024)
                 self.channel = pygame.mixer.Channel(0)
                 self.ok = True
-            except pygame.error:
+            except Exception as e2:  # noqa: BLE001 - no sound card at all: play silently, never crash
+                log.warning("no sound (%s)", e2)
                 self.channel = None
 
     # --- game side ---------------------------------------------------------------------------------------

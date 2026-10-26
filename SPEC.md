@@ -276,9 +276,15 @@ of it, refreshed whenever the player opens Bill's PC and harvested when they lea
 ```
 PCStore = {"version": 1, "rev": int, "boxes": [[Entry, ...] x 14], "linked": ["yellow", ...]}
 Entry   = {"id": "<uuid4 hex>", "origin": "yellow"|"crystal", "dex": int, "level": int, "nick": str, "ot": str,
-           "otid": int, "gen1": "<b64 33+11+11 bytes>" | null, "gen2": "<b64 ...>" | null}
+           "otid": int, "gen1": "<b64 33+11+11 bytes>" | null, "gen2": "<b64 ...>" | null,
+           "gen4": "<b64 136-byte encrypted Platinum box PK4>" | null}       # gen4 + origin "platinum": 0.7.0
 ```
 - 14 boxes of up to 20 (Crystal has 14; Yellow shows boxes 1-12 — 13/14 are only visible in Crystal).
+- **Current representation** (0.7.0): the one named by `origin` (yellow → gen1, crystal → gen2, platinum → gen4;
+  an entry harvested from a game is re-created with that game as origin), else the first present of gen1, gen2,
+  gen4. Other games convert from it (`pk4.gen1_record` / `gen2_record` / `record_for`, else a stand-in). A server-side
+  trade evolution changes the current representation and nulls the others. Platinum shows store box i in its box i,
+  slots 1-20; Pokémon put anywhere else in Platinum's 18x30 boxes are compacted into free store slots on close.
 - `gen1`/`gen2` hold the exact game bytes (box_struct + OT name + nickname) of the last version seen in that
   generation, so a Pokémon that never leaves its game round-trips byte-identically. Readable fields (dex, level, names)
   are for UI/conversion only.

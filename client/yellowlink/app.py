@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pygame
 
-from . import __version__, game, library, panels, pcdb, pvp, sprites, ui, updater, worldview
+from . import __version__, game, library, nds_core, panels, pcdb, pvp, sprites, ui, updater, worldview
 from .audio import AudioOut
 from .config import Config, app_dir
 from .diag import Diagnostics, send_report_sync, show_report_window
@@ -22,6 +22,11 @@ from . import crystal
 from .challenge import ChallengeMixin
 from .trades import TradeMixin
 from .net import NetClient
+
+try:                                   # Pokémon Platinum adapter (dev/platinum/BRIEF.md); optional while it's built
+    from . import platinum
+except ImportError:
+    platinum = None
 
 log = logging.getLogger("yellowlink")
 
@@ -39,6 +44,48 @@ KEYMAP = {
     pygame.K_BACKSPACE: "select", pygame.K_RSHIFT: "select",
 }
 PAD_BUTTONS = {0: "a", 1: "b", 6: "select", 7: "start", 4: "select", 9: "start"}
+# Nintendo DS (Platinum): the Game Boy keys plus X / Y / L / R
+DS_KEYMAP = {**KEYMAP, pygame.K_d: "x", pygame.K_c: "y", pygame.K_q: "l", pygame.K_w: "r"}
+DS_PAD_BUTTONS = {**PAD_BUTTONS, 2: "x", 3: "y", 4: "l", 5: "r"}
+DS_FAST_TICKS = 4           # DS frames per host frame while fast-forward is on
+DS_SAVE_POLL = 180          # frames (~3 s) between battery save checks (Platinum)
+
+
+class _NoPlatinumMemory:
+    """Stand-in until client/yellowlink/platinum.py exists: never in game (no multiplayer state, nothing written)."""
+
+    def __init__(self, bus):
+        self.bus = bus
+
+    def in_game(self):
+        return False
+
+    def is_safe(self):
+        return False
+
+    def in_battle(self):
+        return False
+
+    def walking(self):
+        return False
+
+    def map_id(self):
+        return None
+
+    def position(self):
+        return {}
+
+    def status_line(self):
+        return "platinum adapter not available"
+
+
+def _platinum_adapter():
+    """The Platinum adapter module (self.G), or a stand-in with the same names if platinum.py isn't there yet."""
+    if platinum is not None and hasattr(platinum, "PlatinumMemory"):
+        return platinum
+    import types
+    return types.SimpleNamespace(PlatinumMemory=_NoPlatinumMemory, fast_continue=None, RomData=None,
+                                 PLATINUM_SHA1=None)
 
 
 def write_atomic(path, data: bytes, attempts: int = 5) -> bool:
@@ -115,14 +162,31 @@ class App(ChallengeMixin, TradeMixin):
         self._last_err_toast = 0.0
         self.fps = 0.0
         cfg["rom_path"] = self.lib.rom_path(self.game_id) or cfg.get("rom_path", "")
-        # One adapter module per game: game (Yellow, Gen 1) or crystal (Gen 2). Same method names.
+        # One adapter module per game: game (Yellow, Gen 1), crystal (Gen 2) or platinum (Gen 4, Nintendo DS).
+        # Same method names. The DS game runs in nds_core.NDSCore (DeSmuME) instead of PyBoy.
+        self.ds = self.game_info.platform == "nds"
         self.gen2 = self.game_id == "crystal"
-        self.G = crystal if self.gen2 else game
-        self.rom = self.G.RomData.from_file(cfg["rom_path"])
+        self.G = _platinum_adapter() if self.ds else (crystal if self.gen2 else game)
+        rom_cls = getattr(self.G, "RomData", None)
+        self.rom = rom_cls.from_file(cfg["rom_path"]) if rom_cls else None
         # Multiplayer features rely on memory addresses verified on these exact ROMs.
         # Live/practice battles and wide view are Yellow-only (self.hooks / self.wv).
-        sha = game.sha1_of(cfg["rom_path"])
-        self.full = self.game_info.full_support and sha in (game.YELLOW_SHA1, crystal.CRYSTAL_SHA1)
+        sha = library.sha1_file(cfg["rom_path"])
+        if self.ds:
+            self.full = (self.game_info.full_support and sha == library.PLATINUM_SHA1
+                         and getattr(self.G, "PLATINUM_SHA1", None) == library.PLATINUM_SHA1)
+        else:
+            self.full = self.game_info.full_support and sha in (game.YELLOW_SHA1, crystal.CRYSTAL_SHA1)
+        self.keymap = DS_KEYMAP if self.ds else KEYMAP
+        self.pad_buttons = DS_PAD_BUTTONS if self.ds else PAD_BUTTONS
+        self.frame_time = nds_core.FRAME_TIME if self.ds else FRAME_TIME
+        self.pyboy = None            # Game Boy games (PyBoy)
+        self.nds: nds_core.NDSCore | None = None    # Nintendo DS (Platinum)
+        self.emu = None              # whichever of the two runs this game (press/release, save/load state, tick)
+        self.touching = False        # mouse button held on the DS touch screen
+        self._touch_frames = 0
+        self._touch_release = False
+        self._bat_seen = None        # DS battery save at the last check (written once it stops changing)
         self.scale = 4
         self.wide = bool(cfg.get("wide_view", False))
         self.wv = None
@@ -196,18 +260,24 @@ class App(ChallengeMixin, TradeMixin):
 
     # ------------------------------------------------------------------ setup
     def _make_window(self):
-        if self.wide:
+        if self.wide and not self.ds:
             self.off_x, self.off_y = WIDE_MX, WIDE_MY
         else:
             self.off_x, self.off_y = 0, 0
-        self.view_w, self.view_h = 160 + 2 * self.off_x, 144 + 2 * self.off_y
-        self.scale = int(self.cfg.get("wide_scale" if self.wide else "scale", 0) or 0) or self._fit_scale()
+        if self.ds:                              # two DS screens, the touch screen below
+            self.view_w, self.view_h = nds_core.SCREEN_W, 2 * nds_core.SCREEN_H
+        else:
+            self.view_w, self.view_h = 160 + 2 * self.off_x, 144 + 2 * self.off_y
+        self.scale = int(self.cfg.get(self._scale_key(), 0) or 0) or self._fit_scale()
         self.game_w, self.game_h = self.view_w * self.scale, self.view_h * self.scale
         h = max(self.game_h, 480)
         self.screen = pygame.display.set_mode((self.game_w + ui.SIDEBAR_W, h))
         self.game_surf = pygame.Surface((self.view_w, self.view_h))
         self.friend_layer = pygame.Surface((self.view_w, self.view_h), pygame.SRCALPHA)
         self.game_y = (h - self.game_h) // 2
+
+    def _scale_key(self):
+        return "ds_scale" if self.ds else ("wide_scale" if self.wide else "scale")
 
     def _fit_scale(self):
         """Largest integer scale that fits the desktop (with the sidebar)."""
@@ -216,10 +286,13 @@ class App(ChallengeMixin, TradeMixin):
             dw, dh = sizes[0] if sizes else (1920, 1080)
         except (pygame.error, AttributeError):
             dw, dh = 1920, 1080
-        fit = min((dw - ui.SIDEBAR_W - 40) // (160 + 2 * self.off_x), (dh - 100) // (144 + 2 * self.off_y))
+        fit = min((dw - ui.SIDEBAR_W - 40) // self.view_w, (dh - 100) // self.view_h)
         return max(1, min(4, fit))
 
     def _start_emulator(self):
+        if self.ds:
+            self._start_nds()
+            return
         from pyboy import PyBoy
         msg = self.cfg.pop("_travel_msg", None)
         if msg:
@@ -239,6 +312,7 @@ class App(ChallengeMixin, TradeMixin):
         self.pyboy = PyBoy(self.cfg["rom_path"], window="null", ram_file=ram,
                            sound_emulated=True, sound_sample_rate=48000, log_level="ERROR", **extra)
         self.pyboy.set_emulation_speed(0)
+        self.emu = self.pyboy
         self.game = (crystal.CrystalMemory if self.gen2 else GameMemory)(self.pyboy.memory, self.rom)
         # Hooks patch ROM addresses, so only enable them on the exact ROM they were verified on.
         if self.full and self.gen2:
@@ -273,6 +347,58 @@ class App(ChallengeMixin, TradeMixin):
                 "Loading your adventure..."))
             log.info("fast continue: %s in %.2fs", result, time.time() - t0)
 
+    def _start_nds(self):
+        """Pokémon Platinum: DeSmuME with this server's own battery save (never DeSmuME's shared .dsv)."""
+        msg = self.cfg.pop("_travel_msg", None)
+        if msg:
+            self._loading_screen(msg)
+        save = self.cfg.save_path
+        data = b""
+        if save.exists():
+            try:
+                data = save.read_bytes()[:nds_core.SAVE_SIZE]
+            except OSError:
+                log.exception("could not read %s", save)
+        self.had_save = len(data) == nds_core.SAVE_SIZE and data.count(0xFF) + data.count(0) < len(data)
+        if save.exists():
+            shutil.copy2(save, self.cfg.backup_dir / time.strftime(f"{self.save_tag}-%Y%m%d-%H%M%S.sav"))
+            self._prune_backups()
+        self.nds = nds_core.NDSCore(self.cfg["rom_path"], save if len(data) == nds_core.SAVE_SIZE else None,
+                                    volume=self._ds_volume())
+        self.emu = self.nds
+        log.info("DS game %s started (save %s, %s)", self.game_id, save, "loaded" if self.nds.loaded_save else "none")
+        self.game = self.G.PlatinumMemory(self.nds)
+        if self.wide:
+            self.wide = False
+        self.last_sram = self._read_sram()
+        self._bat_seen = self.last_sram
+        dev_state = os.environ.get("YL_DEV_LOAD_STATE")
+        if dev_state:
+            self.nds.load_state(dev_state)
+            self.last_sram = self._bat_seen = self._read_sram()
+        elif self._try_resume():
+            pass
+        elif self.full and self.had_save and self.cfg.get("skip_intro", True) and \
+                getattr(self.G, "fast_continue", None):
+            self._loading_screen("Loading your adventure...")
+            t0 = time.time()
+            try:
+                result = self.G.fast_continue(self.nds, on_progress=lambda: self._loading_screen(
+                    "Loading your adventure..."))
+            except Exception:  # noqa: BLE001 - a failed skip must never stop the game: play the intro instead
+                log.exception("fast continue failed")
+                result = "failed"
+            log.info("fast continue: %s in %.2fs", result, time.time() - t0)
+
+    def _ds_volume(self) -> int:
+        """What DeSmuME's own sound device should play at: muted in fast-forward (like the Game Boy games)."""
+        audio = getattr(self, "audio", None)
+        if audio is None:
+            return int(self.cfg.get("volume", 60))
+        if audio.muted or self.fast:
+            return 0
+        return int(round(audio.volume * 100))
+
     @property
     def rtc_path(self):
         return self.cfg.save_path.with_suffix(".rtc")
@@ -296,8 +422,9 @@ class App(ChallengeMixin, TradeMixin):
             return False
         try:
             with open(path, "rb") as f:
-                self.pyboy.load_state(f)
+                self.emu.load_state(f)
             self.last_sram = self._read_sram()
+            self._bat_seen = self.last_sram
             self.pc_trust = True     # snapshots are always taken together with a PC commit
             log.info("resumed %s from snapshot (%s)", self.game_id, time.ctime(path.stat().st_mtime))
             return True
@@ -322,7 +449,7 @@ class App(ChallengeMixin, TradeMixin):
             return False
         buf = io.BytesIO()
         try:
-            self.pyboy.save_state(buf)
+            self.emu.save_state(buf)
         except Exception:  # noqa: BLE001
             log.exception("snapshot failed")
             return False
@@ -352,7 +479,9 @@ class App(ChallengeMixin, TradeMixin):
             except OSError:
                 pass
 
-    def _read_sram(self) -> bytes:
+    def _read_sram(self) -> bytes | None:
+        if self.ds:
+            return self.nds.export_save()            # the 512 KB battery save
         m = self.pyboy.memory
         return b"".join(bytes(m[b, 0xA000:0xBFFF]) + bytes([m[b, 0xBFFF]]) for b in range(4))
 
@@ -360,6 +489,12 @@ class App(ChallengeMixin, TradeMixin):
         if (self.battle or self.live) and not force:
             return
         data = self._read_sram()
+        if data is None:
+            return
+        if self.ds and not force and data != self._bat_seen:
+            # Platinum writes its save over a second or two: only keep it once it stopped changing
+            self._bat_seen = data
+            return
         if data != self.last_sram and write_atomic(self.cfg.save_path, data):
             self.last_sram = data
             log.info("save file written")
@@ -381,6 +516,13 @@ class App(ChallengeMixin, TradeMixin):
         self.release_all()
         if not self.diag:
             return
+        self._pause_ds_audio(True)
+        try:
+            self._open_report(reason)
+        finally:
+            self._pause_ds_audio(False)
+
+    def _open_report(self, reason):
         text = self.diag.report_text(reason, "state: " + self.debug_snapshot())
 
         def send():
@@ -546,7 +688,7 @@ class App(ChallengeMixin, TradeMixin):
 
     # battles ------------------------------------------------------------
     def on_party_data(self, msg):
-        if not self.full or self.gen2:
+        if not self.full or self.gen2 or self.ds:
             return
         if msg.get("error") or not msg.get("mons"):
             self.toast("That trainer has no Pokémon to battle yet.", color=ui.BAD)
@@ -621,7 +763,7 @@ class App(ChallengeMixin, TradeMixin):
         b = self.battle
         self.battle = None
         if b and b.snapshot:
-            self.pyboy.load_state(io.BytesIO(b.snapshot))
+            self.emu.load_state(io.BytesIO(b.snapshot))
         self.release_all()
 
     # live PvP battles -------------------------------------------------------
@@ -744,7 +886,7 @@ class App(ChallengeMixin, TradeMixin):
         if self.hooks:
             self.hooks.session = None
         if s and s.snapshot:
-            self.pyboy.load_state(io.BytesIO(s.snapshot))
+            self.emu.load_state(io.BytesIO(s.snapshot))
         pvp.clear_link_state(self.game)
         self.release_all()
         if message:
@@ -757,6 +899,9 @@ class App(ChallengeMixin, TradeMixin):
             return
         g = self.game
         if not g.in_game():
+            return
+        if self.ds:
+            self._publish_ds()
             return
         if self.frame % STATE_SEND_EVERY == 0:
             st = g.position()
@@ -789,6 +934,25 @@ class App(ChallengeMixin, TradeMixin):
                 if self.net.send({"type": "party", "mons": [m.to_wire() for m in party],
                                   "trainer": g.player_name(), "badges": g.badges()}):
                     self.last_party_sent = key
+
+    def _publish_ds(self):
+        """Platinum: where we are (PlatinumMemory.position()), for the roster/region and friends in Sinnoh."""
+        if self.frame % STATE_SEND_EVERY:
+            return
+        pos = self.game.position() or {}
+        try:
+            x, y = int(pos.get("x", 0)), int(pos.get("y", 0))
+            st = {k: v for k, v in pos.items() if isinstance(v, (int, float, str, bool)) and not isinstance(v, float)}
+            st.update({"map": int(pos.get("map", 0)), "x": x, "y": y,
+                       "px": int(pos.get("px", x * 16)), "py": int(pos.get("py", y * 16)),
+                       "facing": int(pos.get("facing", 0)), "img": int(pos.get("img", 0))})
+        except (TypeError, ValueError):
+            return
+        st.update(type="state", visible=True, game=self.game_id)
+        now = time.time()
+        if st != self.last_state_sent or now - self.last_state_time > 2:
+            self.net.send(st)
+            self.last_state_sent, self.last_state_time = st, now
 
     # ---------------------------------------------------------------- input
     # PC database ---------------------------------------------------------------
@@ -989,10 +1153,17 @@ class App(ChallengeMixin, TradeMixin):
 
     def server_dialog(self, sid=None):
         """Add a server (sid None) or edit one: a small window with name / address / password."""
-        from .setup_dialog import server_form
         self.release_all()
         entry = self.cfg.server(sid) if sid else None
         before = (entry or {}).get("url"), (entry or {}).get("key")
+        self._pause_ds_audio(True)
+        try:
+            self._server_dialog(sid, entry, before)
+        finally:
+            self._pause_ds_audio(False)
+
+    def _server_dialog(self, sid, entry, before):
+        from .setup_dialog import server_form
 
         def check(label, url, key):
             try:
@@ -1054,13 +1225,20 @@ class App(ChallengeMixin, TradeMixin):
 
     def add_rom_dialog(self):
         self.release_all()
+        self._pause_ds_audio(True)
+        try:
+            self._add_rom_dialog()
+        finally:
+            self._pause_ds_audio(False)
+
+    def _add_rom_dialog(self):
         try:
             import tkinter as tk
             from tkinter import filedialog
             root = tk.Tk()
             root.withdraw()
             path = filedialog.askopenfilename(title="Add a Pokémon game file",
-                                              filetypes=[("Game Boy ROM", "*.gb *.gbc"), ("All files", "*.*")])
+                                              filetypes=library.GAME_FILE_TYPES)
             root.destroy()
         except Exception:  # noqa: BLE001
             log.exception("file dialog failed")
@@ -1068,6 +1246,7 @@ class App(ChallengeMixin, TradeMixin):
             return
         if not path:
             return
+        self._loading_screen("Adding your game file...")
         try:
             info = self.lib.add_rom(path)
             self.toast(f"Added {info.title}! Click Travel to play it.", 5, ui.GOOD)
@@ -1081,6 +1260,20 @@ class App(ChallengeMixin, TradeMixin):
         self.audio.volume = percent / 100
         if self.audio.muted and percent > 0:
             self.audio.set_muted(False)
+        self._sync_ds_audio()
+
+    def _sync_ds_audio(self):
+        """DeSmuME plays Platinum's sound itself: keep its volume in step with our slider / mute / fast-forward."""
+        if self.nds is not None and not self.nds.closed:
+            self.nds.set_volume(self._ds_volume())
+
+    def _pause_ds_audio(self, paused):
+        """Around anything that stops the main loop (file pickers, report window): no looping sound."""
+        if self.nds is not None and not self.nds.closed:
+            try:
+                self.nds.pause_audio(paused)
+            except Exception:  # noqa: BLE001
+                log.exception("DS audio pause failed")
 
     def _set_volume_from_x(self, x):
         bar = self.volume_bar
@@ -1089,10 +1282,52 @@ class App(ChallengeMixin, TradeMixin):
 
     def release_all(self):
         for b in list(self.held):
-            self.pyboy.button_release(b)
+            self.emu.button_release(b)
         self.held.clear()
         self.kb_held.clear()
         self.pad_held.clear()
+        if self.touching or self._touch_release:
+            self.nds.touch_release()
+            self.touching = self._touch_release = False
+
+    # DS touch screen (mouse on the bottom screen) -----------------------------------------------------------
+    def _touch_point(self, pos, clamp=False):
+        """Window position -> bottom-screen pixel (or None if outside it)."""
+        if not self.ds or self.scale <= 0:
+            return None
+        gx = pos[0] / self.scale
+        gy = (pos[1] - self.game_y) / self.scale - nds_core.SCREEN_H
+        if clamp:
+            return (int(max(0, min(nds_core.SCREEN_W - 1, gx))), int(max(0, min(nds_core.SCREEN_H - 1, gy))))
+        if 0 <= gx < nds_core.SCREEN_W and 0 <= gy < nds_core.SCREEN_H:
+            return int(gx), int(gy)
+        return None
+
+    def touch_down(self, pos) -> bool:
+        if self.mode != "play" or self.nds is None:
+            return False
+        pt = self._touch_point(pos)
+        if pt is None:
+            return False
+        self.nds.touch(*pt)
+        self.touching, self._touch_release, self._touch_frames = True, False, 0
+        return True
+
+    def touch_move(self, pos):
+        if self.touching:
+            self.nds.touch(*self._touch_point(pos, clamp=True))
+
+    def touch_up(self):
+        if self.touching:
+            self.touching = False
+            self._touch_release = True   # released after the game has seen the touch for a couple of frames
+
+    def _touch_step(self, ticks):
+        if self.touching or self._touch_release:
+            self._touch_frames += ticks
+        if self._touch_release and self._touch_frames >= 3:
+            self.nds.touch_release()
+            self._touch_release = False
 
     def press(self, b, down, source="kb"):
         if self.mode != "play" or (self.battle and self.battle.phase == "triggered"):
@@ -1106,10 +1341,10 @@ class App(ChallengeMixin, TradeMixin):
             src.discard(b)
         want = b in self.kb_held or b in self.pad_held
         if want and b not in self.held:
-            self.pyboy.button_press(b)
+            self.emu.button_press(b)
             self.held.add(b)
         elif not want and b in self.held:
-            self.pyboy.button_release(b)
+            self.emu.button_release(b)
             self.held.discard(b)
 
     def handle_events(self):
@@ -1121,8 +1356,8 @@ class App(ChallengeMixin, TradeMixin):
             if ev.type == pygame.KEYDOWN:
                 self.on_key(ev)
             elif ev.type == pygame.KEYUP:
-                if ev.key in KEYMAP:
-                    self.press(KEYMAP[ev.key], False)
+                if ev.key in self.keymap:
+                    self.press(self.keymap[ev.key], False)
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if self.volume_rect and self.volume_rect.collidepoint(ev.pos):
                     self.dragging_volume = True
@@ -1136,6 +1371,8 @@ class App(ChallengeMixin, TradeMixin):
                             break
                     if not hit and self.mode == "chat" and not (self.chat_rect and self.chat_rect.collidepoint(ev.pos)):
                         self.unfocus_chat()   # clicked away from the chat box
+                    elif not hit and self.ds:
+                        self.touch_down(ev.pos)     # DS touch screen
             elif ev.type == pygame.MOUSEWHEEL and self.mode == "trade":
                 self.trade_scroll = max(0, self.trade_scroll - ev.y)
             elif ev.type == pygame.MOUSEWHEEL:
@@ -1143,6 +1380,10 @@ class App(ChallengeMixin, TradeMixin):
                     self.chat_scroll = max(0, self.chat_scroll + ev.y * 3)
             elif ev.type == pygame.MOUSEMOTION and self.dragging_volume:
                 self._set_volume_from_x(ev.pos[0])
+            elif ev.type == pygame.MOUSEMOTION and self.touching:
+                self.touch_move(ev.pos)
+            elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1 and self.touching:
+                self.touch_up()
             elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1 and self.dragging_volume:
                 self.dragging_volume = False
                 self.cfg["volume"] = int(round(self.audio.volume * 100))
@@ -1153,11 +1394,11 @@ class App(ChallengeMixin, TradeMixin):
                     continue
                 if len(self.chat_input) < 200:
                     self.chat_input += ev.text
-            elif ev.type == pygame.JOYBUTTONDOWN and ev.button in PAD_BUTTONS:
+            elif ev.type == pygame.JOYBUTTONDOWN and ev.button in self.pad_buttons:
                 log.info("pad button %s", ev.button)
-                self.press(PAD_BUTTONS[ev.button], True, "pad")
-            elif ev.type == pygame.JOYBUTTONUP and ev.button in PAD_BUTTONS:
-                self.press(PAD_BUTTONS[ev.button], False, "pad")
+                self.press(self.pad_buttons[ev.button], True, "pad")
+            elif ev.type == pygame.JOYBUTTONUP and ev.button in self.pad_buttons:
+                self.press(self.pad_buttons[ev.button], False, "pad")
             elif ev.type == pygame.JOYHATMOTION:
                 x, y = ev.value
                 for b, on in (("left", x < 0), ("right", x > 0), ("up", y > 0), ("down", y < 0)):
@@ -1307,8 +1548,8 @@ class App(ChallengeMixin, TradeMixin):
             return
 
         # play mode
-        if k in KEYMAP:
-            self.press(KEYMAP[k], True)
+        if k in self.keymap:
+            self.press(self.keymap[k], True)
         elif k == pygame.K_t:
             self.focus_chat()
             self._skip_text = True  # the "t" that opened chat arrives as TEXTINPUT next
@@ -1321,6 +1562,7 @@ class App(ChallengeMixin, TradeMixin):
             self.mode = "help"
         elif k == pygame.K_SPACE:                  # toggle (press once = fast, again = normal)
             self.fast = not self.fast
+            self._sync_ds_audio()
         elif k in (pygame.K_MINUS, pygame.K_KP_MINUS, pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
             step = -10 if k in (pygame.K_MINUS, pygame.K_KP_MINUS) else 10
             self.set_volume(int(round(self.audio.volume * 100)) + step)
@@ -1331,12 +1573,13 @@ class App(ChallengeMixin, TradeMixin):
             self.toggle_wide()
         elif k == pygame.K_m:
             self.audio.set_muted(not self.audio.muted)
+            self._sync_ds_audio()
             self.toast("Sound off" if self.audio.muted else "Sound on", 1.5)
         elif k == pygame.K_n:
             self.cfg["show_names"] = not self.cfg.get("show_names", True)
             self.cfg.save()
         elif k in (pygame.K_F5, pygame.K_F6):
-            self.cfg["wide_scale" if self.wide else "scale"] = max(1, min(6, self.scale + (1 if k == pygame.K_F6 else -1)))
+            self.cfg[self._scale_key()] = max(1, min(6, self.scale + (1 if k == pygame.K_F6 else -1)))
             self.cfg.save()
             self._make_window()
         elif k == pygame.K_u and self.update_available:
@@ -1481,9 +1724,15 @@ class App(ChallengeMixin, TradeMixin):
 
     def render(self):
         self.click_targets = []
-        arr = self.pyboy.screen.ndarray
-        self.compose_world(arr)
-        tags = self.draw_friends(arr)
+        if self.ds:
+            # both DS screens (top above the touch screen); friends in Sinnoh are drawn by the Platinum renderer
+            self.game_surf.blit(pygame.image.frombuffer(self.nds.screen_rgb(), (self.view_w, self.view_h), "RGB"),
+                                (0, 0))
+            tags = []
+        else:
+            arr = self.pyboy.screen.ndarray
+            self.compose_world(arr)
+            tags = self.draw_friends(arr)
         self.screen.fill(ui.BG)
         scaled = pygame.transform.scale(self.game_surf, (self.game_w, self.game_h))
         self.screen.blit(scaled, (0, self.game_y))
@@ -1562,7 +1811,7 @@ class App(ChallengeMixin, TradeMixin):
             ui.modal(sub, self.fonts, self.game_w, self.game_h, f"Battle {o['name']}'s team?", lines,
                      "[Enter] fight!    [Esc] back")
         elif self.mode == "help":
-            ui.draw_help(sub, self.fonts, self.game_w, self.game_h)
+            ui.draw_help(sub, self.fonts, self.game_w, self.game_h, ds=self.ds)
         elif self.mode == "update_confirm":
             ui.modal(sub, self.fonts, self.game_w, self.game_h, f"Update to {self.update_available}?",
                      ["The new version downloads in the background",
@@ -1602,8 +1851,14 @@ class App(ChallengeMixin, TradeMixin):
         """Advance one host frame (network, emulation, publishing)."""
         self.handle_net()
         paused = self.chal_paused()
-        ticks = 0 if paused else (4 if self.fast and not self.trade else 1)
-        for i in range(ticks):
+        if self.ds:
+            ticks = 0 if paused else (DS_FAST_TICKS if self.fast and not self.trade else 1)
+            if ticks:
+                self.nds.tick(ticks)      # DeSmuME plays the sound itself (see _sync_ds_audio)
+            self._touch_step(ticks)
+        else:
+            ticks = 0 if paused else (4 if self.fast and not self.trade else 1)
+        for i in range(0 if self.ds else ticks):
             self.pyboy.tick(1, i == ticks - 1)
             if ticks == 1:
                 self.audio.push(self.pyboy.sound.ndarray)
@@ -1632,7 +1887,7 @@ class App(ChallengeMixin, TradeMixin):
             log.info("status: %s", self.debug_snapshot())
         self.frame += 1
         self.publish()
-        if self.frame % SRAM_FLUSH_EVERY == 0:
+        if self.frame % (DS_SAVE_POLL if self.ds else SRAM_FLUSH_EVERY) == 0:
             self.flush_sram()
         if self.frame % AUTOSAVE_EVERY == 0 and not paused:
             self.autosave()
@@ -1654,7 +1909,7 @@ class App(ChallengeMixin, TradeMixin):
                     now = time.perf_counter()
                     self.fps = 120 / max(1e-6, now - fps_t)
                     fps_t, fps_n = now, 0
-                next_t += FRAME_TIME
+                next_t += self.frame_time
                 delay = next_t - time.perf_counter()
                 if delay > 0:
                     time.sleep(delay)
@@ -1686,16 +1941,24 @@ class App(ChallengeMixin, TradeMixin):
                 self._end_live("", ui.DIM)
             self.autosave(force=True)
             self.flush_sram(force=True)
-            ram = io.BytesIO()
-            rtc = io.BytesIO() if self.gen2 else None
-            self.pyboy.stop(save=True, ram_file=ram, rtc_file=rtc)
-            data = ram.getvalue()
-            if len(data) >= 32768 and data != self.last_sram:
-                write_atomic(self.cfg.save_path, data)
-            if rtc is not None and len(rtc.getvalue()) >= 33:
-                write_atomic(self.rtc_path, rtc.getvalue())
+            if self.ds:
+                self.nds.close()          # also blanks DeSmuME's shared battery file (see nds_core)
+            else:
+                ram = io.BytesIO()
+                rtc = io.BytesIO() if self.gen2 else None
+                self.pyboy.stop(save=True, ram_file=ram, rtc_file=rtc)
+                data = ram.getvalue()
+                if len(data) >= 32768 and data != self.last_sram:
+                    write_atomic(self.cfg.save_path, data)
+                if rtc is not None and len(rtc.getvalue()) >= 33:
+                    write_atomic(self.rtc_path, rtc.getvalue())
         except Exception:  # noqa: BLE001
             log.exception("shutdown save failed")
+            if self.nds is not None and not self.nds.closed:
+                try:
+                    self.nds.close(blank_battery=False)
+                except Exception:  # noqa: BLE001
+                    pass
         self.chal_shutdown()
         try:
             self.audio.close()
@@ -1708,8 +1971,38 @@ class App(ChallengeMixin, TradeMixin):
         pygame.quit()
 
 
+def selftest_ds(argv) -> int:
+    """`YellowLink --selftest-ds <report.txt> [test.nds]`: start pygame, our sound device and DeSmuME the way the
+    game does (used by the release build to prove the exe can run Platinum; a missing DLL fails the build)."""
+    i = argv.index("--selftest-ds")
+    out = argv[i + 1] if len(argv) > i + 1 else "selftest-ds.txt"
+    rom = argv[i + 2] if len(argv) > i + 2 else None
+    lines = []
+    code = 0
+    try:
+        pygame.init()
+        pygame.display.set_mode((64, 64))
+        audio = AudioOut(50)
+        lines.append(f"pygame {pygame.version.ver} SDL {'.'.join(map(str, pygame.get_sdl_version()))}, "
+                     f"our audio {'device' if audio.device else ('mixer' if audio.ok else 'off')}")
+        if rom == "make":
+            rom = nds_core.make_test_rom(os.path.join(os.path.dirname(os.path.abspath(out)), "yltest.nds"))
+        lines.append(nds_core.selftest(rom))
+        audio.close()
+        lines.append("OK")
+    except Exception:  # noqa: BLE001
+        import traceback
+        lines.append(traceback.format_exc())
+        code = 1
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return code
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if "--selftest-ds" in argv:
+        sys.exit(selftest_ds(argv))
     diag = Diagnostics(app_dir())
     updater.cleanup_old()
     cfg = None

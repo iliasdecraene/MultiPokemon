@@ -57,9 +57,11 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
         name = name[:-1]
     text(surf, f.small, "on " + name, (tx, r.y + 20), DIM)
     y = r.y + 56
-    if not app.full:
-        text(surf, f.small, f"Battles don't work in {app.game_info.title} - trades and gifts do (they use your PC).",
-             (r.x + 18, y), DIM)
+    if not app.full or getattr(app, "ds", False):
+        msg = f"Battles don't work in {app.game_info.title} - trades and gifts do (they use your PC)."
+        if f.small.size(msg)[0] > r.w - 36:
+            msg = "Battles are Yellow-only - trades and gifts work (they use your PC)."
+        text(surf, f.small, msg, (r.x + 18, y), DIM)
         y += 22
     if not others:
         text(surf, f.body, "No other trainers yet - invite your friends!", (r.x + 18, y + 10), DIM)
@@ -90,7 +92,7 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
         y += row_h
         if selected:
             bx = row.x + 24
-            bw = 106
+            bw = max(60, min(106, (row.w - 24 - 4 * 8 - 14) // 5))     # five buttons fit narrow windows too
             same_game = app.friend_game(uid) == app.game_id if online else True
             can_live = online and same_game and app.full and app.hooks is not None and not app.chal
             buttons = [
@@ -101,7 +103,7 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
                 ("Gift", lambda e=e: app.action_gift(e), online and not app.chal, False,
                  "Give them a Pokémon from your PC - they need to be online."),
                 ("Practice", lambda e=e: app.action_practice(e),
-                 app.full and not app.gen2 and same_game and bool(lv) and not app.chal, False,
+                 app.full and not app.gen2 and not getattr(app, "ds", False) and same_game and bool(lv) and not app.chal, False,
                  "Practice battles work in Yellow vs a trainer with Pokémon."),
             ]
             for i, (label, cb, enabled, primary, tip) in enumerate(buttons):
@@ -112,8 +114,10 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
                    "Challenges" + (f" ({done})" if done else ""), lambda u=uid: app.open_challenges(u),
                    offset=offset)
             y += 44
-    text(surf, f.small, "Trade/Gift: Pokémon from your PC, any game  ·  Practice: their team vs the AI",
-         (r.x + 18, r.bottom - 26), DIM)
+    foot = "Trade/Gift: Pokémon from your PC, any game  ·  Practice: their team vs the AI"
+    if f.small.size(foot)[0] > r.w - 36:
+        foot = "Trade/Gift: Pokémon from your PC, any game"
+    text(surf, f.small, foot, (r.x + 18, r.bottom - 26), DIM)
 
 
 def draw_servers(surf, f, app, game_w, game_h, offset):
@@ -179,7 +183,7 @@ def _region_game(app, region_id, installed_here):
 def draw_regions(surf, f, app, game_w, game_h, offset):
     r = _panel_frame(surf, app, f, game_w, game_h, "Regions", offset)
     y = r.y + 56
-    text(surf, f.small, "Kanto = Pokémon Yellow, Johto = Pokémon Crystal. Each keeps its own progress.", (r.x + 18, y), DIM)
+    text(surf, f.small, "Each region is its own game and keeps its own progress.", (r.x + 18, y), DIM)
     y += 30
     installed = app.lib.games
     for region_id, region_name, game_ids in library.REGIONS:
@@ -226,8 +230,7 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
         y = card.bottom + 10
     button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 48, 200, 36), "Add a game file...", app.add_rom_dialog,
            offset=offset)
-    text(surf, f.small, "Kanto: Pokémon Yellow  ·  Johto: Pokémon Crystal",
-         (r.x + 230, r.bottom - 40), DIM)
+    text(surf, f.small, ".gb, .gbc or .nds", (r.x + 230, r.bottom - 40), DIM)
 
 
 

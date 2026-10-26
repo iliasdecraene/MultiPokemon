@@ -2,3 +2,4 @@ pyboy==2.8.1
 pygame-ce>=2.5,<3
 websockets>=13,<16
 numpy>=1.26
+py-desmume==0.0.9
