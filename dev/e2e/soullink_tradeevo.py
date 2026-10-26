@@ -458,8 +458,25 @@ def phase_platinum():
         A.nds.button_release(k)
         run(after)
 
+    def party():
+        """The party records; the game decrypts them in place mid-frame, so a read can miss: try a few frames."""
+        for _ in range(120):
+            p = A.game.party_checked()
+            if p is not None:
+                return p
+            run(1)
+        return []
+
     def keys():
-        return [P.mon_key(r) for r in (A.game.party_checked() or [])]
+        return [P.mon_key(r) for r in party()]
+
+    def evo_options():
+        for _ in range(120):
+            o = A.tradeevo_options()
+            if o is not None:
+                return o
+            run(1)
+        return []
 
     def box_keys():
         return [P.mon_key(r) for r in A.game.current_box_records()]
@@ -505,7 +522,7 @@ def phase_platinum():
     cfg["active_challenge"] = A.enter_challenge
     cfg.save()
     A = boot("pt_battle.dsst")                 # the run starts in a wild battle on Route 201 (before Poké Balls)
-    turtwig = A.game.party_checked()[0]
+    turtwig = party()[0]
     tkey = P.mon_key(turtwig)                  # the starter = Twinleaf Town's gift (before the referee looks)
     A._chal_send({"t": "enc", "area": "twinleaf_town", "dex": 387, "status": "caught", "key": tkey, "gift": True})
     B.send(type="challenge_join", challenge_id=cid)
@@ -523,7 +540,7 @@ def phase_platinum():
     A.game.m.w16(body + P.PAGE_BAG + P.BAG_BALLS, 1)
     A.game.m.w16(body + P.PAGE_BAG + P.BAG_BALLS + 2, 5)
     data = A.plat_data
-    check("the starter is still the run's Turtwig", P.mon_key(A.game.party_checked()[0]) == tkey)
+    check("the starter is still the run's Turtwig", P.mon_key(party()[0]) == tkey)
     base = pk4.PK4(pk4.decrypt(turtwig))
 
     def make(species, pid, item, moves):
@@ -554,7 +571,7 @@ def phase_platinum():
     check("Kadabra + Onix linked with the partner's mons", A.sl.partner_of(kkey) == partner["test_gift_2"]
           and A.sl.partner_of(okey) == partner["test_gift_3"])
     check("party as written", keys() == [kkey, tkey, okey], keys())
-    opts = A.tradeevo_options() or []
+    opts = evo_options()
     check("picker: Kadabra and Onix (Metal Coat)", [(o.name, o.into_name, o.ok, o.item) for o in opts]
           == [("Kadabra", "Alakazam", True, None), ("Onix", "Steelix", True, "Metal Coat")], opts)
 
@@ -575,7 +592,7 @@ def phase_platinum():
         return r
 
     evolve(opts[0], "kadabra")
-    recs = A.game.party_checked()
+    recs = party()
     ala = pk4.PK4(pk4.decrypt(recs[0])) if recs else None
     old = pk4.PK4(pk4.decrypt(kad))
     check("Kadabra -> Alakazam in the game's party", ala is not None and ala.species == 65
@@ -584,8 +601,8 @@ def phase_platinum():
           and ala.ot_codes == old.ot_codes and ala.party_level == old.party_level
           and ala.stats == pk4.calc_stats(ala, data, old.party_level)
           and ala.ability == data.abilities(65)[0x13572469 & 1 if data.abilities(65)[1] else 0])
-    evolve([o for o in A.tradeevo_options() if o.name == "Onix"][0], "onix")
-    recs = A.game.party_checked()
+    evolve([o for o in evo_options() if o.name == "Onix"][0], "onix")
+    recs = party()
     st = pk4.PK4(pk4.decrypt(recs[2])) if recs else None
     check("Onix + Metal Coat -> Steelix, item used up", st is not None and st.species == 208 and st.item == 0
           and P.mon_key(recs[2]) == okey and st.nickname == "STEELIX", st and (st.species, st.item))
@@ -600,7 +617,7 @@ def phase_platinum():
           and has(caught, 65) and has(caught, 208))
     run(300)
     check("the game keeps the evolved records (300 frames later)", [pk4.PK4(pk4.decrypt(r)).species
-                                                                   for r in (A.game.party_checked() or [])]
+                                                                   for r in party()]
           == [65, 387, 208])
     A.toggle_panel("soullink")
     A.render()

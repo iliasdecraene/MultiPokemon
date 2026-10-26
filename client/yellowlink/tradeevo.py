@@ -254,7 +254,7 @@ class TradeEvoMixin:
     def tradeevo_options(self):
         """The picker's list (re-read a few times a second), None while unreadable."""
         f, opts = self._evo_opts
-        if self.frame - f >= 10 or self.frame < f:
+        if self.frame - f >= 10 or self.frame < f or (opts is None and self.frame != f):   # (no list yet: next frame)
             try:
                 new = options(self.evo_kind(), self.game, self.evo_rom(), self.sl)
             except Exception:  # noqa: BLE001 - never break the panel over a read

@@ -688,7 +688,8 @@ def draw_soullink(surf, f, app, game_w, game_h, offset):
         view = app.referee.view if app.referee else None
         rows = sl.pairs()
         if not rows:
-            text(surf, f.body, "No encounters yet. Go catch something!", (r.x + 18, y + 6), DIM)
+            text(surf, f.body, fit(f.body, "No encounters yet. Go catch something!", r.w - 36), (r.x + 18, y + 6),
+                 DIM)
         mine_dead, theirs_dead = sl.mine()["dead"], sl.theirs()["dead"]
 
         def cell(key, st, dex, dead):
@@ -729,8 +730,10 @@ def draw_soullink(surf, f, app, game_w, game_h, offset):
             button(surf, app, f, pygame.Rect(r.x + 26 + bw, r.bottom - 50, bw, 36),
                    "Trade evolution" if fits("Trade evolution") else "Trade evo",
                    app.open_tradeevo_picker, offset=offset)
-        text_wrapped(surf, f.small, "Your run is saved. Continue it together any time from Multiplayer > "
-                     "Challenges.", (r.x + 18, r.bottom - 92), r.w - 36, DIM, 18)
+        note = "Your run is saved. Continue it together any time from Multiplayer > Challenges."
+        if len(wrap(f.small, note, r.w - 36)) > 2:
+            note = "Your run is saved - continue it together any time."
+        text_wrapped(surf, f.small, note, (r.x + 18, r.bottom - 92), r.w - 36, DIM, 18)
         return
     button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 50, 210, 36), "Pause & go back",
            lambda: app.leave_to_main("paused"), offset=offset, primary=True)
