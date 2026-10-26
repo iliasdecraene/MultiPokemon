@@ -411,10 +411,22 @@ class PlatinumMemory:
         base = self.pc_boxes_addr()
         return self.m.r8(base + BOX_WALLPAPERS + box) if base else 0
 
+    def status_line(self) -> str:
+        """One-line game state for logs / F3 reports."""
+        p = self.position()
+        return (f"in_game={self.in_game()} ov={self.top_overlay()} child={self.child_overlay()} map={p['map']} "
+                f"xy=({p['x']},{p['y']}) task={self.field_task()} safe={self.is_safe()} battle={self.in_battle()} "
+                f"pc={self.pc_open()} walk={p['moving']} party={self.party_count()} save={self.has_save()}")
+
     def write_box_slot(self, box: int, slot: int, rec: bytes):
         """Write one encrypted 136-byte record. Only call while is_safe() (or the PC UI is closed)."""
         assert len(rec) == BOX_MON_SIZE
         self.m.write(self.box_slot_addr(box, slot), bytes(rec))
+
+
+def party_records(pm: PlatinumMemory) -> list:
+    """Party as 136-byte encrypted box records (the first 136 bytes of a party record are a valid box record)."""
+    return [r[:BOX_MON_SIZE] for r in pm.party_raw()]
 
 
 # ---------------------------------------------------------------------------------------------------------

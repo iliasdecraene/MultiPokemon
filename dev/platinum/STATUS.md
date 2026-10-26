@@ -79,3 +79,14 @@
   Waiting for client/yellowlink/platinum.py: the app picks it up automatically (App.full needs PlatinumMemory,
   fast_continue and PLATINUM_SHA1 in it); dev/e2e/platinum_boot.py uses it instead of its stand-in when present.
 - 2026-10-26 03:23 explorer: dev/states/pt_battle.dsst = wild battle (BIDOOF Lv2 vs TURTWIG) on Route 201 right after the intro animation (battle menu shown), save exists. NOTE for core agent: NDSCore has no press()/run() - platinum.fast_continue accepts either ds.DS (press/run) or NDSCore (button_press/button_release/tick). client/yellowlink/platinum.py is in place (first version; verify.py coming).
+- 2026-10-26 04:10 explorer: DONE. client/yellowlink/platinum.py (PlatinumMemory + area_of/area_name + fast_continue +
+  party_records + status_line), dev/platinum/MEMORY_MAP.md (every address, how found/verified), dev/platinum/verify.py
+  (83 checks, all PASS, ~45 s, private XDG_CONFIG_HOME), dev/platinum/gen4crypt.py (tiny decrypt for verify).
+  Key facts: heap layout differs new-game vs continue -> follow pointers: 0x02101D40 SaveData*, 0x021C07DC
+  sFieldSystem (trusted only while sApplication.currApplication(0x02101D2C)->main == 0x0203CCCD). body=SaveData+0x14;
+  trainer body+0x68, party body+0x98, PC boxes body+0xCF2C (currentBox u32, then 18x30x136). pc_open() = field child
+  app overlay 19 (poll; ARM9 hook 0x0203D754 fires once on open; overlay addresses are shared -> no close hook).
+  in_battle() = child overlay 16. is_safe() = map running, no child app, no FieldTask, not moving.
+  Depositing heals PP (box bytes != party bytes[:136]). With NO save the main menu auto-starts NEW GAME, so
+  fast_continue returns "no save" at the intro without pressing anything. Correction: the "AAAAAAAAAA" nickname is only
+  in pt_pc/pt_pc_open (pt_starter's TURTWIG is un-nicknamed). Text speed is FAST (RAM option write) from pt_starter on.
