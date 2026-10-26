@@ -429,6 +429,43 @@ def draw_challenges(surf, f, app, game_w, game_h, offset):
     text(surf, f.small, "More challenges coming later.", (r.x + 18, r.bottom - 26), DIM)
 
 
+SETTINGS = [
+    ("exp_share_all", True, "Exp Share All",
+     "Like the newer games: Pokémon that battle get full EXP, the rest of your party gets half. "
+     "Off = the original game's rules (Exp. All / Exp. Share items)."),
+    ("show_names", True, "Name tags above friends", ""),
+    ("skip_intro", True, "Skip the intro",
+     "Start straight into your saved game (Continue is picked for you)."),
+]
+
+
+def draw_settings(surf, f, app, game_w, game_h, offset):
+    r = _panel_frame(surf, app, f, game_w, game_h, "Settings", offset)
+    x, y = r.x + 18, r.y + 58
+    width = r.w - 36
+    for key, default, label, desc in SETTINGS:
+        on = bool(app.cfg.get(key, default))
+        row = pygame.Rect(x, y, width, 32)
+
+        def flip(k=key, d=default, lab=label):
+            new = not bool(app.cfg.get(k, d))
+            app.set_setting(k, new, f"{lab}: {'on' if new else 'off'}")
+        _toggle(surf, app, f, row, label, on, flip, offset)
+        y += 36
+        if desc:
+            for line in wrap(f.small, desc, width - 56)[:3]:
+                text(surf, f.small, line, (x + 56, y), DIM)
+                y += 18
+        y += 12
+        if y > r.bottom - 60:
+            break
+    note = "Exp Share All works in every game. Changes apply right away (also in the middle of your adventure)."
+    yy = r.bottom - 22 - 18 * len(wrap(f.small, note, width))
+    for line in wrap(f.small, note, width):
+        text(surf, f.small, line, (x, yy), DIM)
+        yy += 18
+
+
 def _toggle(surf, app, f, rect, label, on, cb, offset):
     hover = rect.move(offset).collidepoint(pygame.mouse.get_pos())
     sw = pygame.Rect(rect.x, rect.y + 4, 44, 24)

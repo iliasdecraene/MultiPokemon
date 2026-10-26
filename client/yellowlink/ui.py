@@ -73,6 +73,12 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
     pygame.draw.rect(surf, BG, (x0, 0, SIDEBAR_W, h))
     x, y = x0 + 14, 12
     text(surf, f.title, "YellowLink", (x, y), ACCENT)
+    sr = pygame.Rect(x0 + SIDEBAR_W - 14 - 92, y + 2, 92, 28)       # Settings (top right)
+    active = app.panel == "settings"
+    hover = sr.collidepoint(pygame.mouse.get_pos())
+    pygame.draw.rect(surf, ACCENT if active else ((78, 86, 114) if hover else (58, 64, 86)), sr, border_radius=7)
+    text(surf, f.small, "Settings", sr.center, (30, 28, 20) if active else TEXT, anchor="center")
+    app.click_targets.append((sr, lambda: app.toggle_panel("settings"), "Settings"))
     st = app.net.status if app.net else "offline"
     col = {"online": GOOD, "connecting": ACCENT}.get(st, BAD)
     label = st

@@ -160,6 +160,7 @@ class App(ChallengeMixin, TradeMixin):
         self.switch_to = None        # set -> main loop restarts on that server
         self._confirm_remove = None
         self.pc_codec = None
+        self.exp_share = None        # handle of the game's Exp Share All hooks (see _install_exp_share)
         self.pc_trust = False        # True once the game's boxes are known to match our last view
         self.panel = None            # None | "multiplayer" | "regions"
         self.panel_sel = None        # selected uid in the multiplayer panel
@@ -364,6 +365,7 @@ class App(ChallengeMixin, TradeMixin):
                 self.wide = False
                 self._make_window()
         self.last_sram = self._read_sram()
+        self._install_exp_share()
         dev_state = os.environ.get("YL_DEV_LOAD_STATE")
         if dev_state:
             with open(dev_state, "rb") as f:
@@ -399,6 +401,7 @@ class App(ChallengeMixin, TradeMixin):
         log.info("DS game %s started (save %s, %s)", self.game_id, save, "loaded" if self.nds.loaded_save else "none")
         self.game = self.G.PlatinumMemory(self.nds)
         self._start_pt_pc()
+        self._install_exp_share()
         if self.wide:
             self.wide = False
         self.last_sram = self._read_sram()
@@ -2075,6 +2078,8 @@ class App(ChallengeMixin, TradeMixin):
         sub = self.screen.subsurface((0, self.game_y, self.game_w, self.game_h))
         if self.mode == "panel" and self.panel == "multiplayer":
             panels.draw_multiplayer(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
+        elif self.mode == "panel" and self.panel == "settings":
+            panels.draw_settings(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
         elif self.mode == "panel" and self.panel == "servers":
             panels.draw_servers(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
         elif self.mode == "panel" and self.panel == "regions":
@@ -2278,7 +2283,46 @@ class App(ChallengeMixin, TradeMixin):
         except Exception:  # noqa: BLE001 - closing must never fail over this
             log.exception("waiting for the PC upload confirmation failed")
 
+    # Exp Share All (Settings) ----------------------------------------------------------------------------
+    def exp_share_on(self) -> bool:
+        """Asked by the game hooks at every experience award: the modern Exp. Share rule applies now?
+        Never in live or practice battles with friends (those give no lasting experience anyway)."""
+        return bool(self.cfg.get("exp_share_all", True)) and not self.battle and not self.live
+
+    def _install_exp_share(self):
+        """Every adapter can offer install_exp_share(emulator, enabled) (Platinum: platinum_exp). Only on the
+        verified ROMs (it hooks game code)."""
+        if not self.full or self.exp_share is not None:
+            return
+        try:
+            if self.ds:
+                import importlib
+                module = importlib.import_module(".platinum_exp", __package__)
+                emu = self.nds
+            else:
+                module, emu = self.G, self.pyboy
+            install = getattr(module, "install_exp_share", None)
+            if install is not None:
+                self.exp_share = install(emu, self.exp_share_on)
+                log.info("Exp Share All hooks installed for %s (setting %s)", self.game_id,
+                         "on" if self.cfg.get("exp_share_all", True) else "off")
+        except Exception:  # noqa: BLE001 - the game must run without it
+            log.exception("could not install Exp Share All for %s", self.game_id)
+            self.exp_share = None
+
+    def set_setting(self, key, value, message=None):
+        self.cfg[key] = value
+        self.cfg.save()
+        if message:
+            self.toast(message, 3, ui.GOOD if value else ui.DIM)
+
     def shutdown(self):
+        if self.exp_share is not None:
+            try:
+                self.exp_share.remove()
+            except Exception:  # noqa: BLE001
+                log.exception("removing the Exp Share All hooks failed")
+            self.exp_share = None
         try:
             if self.battle:
                 self._restore_battle()

@@ -30,6 +30,7 @@ DEFAULTS = {
     "scale": 4,
     "volume": 60,
     "show_names": True,
+    "exp_share_all": True,      # modern Exp. Share rule in every game (Settings panel)
 }
 
 
