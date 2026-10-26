@@ -23,7 +23,14 @@ from yellowlink import app as appmod, library, nds_core
 
 PT_ROM = os.path.join(STATES, "platinum.nds")
 GB_ROM = os.path.join(STATES, "yellow.gb")
-PORT = 8791
+def _free_port():
+    import socket
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        return so.getsockname()[1]
+
+
+PORT = _free_port()               # other agents/tests may hold fixed ports
 srv = subprocess.Popen([sys.executable, "-m", "yellowlink_server", "--port", str(PORT)],
                        cwd=os.path.join(_REPO, "server"),
                        env=dict(os.environ, YL_KEY="pt", YL_SERVER_NAME="Sinnoh test", YL_DATA_DIR=str(tmp / "srv"),
@@ -227,10 +234,14 @@ check("save path is the server folder's platinum.sav", save == app_dir() / "save
 for k in (pygame.K_DOWN, pygame.K_DOWN, pygame.K_x, pygame.K_x, pygame.K_x):
     key(A, k, 6)
     run([A], 60)
-run([A], 900)
+run([A], 900)          # the first save of a game writes everything: ~1450 DS frames (~24 s) in DeSmuME
 A.render(); pygame.image.save(A.screen, str(tmp / "3_saved.png"))
-key(A, pygame.K_x)
-run([A], 400, lambda: save.exists())
+t_save = A.frame
+written = run([A], 2400, lambda: A.frame % 60 == 0 and save.exists() and save.read_bytes() == A.nds.export_save()
+              and len(set(save.read_bytes())) > 1)
+print(f"  save reached the server folder {A.frame - t_save} frames later", flush=True)
+key(A, pygame.K_x)                       # close "LUCAS saved the game."
+run([A], 60)
 data = save.read_bytes() if save.exists() else b""
 check("in-game save written to the server folder", len(data) == 512 * 1024 and data.count(0xFF) < len(data) - 1000,
       len(data))

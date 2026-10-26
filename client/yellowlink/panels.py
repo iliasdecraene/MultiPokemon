@@ -6,11 +6,36 @@ import math
 import pygame
 
 from . import library
-from .ui import ACCENT, BAD, DIM, GOOD, PANEL, PANEL_HI, TEXT, box, text
+from .ui import ACCENT, BAD, DIM, GOOD, PANEL, PANEL_HI, TEXT, box, text, wrap
 
 BTN = (58, 64, 86)
 BTN_HOVER = (78, 86, 114)
 BTN_OFF = (40, 43, 56)
+
+
+NARROW_W = 600     # panels narrower than this (the DS window, small Game Boy windows) use a compact layout
+
+
+def fit(font, s, width):
+    """s, cut with "..." so it fits in width pixels."""
+    if font.size(s)[0] <= width:
+        return s
+    while s and font.size(s + "...")[0] > width:
+        s = s[:-1]
+    return s.rstrip() + "..." if s else ""
+
+
+def text_wrapped(surf, font, s, pos, width, color=TEXT, line_h=None):
+    """Draw s wrapped to width; returns the y below the last line."""
+    x, y = pos
+    for ln in wrap(font, s, width):
+        text(surf, font, ln, (x, y), color)
+        y += line_h or font.get_height() + 1
+    return y
+
+
+def _panel_w(game_w):
+    return min(game_w - 30, 620)
 
 
 def button(surf, app, f, rect, label, cb, enabled=True, offset=(0, 0), primary=False, tip=""):
@@ -47,22 +72,29 @@ def _panel_frame(surf, app, f, game_w, game_h, title, offset):
 def draw_multiplayer(surf, f, app, game_w, game_h, offset):
     r = _panel_frame(surf, app, f, game_w, game_h, "Multiplayer", offset)
     others = [e for e in app.sorted_roster() if e.get("uid") != app.cfg["uid"]]
+    narrow = r.w < NARROW_W
     # which server (group of friends) you're on + the way to another one
-    sw = 150
+    label = "Servers" if narrow else "Switch server"
+    sw = f.body.size(label)[0] + 28 if narrow else 150
     sb = pygame.Rect(r.right - 52 - sw, r.y + 10, sw, 30)
-    button(surf, app, f, sb, "Switch server", lambda: app.toggle_panel("servers"), offset=offset)
+    button(surf, app, f, sb, label, lambda: app.toggle_panel("servers"), offset=offset)
     name = app.cfg.server_label(app.cfg.active_server)
     tx = r.x + 18 + f.title.size("Multiplayer")[0] + 14
-    while name and tx + f.small.size("on " + name)[0] > sb.x - 10:
-        name = name[:-1]
-    text(surf, f.small, "on " + name, (tx, r.y + 20), DIM)
+    if narrow:
+        if sb.x - 10 - tx >= f.small.size("on ab...")[0]:
+            text(surf, f.small, fit(f.small, "on " + name, sb.x - 10 - tx), (tx, r.y + 20), DIM)
+    else:
+        while name and tx + f.small.size("on " + name)[0] > sb.x - 10:
+            name = name[:-1]
+        text(surf, f.small, "on " + name, (tx, r.y + 20), DIM)
     y = r.y + 56
     if not app.full or getattr(app, "ds", False):
         msg = f"Battles don't work in {app.game_info.title} - trades and gifts do (they use your PC)."
-        if f.small.size(msg)[0] > r.w - 36:
-            msg = "Battles are Yellow-only - trades and gifts work (they use your PC)."
-        text(surf, f.small, msg, (r.x + 18, y), DIM)
-        y += 22
+        if narrow:
+            y = text_wrapped(surf, f.small, msg, (r.x + 18, y), r.w - 36, DIM, 18) + 4
+        else:
+            text(surf, f.small, msg, (r.x + 18, y), DIM)
+            y += 22
     if not others:
         text(surf, f.body, "No other trainers yet - invite your friends!", (r.x + 18, y + 10), DIM)
         return
@@ -79,7 +111,7 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
         hover = row.move(offset).collidepoint(pygame.mouse.get_pos())
         pygame.draw.rect(surf, PANEL_HI if (selected or hover) else PANEL, row, border_radius=8)
         pygame.draw.circle(surf, GOOD if online else (90, 94, 110), (row.x + 16, row.centery), 6)
-        text(surf, f.body, e.get("name", "?"), (row.x + 32, row.y + 9), TEXT if online else DIM)
+        nr = text(surf, f.body, e.get("name", "?"), (row.x + 32, row.y + 9), TEXT if online else DIM)
         lv = e.get("levels") or []
         info = ("online" if online else "offline") + f" · {len(lv)} Pokémon" + (f" · Lv {max(lv)}" if lv else "")
         region = app.player_region(e)
@@ -87,12 +119,18 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
             info = f"in {region} · " + info
         if app.is_nearby(uid):
             info = "nearby · " + info
+        if narrow:
+            room = row.right - 12 - nr.right - 12
+            if f.small.size(info)[0] > room:       # compact: region + team size
+                info = " · ".join(p for p in (("nearby" if app.is_nearby(uid) else region),
+                                              f"{len(lv)} mon" + (f" Lv{max(lv)}" if lv else "")) if p)
+            info = fit(f.small, info, room)
         text(surf, f.small, info, (row.right - 12, row.y + 11), DIM, anchor="topright")
         app.click_targets.append((row.move(offset), lambda u=uid: app.select_player(u), "player:" + e.get("name", "?")))
         y += row_h
         if selected:
             bx = row.x + 24
-            bw = max(60, min(106, (row.w - 24 - 4 * 8 - 14) // 5))     # five buttons fit narrow windows too
+            bw = 106
             same_game = app.friend_game(uid) == app.game_id if online else True
             can_live = online and same_game and app.full and app.hooks is not None and not app.chal
             buttons = [
@@ -106,14 +144,24 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
                  app.full and not app.gen2 and not getattr(app, "ds", False) and same_game and bool(lv) and not app.chal, False,
                  "Practice battles work in Yellow vs a trainer with Pokémon."),
             ]
-            for i, (label, cb, enabled, primary, tip) in enumerate(buttons):
-                button(surf, app, f, pygame.Rect(bx + i * (bw + 8), y, bw, 34), label, cb, enabled=enabled,
-                       offset=offset, primary=primary, tip=tip)
             done = sum(1 for c in app.challenges_with(uid) if c["status"] == "completed")
-            button(surf, app, f, pygame.Rect(bx + 4 * (bw + 8), y, bw + 14, 34),
-                   "Challenges" + (f" ({done})" if done else ""), lambda u=uid: app.open_challenges(u),
-                   offset=offset)
-            y += 44
+            chal = ("Challenges" + (f" ({done})" if done else ""), lambda u=uid: app.open_challenges(u), True, False, "")
+            if narrow:                    # two rows: Battle / Trade / Gift, then Practice / Challenges
+                bx, avail = row.x + 12, row.w - 24
+                for line in (buttons[:3], buttons[3:] + [chal]):
+                    bw = (avail - 8 * (len(line) - 1)) // len(line)
+                    for i, (label, cb, enabled, primary, tip) in enumerate(line):
+                        button(surf, app, f, pygame.Rect(bx + i * (bw + 8), y, bw, 34), label, cb, enabled=enabled,
+                               offset=offset, primary=primary, tip=tip)
+                    y += 40
+                y += 4
+            else:
+                for i, (label, cb, enabled, primary, tip) in enumerate(buttons):
+                    button(surf, app, f, pygame.Rect(bx + i * (bw + 8), y, bw, 34), label, cb, enabled=enabled,
+                           offset=offset, primary=primary, tip=tip)
+                button(surf, app, f, pygame.Rect(bx + 4 * (bw + 8), y, bw + 14, 34), chal[0], chal[1],
+                       offset=offset)
+                y += 44
     foot = "Trade/Gift: Pokémon from your PC, any game  ·  Practice: their team vs the AI"
     if f.small.size(foot)[0] > r.w - 36:
         foot = "Trade/Gift: Pokémon from your PC, any game"
@@ -122,21 +170,26 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
 
 def draw_servers(surf, f, app, game_w, game_h, offset):
     r = _panel_frame(surf, app, f, game_w, game_h, "Servers", offset)
+    narrow = r.w < NARROW_W
     y = r.y + 56
-    text(surf, f.small, "One server per group of friends. Each has its own saves, PC and challenges.",
-         (r.x + 18, y), DIM)
-    y += 28
+    intro = "One server per group of friends. Each has its own saves, PC and challenges."
+    if narrow:
+        y = text_wrapped(surf, f.small, intro, (r.x + 18, y), r.w - 36, DIM, 18) + 10
+    else:
+        text(surf, f.small, intro, (r.x + 18, y), DIM)
+        y += 28
     busy = bool(app.trade or app.battle or app.live or app.chal)
     tip = "Pause your Soul Link first." if app.chal else "Finish your trade or battle first."
     row_h = 58
     for s in app.cfg.servers:
-        if y + row_h > r.bottom - 60:
-            text(surf, f.small, "(more servers - remove one to see the rest)", (r.x + 18, y), DIM)
+        if y + row_h > r.bottom - (98 if narrow else 60):
+            text(surf, f.small, fit(f.small, "(more servers - remove one to see the rest)", r.w - 36), (r.x + 18, y),
+                 DIM)
             break
         here = s["id"] == app.cfg.server_id
         card = pygame.Rect(r.x + 12, y, r.w - 24, row_h - 6)
         box(surf, card, PANEL_HI if here else PANEL, ACCENT if here else PANEL_HI, 8)
-        bw = 84
+        bw = 72 if narrow else 84
         right = card.right - 10
         buttons = []
         if not here:
@@ -166,7 +219,11 @@ def draw_servers(surf, f, app, game_w, game_h, offset):
         y += row_h
     button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 48, 180, 36), "Add a server...", app.server_dialog,
            offset=offset, primary=True)
-    text(surf, f.small, "Your name and game files are shared by all servers.", (r.x + 210, r.bottom - 40), DIM)
+    shared = "Your name and game files are shared by all servers."
+    if narrow:
+        text_wrapped(surf, f.small, shared, (r.x + 18, r.bottom - 88), r.w - 36, DIM, 18)
+    else:
+        text(surf, f.small, shared, (r.x + 210, r.bottom - 40), DIM)
 
 
 def _region_game(app, region_id, installed_here):
@@ -182,8 +239,12 @@ def _region_game(app, region_id, installed_here):
 
 def draw_regions(surf, f, app, game_w, game_h, offset):
     r = _panel_frame(surf, app, f, game_w, game_h, "Regions", offset)
+    narrow = r.w < NARROW_W
     y = r.y + 56
-    text(surf, f.small, "Each region is its own game and keeps its own progress.", (r.x + 18, y), DIM)
+    intro = "Each region is its own game and keeps its own progress."
+    if f.small.size(intro)[0] > r.w - 36:
+        intro = fit(f.small, "Each region keeps its own progress.", r.w - 36)
+    text(surf, f.small, intro, (r.x + 18, y), DIM)
     y += 30
     installed = app.lib.games
     for region_id, region_name, game_ids in library.REGIONS:
@@ -194,11 +255,12 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
             break
         box(surf, card, PANEL_HI if here else PANEL, ACCENT if here else PANEL_HI, 8)
         text(surf, f.title, region_name, (card.x + 14, card.y + 8), ACCENT if here else TEXT)
-        br = pygame.Rect(card.right - 140, card.y + 12, 126, 36)
+        br = pygame.Rect(card.right - 110, card.y + 12, 96, 36) if narrow else \
+            pygame.Rect(card.right - 140, card.y + 12, 126, 36)
         if not have:
             names = [library.GAMES_BY_ID[g].title for g in game_ids]
-            text(surf, f.small, "Add your " + " / ".join(names) + " game file to unlock this region",
-                 (card.x + 14, card.y + 40), DIM)
+            text(surf, f.small, fit(f.small, "Add your " + " / ".join(names) + " game file to unlock this region",
+                                    card.w - 28), (card.x + 14, card.y + 40), DIM)
         else:
             gid = _region_game(app, region_id, have)
             info = library.GAMES_BY_ID[gid]
@@ -206,6 +268,10 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
             if not info.full_support:
                 status += "  (single player: multiplayer needs Crystal v1.0)" if gid == "crystal" else \
                     "  (single player for now)"
+            if narrow:
+                if f.small.size(status)[0] > br.x - card.x - 22:
+                    status = status.replace("Pokémon ", "")
+                status = fit(f.small, status, br.x - card.x - 22)
             text(surf, f.small, status, (card.x + 14, card.y + 40), GOOD if info.full_support else TEXT)
             if here and app.game_id == gid:
                 text(surf, f.small, "you are here", br.center, GOOD, anchor="center")
@@ -282,7 +348,11 @@ def draw_challenges(surf, f, app, game_w, game_h, offset):
     uid = app.chal_view_uid
     e = next((r for r in app.roster if r.get("uid") == uid), {}) or {}
     name = e.get("name", "?")
-    r = _panel_frame(surf, app, f, game_w, game_h, f"Challenges with {name}", offset)
+    narrow = _panel_w(game_w) < NARROW_W
+    title = f"Challenges with {name}"
+    if narrow:
+        title = fit(f.title, title, _panel_w(game_w) - 160)
+    r = _panel_frame(surf, app, f, game_w, game_h, title, offset)
     button(surf, app, f, pygame.Rect(r.right - 120, r.y + 10, 68, 30), "Back",
            lambda: app.toggle_panel("multiplayer"), offset=offset)
     y = r.y + 58
@@ -300,12 +370,13 @@ def draw_challenges(surf, f, app, game_w, game_h, offset):
     if completed > 1:
         text(surf, f.small, f"x{completed}", (card.x + 34, card.y + 60), GOLD, anchor="midtop")
     text(surf, f.title, "Soul Link", (card.x + 66, card.y + 10), TEXT)
-    text(surf, f.small, "A Nuzlocke for two: linked partners live and die together.",
+    room = card.right - 10 - (card.x + 66)        # text width right of the badge
+    text(surf, f.small, fit(f.small, "A Nuzlocke for two: linked partners live and die together.", room),
          (card.x + 66, card.y + 40), DIM)
     online = bool(e.get("online"))
     if active:
         line, color = _status_line(app, active)
-        text(surf, f.small, line, (card.x + 66, card.y + 62), color)
+        text(surf, f.small, fit(f.small, line, room), (card.x + 66, card.y + 62), color)
         if app.chal and app.chal["id"] == active["id"]:
             text(surf, f.small, "You're playing it right now.", (card.x + 66, card.y + 86), GOOD)
         else:
@@ -315,7 +386,8 @@ def draw_challenges(surf, f, app, game_w, game_h, offset):
                    tip=f"{name} needs to be online and free to continue." if not app.chal
                    else "Leave your current challenge first.")
             if getattr(app, "chal_confirm", None) == active["id"]:
-                button(surf, app, f, pygame.Rect(card.x + 206, card.y + 82, 170, 30), "Really abandon?",
+                button(surf, app, f, pygame.Rect(card.x + 206, card.y + 82, min(170, card.right - 8 - card.x - 206), 30),
+                       "Sure?" if narrow else "Really abandon?",
                        lambda c=active: (app.abandon_challenge(c), setattr(app, "chal_confirm", None)),
                        offset=offset)
             else:
@@ -325,7 +397,7 @@ def draw_challenges(surf, f, app, game_w, game_h, offset):
         last = history[0] if history else None
         if last:
             line, color = _status_line(app, last)
-            text(surf, f.small, "Last run: " + line, (card.x + 66, card.y + 62), color)
+            text(surf, f.small, fit(f.small, "Last run: " + line, room), (card.x + 66, card.y + 62), color)
         shared = app.shared_games(uid)
         can = online and not e.get("challenge") and not app.chal and bool(shared)
         tip = ("Leave your current challenge first." if app.chal else f"{name} needs to be online." if not online
@@ -344,7 +416,8 @@ def draw_challenges(surf, f, app, game_w, game_h, offset):
             draw_badge(surf, (r.x + 32, y + 9), "completed" if c["status"] == "completed" else "empty", small=True)
             line, color = _status_line(app, c)
             game = library.GAMES_BY_ID.get(c.get("game"))
-            text(surf, f.small, f"{game.title if game else ''}: {line}", (r.x + 54, y + 1), color)
+            text(surf, f.small, fit(f.small, f"{game.title if game else ''}: {line}", r.right - 18 - (r.x + 54)),
+                 (r.x + 54, y + 1), color)
             y += 26
     text(surf, f.small, "More challenges coming later.", (r.x + 18, r.bottom - 26), DIM)
 
@@ -360,29 +433,43 @@ def _toggle(surf, app, f, rect, label, on, cb, offset):
 
 def _draw_challenge_form(surf, f, app, r, y, offset):
     form = app.chal_form
+    narrow = r.w < NARROW_W
     text(surf, f.title, "New Soul Link", (r.x + 18, y), ACCENT)
     y += 34
-    text(surf, f.small, "You both start a fresh save, separate from your main games.", (r.x + 18, y), DIM)
-    text(surf, f.small, "It only runs while you're both in it - pause and continue together any time.",
-         (r.x + 18, y + 18), DIM)
-    y += 50
+    intro = ["You both start a fresh save, separate from your main games.",
+             "It only runs while you're both in it - pause and continue together any time."]
+    if narrow:
+        for line in intro:
+            y = text_wrapped(surf, f.small, line, (r.x + 18, y), r.w - 36, DIM, 18)
+        y += 14
+    else:
+        text(surf, f.small, intro[0], (r.x + 18, y), DIM)
+        text(surf, f.small, intro[1], (r.x + 18, y + 18), DIM)
+        y += 50
     text(surf, f.body, "Game", (r.x + 18, y + 6), TEXT)
     shared = app.shared_games(form["uid"])
+    gw = (r.right - 18 - (r.x + 90) - 10) // 2 if narrow else 180
     for i, g in enumerate(("yellow", "crystal")):
         info = library.GAMES_BY_ID[g]
-        rect = pygame.Rect(r.x + 100 + i * 190, y, 180, 34)
+        rect = pygame.Rect(r.x + 90 + i * (gw + 10), y, gw, 34) if narrow else \
+            pygame.Rect(r.x + 100 + i * 190, y, 180, 34)
         sel = form["game"] == g
         if sel:
             pygame.draw.rect(surf, ACCENT, rect.inflate(6, 6), 2, border_radius=9)
-        button(surf, app, f, rect, info.title, lambda g=g: form.__setitem__("game", g), enabled=g in shared,
+        button(surf, app, f, rect, info.title.replace("Pokémon ", "") if narrow else info.title,
+               lambda g=g: form.__setitem__("game", g), enabled=g in shared,
                offset=offset, primary=sel, tip="You both need this game added (Crystal: v1.0).")
     y += 54
-    _toggle(surf, app, f, pygame.Rect(r.x + 18, y, 420, 30), "Dupes clause (skip families you already caught)",
+    tw = r.w - 36 if narrow else 420
+    shiny_ok = form["game"] == "crystal"
+    dupes = "Dupes clause (skip families you already caught)"
+    shiny = "Shiny clause (shinies are a free catch)" + ("" if shiny_ok else " - Crystal only")
+    if narrow:
+        dupes, shiny = fit(f.body, dupes, tw - 56), fit(f.body, shiny, tw - 56)
+    _toggle(surf, app, f, pygame.Rect(r.x + 18, y, tw, 30), dupes,
             form["dupes"], lambda: form.__setitem__("dupes", not form["dupes"]), offset)
     y += 40
-    shiny_ok = form["game"] == "crystal"
-    _toggle(surf, app, f, pygame.Rect(r.x + 18, y, 420, 30),
-            "Shiny clause (shinies are a free catch)" + ("" if shiny_ok else " - Crystal only"),
+    _toggle(surf, app, f, pygame.Rect(r.x + 18, y, tw, 30), shiny,
             form["shiny"], lambda: form.__setitem__("shiny", not form["shiny"]), offset)
     y += 52
     rules = ["Only the first wild encounter per area counts (once you have Poké Balls).",
@@ -390,8 +477,11 @@ def _draw_challenge_form(surf, f, app, r, y, offset):
              "PC rule: box one, the partner follows. Blackout = run over for both.",
              "Win: both of you reach the Hall of Fame."]
     for line in rules:
-        text(surf, f.small, "· " + line, (r.x + 18, y), DIM)
-        y += 19
+        if narrow:
+            y = text_wrapped(surf, f.small, "· " + line, (r.x + 18, y), r.w - 36, DIM, 18) + 1
+        else:
+            text(surf, f.small, "· " + line, (r.x + 18, y), DIM)
+            y += 19
     y += 10
     button(surf, app, f, pygame.Rect(r.x + 18, y, 200, 36), f"Invite {form['name']}", app.send_challenge,
            enabled=bool(form.get("game")), offset=offset, primary=True)
@@ -467,6 +557,9 @@ def draw_trade(surf, f, app, game_w, game_h, offset):
     r.center = (game_w // 2, game_h // 2)
     box(surf, r, PANEL, ACCENT, 10)
     app.click_targets.append((r.move(offset), lambda: None, "trade window"))
+    if r.w < NARROW_W:
+        _draw_trade_narrow(surf, f, app, t, r, offset, title)
+        return
     text(surf, f.title, title, (r.x + 18, r.y + 14), ACCENT)
     col_w = (r.w - 48) // 2
     left = pygame.Rect(r.x + 16, r.y + 54, col_w, r.h - 140)
@@ -570,4 +663,125 @@ def draw_trade(surf, f, app, game_w, game_h, offset):
            enabled=t.can_confirm() and not t.me_confirmed, offset=offset, primary=True,
            tip="Pick a Pokémon first." if not t.can_confirm() else "")
     button(surf, app, f, pygame.Rect(r.right - 128, r.bottom - 54, 110, 38), "Cancel", app.cancel_trade,
+           offset=offset)
+
+
+def _trade_rows(surf, f, app, t, area, offset, row_h=34):
+    """'Your PC' list (click to add to / remove from the offer) inside area; returns the rows."""
+    rows = app.trade_entries()
+    per = max(1, area.h // row_h)
+    app.trade_per = per
+    app.trade_scroll = max(0, min(app.trade_scroll, max(0, len(rows) - per)))
+    app.trade_sel = max(app.trade_scroll, min(app.trade_sel, app.trade_scroll + per - 1, len(rows) - 1))
+    y = area.y
+    if not rows:
+        text_wrapped(surf, f.small, "Your PC is empty. Deposit Pokémon in the game's PC first (they're saved "
+                     "within ~30 s).", (area.x, y), area.w, DIM, 18)
+    for i in range(app.trade_scroll, min(len(rows), app.trade_scroll + per)):
+        bi, e = rows[i]
+        rr = pygame.Rect(area.x, y, area.w, row_h - 4)
+        picked = t.offered(e["id"])
+        hover = rr.move(offset).collidepoint(pygame.mouse.get_pos())
+        pygame.draw.rect(surf, ACCENT if picked else (PANEL_HI if (hover or i == app.trade_sel) else PANEL),
+                         rr, border_radius=6)
+        fg = (30, 28, 20) if picked else TEXT
+        check = pygame.Rect(rr.x + 6, rr.y + 7, 16, 16)
+        pygame.draw.rect(surf, fg if picked else DIM, check, 2, border_radius=3)
+        if picked:
+            pygame.draw.lines(surf, fg, False, [(check.x + 3, check.y + 8), (check.x + 7, check.y + 12),
+                                                (check.x + 13, check.y + 3)], 2)
+        text(surf, f.small, fit(f.small, app.entry_label(e), rr.w - 36), (rr.x + 30, rr.y + 2), fg)
+        note = app.entry_note(e)
+        sub = f"Box {bi + 1}" + (f" · from {e.get('origin', '').title()}" if e.get("origin") not in
+                                 (None, "", app.game_id) else "")
+        text(surf, f.small, fit(f.small, sub, rr.w - 36), (rr.x + 30, rr.y + 15),
+             (60, 55, 40) if picked else (note[1] if note else DIM))
+        app.click_targets.append((rr.move(offset), lambda e=e, i=i: (setattr(app, "trade_sel", i),
+                                                                     app.offer_entry(e)), "offer"))
+        y += row_h
+    return rows, per
+
+
+def _draw_trade_narrow(surf, f, app, t, r, offset, title):
+    """The trade/gift window for narrow windows (DS): your PC on top, what changes hands below, buttons at the
+    bottom - one column, long names cut with '...'."""
+    x, w = r.x + 16, r.w - 32
+    text(surf, f.title, fit(f.title, title, w), (x, r.y + 12), ACCENT)
+    bottom_top = r.bottom - 100                 # confirmations + buttons live below this line
+    y = r.y + 48
+    if t.receiving_only:
+        text(surf, f.small, "You're receiving a gift - nothing leaves your PC.", (x, y), DIM)
+        y += 26
+    else:
+        text(surf, f.body, "Your PC", (x, y), TEXT)
+        hint = "click to pick (several OK)"
+        if f.body.size("Your PC")[0] + 12 + f.small.size(hint)[0] < w - 70:
+            text(surf, f.small, hint, (x + f.body.size("Your PC")[0] + 12, y + 4), DIM)
+        list_h = max(34, (bottom_top - (y + 28) - 40) * 55 // 100)
+        list_h -= list_h % 34
+        area = pygame.Rect(x, y + 26, w, list_h)
+        rows, per = _trade_rows(surf, f, app, t, area, offset)
+        if len(rows) > per:
+            button(surf, app, f, pygame.Rect(x + w - 64, y - 2, 30, 24), "^",
+                   lambda: setattr(app, "trade_scroll", max(0, app.trade_scroll - per)), offset=offset)
+            button(surf, app, f, pygame.Rect(x + w - 30, y - 2, 30, 24), "v",
+                   lambda: setattr(app, "trade_scroll", app.trade_scroll + per), offset=offset)
+        y = area.bottom + 4
+        if rows:
+            sel_box = rows[min(app.trade_sel, len(rows) - 1)][0]
+            button(surf, app, f, pygame.Rect(x, y, 130, 28), f"Select box {sel_box + 1}",
+                   lambda b=sel_box: app.select_box(b), offset=offset)
+            button(surf, app, f, pygame.Rect(x + 138, y, 72, 28), "Clear", app.clear_offer,
+                   enabled=bool(t.my_entries), offset=offset)
+            y += 34
+    # what changes hands
+    if t.gift and t.giving:
+        head, shown, empty = f"You're giving ({len(t.my_entries)}):", t.my_entries, "Pick Pokémon above."
+    else:
+        head = f"{t.partner_name} {'is giving you' if t.gift else 'offers'} ({len(t.their_entries)}):"
+        shown, empty = t.their_entries, "Waiting for them to choose..."
+    pygame.draw.line(surf, PANEL_HI, (x, y), (x + w, y))
+    y += 6
+    text(surf, f.body, fit(f.body, head, w), (x, y), TEXT)
+    y += 26
+    mine_line = bool(not t.gift and t.my_entries)
+    limit = bottom_top - (20 if mine_line else 0) - 18
+    if not shown:
+        text(surf, f.small, empty, (x, y), DIM)
+        y += 22
+    for n, e in enumerate(shown):
+        if y + 40 > limit:
+            text(surf, f.small, f"... and {len(shown) - n} more", (x, y), DIM)
+            y += 18
+            break
+        card = pygame.Rect(x, y, w, 38)
+        box(surf, card, PANEL_HI, PANEL_HI, 6)
+        text(surf, f.small, fit(f.small, app.entry_label(e), w - 16), (card.x + 8, card.y + 3), TEXT)
+        note = app.entry_note(e)
+        origin = e.get("origin")
+        sub = note[0] if note else (f"OT {e.get('ot', '?')}" + (f" · from {origin.title()}" if origin else ""))
+        text(surf, f.small, fit(f.small, sub, w - 16), (card.x + 8, card.y + 20), note[1] if note else DIM)
+        y += 42
+    if mine_line:
+        text(surf, f.small, fit(f.small, f"You offer ({len(t.my_entries)}): " + app.mons_text(t.my_entries), w),
+             (x, bottom_top - 38), ACCENT)
+    text(surf, f.small, fit(f.small, "Trade evolutions happen on arrival.", w), (x, bottom_top - 18), DIM)
+
+    # confirmations, then the buttons
+    by = bottom_top + 6
+    me = "You confirmed" if t.me_confirmed else "You haven't confirmed"
+    them = f"{t.partner_name} confirmed" if t.them_confirmed else f"{t.partner_name} hasn't confirmed"
+    text(surf, f.small, fit(f.small, me, w), (x, by), GOOD if t.me_confirmed else DIM)
+    text(surf, f.small, fit(f.small, them, w), (x, by + 18), GOOD if t.them_confirmed else DIM)
+    if t.receiving_only:
+        label = "Accept gift" if len(t.their_entries) <= 1 else f"Accept {len(t.their_entries)}"
+    elif t.gift:
+        label = "Give it" if len(t.my_entries) <= 1 else f"Give {len(t.my_entries)}"
+    else:
+        label = "Confirm trade"
+    cw = min(160, w - 98)
+    button(surf, app, f, pygame.Rect(r.right - 16 - 90 - 8 - cw, r.bottom - 52, cw, 38), label, app.confirm_trade,
+           enabled=t.can_confirm() and not t.me_confirmed, offset=offset, primary=True,
+           tip="Pick a Pokémon first." if not t.can_confirm() else "")
+    button(surf, app, f, pygame.Rect(r.right - 16 - 90, r.bottom - 52, 90, 38), "Cancel", app.cancel_trade,
            offset=offset)

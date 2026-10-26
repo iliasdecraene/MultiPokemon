@@ -129,3 +129,17 @@
   COORDINATOR: please commit client/yellowlink/sinnoh_view.py, client/tests/test_sinnoh_view.py,
   dev/e2e/pt_friends.py, app.py (my hunks), SPEC.md (Platinum state note), dev/platinum/MEMORY_MAP.md.
 - 2026-10-26 04:15 friends agent: (after 18b6cf0) MEMORY_MAP.md camera row: also verified after a CONTINUE boot - one-line change left to commit.
+- 2026-10-26 core (follow-up): platinum_boot.py "in-game save" failure with the real adapter was the TEST, not the app:
+  the first in-game save of a new game ("Saving a lot of data...") writes the 512 KB battery for ~1450 DS frames
+  (~24 s) in DeSmuME; the app only writes platinum.sav once two checks 3 s apart see the same battery (never a
+  half-written save), so it landed ~780 frames after the test stopped waiting. Test now waits until the file equals
+  the game's battery (2400-frame limit) and uses a free port (8791 was taken by another run -> "offline" failures).
+  Real players: the save reaches <server folder>/saves/platinum.sav ~3-6 s after the game finishes saving, and on
+  exit/travel it's always written (forced). No app change needed.
+- 2026-10-26 core: narrow-window layouts (panel width < 600 px = the DS window at 2x/1.5x): Multiplayer (Servers
+  button, wrapped notes, compact player info, buttons in two rows), Servers, Regions, Challenges + Soul Link form,
+  and a one-column trade/gift window (your PC on top, offers below, buttons at the bottom; long names cut with ...).
+  Game Boy window (scale 4): pixel-identical except the Multiplayer button row, which is back to main's 106 px
+  buttons (my earlier tweak had shrunk them). New dev/e2e/platinum_layout.py renders every panel for Yellow x4 and
+  Platinum x2/x1.5 and can --compare two runs. Tests: unit 305 passed; platinum_boot, pt_pctest, servertest,
+  pctrade_e2e ALL PASS.
