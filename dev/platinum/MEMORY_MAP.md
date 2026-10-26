@@ -142,7 +142,7 @@ afterwards). There is no good main-ARM9 "close" function → poll `pc_open()` ea
 
 | what | value | how found / verified |
 |---|---|---|
-| `sActiveCamera` (camera.c) | **0x021C0770** (ARM9 .bss) → Camera | pointer scan for FieldSystem.camera (+0x24); same pointer in pt_town (new game) and pt_pc / pt_starter |
+| `sActiveCamera` (camera.c) | **0x021C0770** (ARM9 .bss) → Camera | pointer scan for FieldSystem.camera (+0x24); = FieldSystem.camera in pt_town, pt_pc (new-game heap) and after CONTINUE from pt_title (camera at 0x0235EBDC instead of 0x0235EBFC) |
 | Camera | +0x00 perspective {sinFovY, cosFovY, aspect, near, far} fx32, +0x14 lookAt {position, target, up}, +0x38 distance, +0x3C angle u16[4], +0x44 projection u8 (0 persp., 1 ortho), +0x46 fovY | Twinleaf: fov 8.09°, distance 666.92, near/far 150/900 = field_camera.c CAMERA_TYPE_DEFAULT; Pokémon Center: projection 1, distance 1563.54 = CAMERA_TYPE_INTERIOR_ORTHOGRAPHIC; lookAt.target = player MapObject pos |
 | billboard anchor | MapObject pos + spriteJumpOffset (+0x7C) + spritePosOffset (+0x88) + spriteTerrainOffset (+0x94) + (0, 0, 6) | ov5_021EDEB4; quad = generic_32x32 model (x −16..16, y 0..32, camera-facing) |
 | projection | MTX_LookAt + G3_Perspective(sin/cos of fovY, 4:3) / G3_Ortho(±tan(fovY)·distance), viewport 256x192 | NPCs moved (RAM) to 12 tiles outdoors / 7 indoors: the NPC's own ROM texture drawn at the projected quad matches the screen with best shift ≤ 1 px (dev/e2e/pt_friends.py); perspective needs a +1 px x / +0.5 px y nudge in DeSmuME |

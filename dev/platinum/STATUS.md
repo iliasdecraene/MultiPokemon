@@ -128,3 +128,4 @@
   battery") - also with my friend code patched out, so it comes from elsewhere (PC-sync work in progress?).
   COORDINATOR: please commit client/yellowlink/sinnoh_view.py, client/tests/test_sinnoh_view.py,
   dev/e2e/pt_friends.py, app.py (my hunks), SPEC.md (Platinum state note), dev/platinum/MEMORY_MAP.md.
+- 2026-10-26 04:15 friends agent: (after 18b6cf0) MEMORY_MAP.md camera row: also verified after a CONTINUE boot - one-line change left to commit.
