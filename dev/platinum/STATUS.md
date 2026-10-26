@@ -143,3 +143,20 @@
   buttons (my earlier tweak had shrunk them). New dev/e2e/platinum_layout.py renders every panel for Yellow x4 and
   Platinum x2/x1.5 and can --compare two runs. Tests: unit 305 passed; platinum_boot, pt_pctest, servertest,
   pctrade_e2e ALL PASS.
+- 2026-10-26 core (review fixes):
+  1. DS start failures: get_emulator() now wraps the desmume import too; NDSCore turns ANY failure (ROM open,
+     save import "refused", ...) into DSUnavailable and leaves the shared emulator paused/closed with no _ACTIVE.
+     App.__init__ closes its AudioOut (and the core) if starting the emulator fails, and converts any Platinum start
+     error into DSUnavailable. _main -> _ds_fallback(): with a Game Boy game -> switch to it (persisted) + red
+     message; Platinum-only -> report window ("Send to host") + settings window to pick another game file; closing
+     it exits cleanly (no crash loop). Tests: client/tests/test_ds_start.py (8: missing package, DLL load error,
+     ROM refused, save refused, hooks, fallback with/without another game, failed App closes sound).
+  2. Hook leak: nds_core gives libdesmume ONE module-level ctypes trampoline per address (created once, never via
+     py-desmume's ever-growing _registered_cbs) that calls the current handler from _HOOK_FN; close() drops it.
+     Test proves the old App is garbage-collected after close and the trampoline is reused. pt_pctest (real PC open
+     hook) ALL PASS. Nothing else in the singleton refers to an App (sound is DeSmuME-internal, no save hooks).
+  3. Yellow at 3x (480x432) uses the compact panels now: checked with dev/e2e/platinum_layout.py (now also renders
+     yellow3_*; fixed the challenge form running off the bottom and the trade window losing the offer list on short
+     windows: Invite/Cancel pinned to the bottom, offers fall back to one line each). Yellow 4x screens identical
+     before/after (harness is now deterministic: network stopped before the screenshots).
+  Tests: unit 313 passed; platinum_boot, servertest, pt_pctest ALL PASS.
