@@ -25,6 +25,9 @@ GAMES = {"yellow": "Pokémon Yellow", "crystal": "Pokémon Crystal", "platinum":
 # 0.7.0) but have no Platinum Soul Link, so they must never be asked into one.
 LEGACY_GAMES = ("yellow", "crystal")
 MAX_DEX = 493                # national dex (Platinum)
+# Optional run rules a client must know to play them (`library.challenge_rules`, clients after 0.7.3). A client that
+# doesn't know `exp_share` would apply its own Exp Share All setting, so a run with it on needs both to know it.
+OPTIONAL_RULES = ("exp_share",)
 REQUEST_TIMEOUT = 60.0
 LOAD_TIMEOUT = 90.0          # both players must load into the challenge within this
 GRACE = 30.0                 # a dropped connection may come back within this
@@ -47,6 +50,17 @@ def can_play(client, game: str) -> bool:
         return games is None or game in games            # unknown (pre-0.5 client): don't block Yellow/Crystal
     chal = getattr(client, "challenge_games", None)
     return chal is not None and game in chal and (games is None or game in games)
+
+
+def knows_rules(client, rules: dict) -> bool:
+    """Whether this client applies every optional rule that is ON in `rules` (off = the old behaviour, fine)."""
+    known = getattr(client, "challenge_rules", None) or []
+    return all(r in known for r in OPTIONAL_RULES if rules.get(r))
+
+
+def _rules_missing(client, me) -> str:
+    who = "You need" if client is me else f"{client.name} needs"
+    return f"{who} a newer YellowLink for Exp Share All in a Soul Link - update (press U) or turn it off"
 
 
 def _missing(client, me, game: str, anymore: bool = False) -> str:
@@ -297,6 +311,8 @@ class ChallengeHub:
             for c in (client, target):
                 if not can_play(c, game):
                     raise ChallengeError(_missing(c, client, game, anymore=True))
+                if not knows_rules(c, rules):
+                    raise ChallengeError(_rules_missing(c, client))
         else:
             kind, game = msg.get("kind"), msg.get("game")
             if kind not in KINDS:
@@ -304,7 +320,8 @@ class ChallengeHub:
             if game not in GAMES:
                 raise ChallengeError("challenges work in Pokémon Yellow, Crystal and Platinum")
             rules_in = msg.get("rules") if isinstance(msg.get("rules"), dict) else {}
-            rules = {"dupes": bool(rules_in.get("dupes", True)), "shiny": bool(rules_in.get("shiny", True))}
+            rules = {"dupes": bool(rules_in.get("dupes", True)), "shiny": bool(rules_in.get("shiny", True)),
+                     "exp_share": bool(rules_in.get("exp_share", False))}
             existing = self.open_between(client.uid, target.uid, kind)
             if existing:
                 raise ChallengeError(f"you already have a {KINDS[kind]} with {target.name} - continue it, "
@@ -312,6 +329,8 @@ class ChallengeHub:
             for c in (client, target):
                 if not can_play(c, game):
                     raise ChallengeError(_missing(c, client, game))
+                if not knows_rules(c, rules):
+                    raise ChallengeError(_rules_missing(c, client))
         req = Request(uuid.uuid4().hex[:12], client.uid, target.uid, kind, game, rules, cid)
         self.requests[req.id] = req
         req.timer = asyncio.get_running_loop().create_task(self._expire(req))

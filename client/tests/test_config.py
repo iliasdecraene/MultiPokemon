@@ -203,3 +203,23 @@ def test_challenge_saves_stay_with_their_server_when_saves_are_shared(home):
     assert c.challenge_dir("old") == legacy
     c.share_save(fly["id"], None)
     assert c.challenge_dir("run1") == own
+
+
+def test_legacy_shared_folder_run_is_found_after_unsharing(home):
+    """0.7.2/0.7.3 put a sharing server's run in the SHARED save's folder; after un-sharing it must still be found."""
+    c = make(home, {"server_url": "ws://1.2.3.4:8765", "room_key": "one", "name": "Ilias", "uid": "u-main",
+                    "current_game": "platinum"})
+    fly = c.add_server("Fly", "ws://1.2.3.4:8766", "two")
+    third = c.add_server("Third", "ws://1.2.3.4:8767", "three")
+    c.share_save(fly["id"], third["id"])
+    c.switch_server(fly["id"])
+    old = home / "servers" / third["id"] / "challenges" / "oldrun"      # where a 0.7.3 client saved it
+    old.mkdir(parents=True)
+    (old / "game.sav").write_bytes(b"x")
+    c.share_save(fly["id"], None)                                         # un-shared afterwards
+    assert c.data_dir == home / "servers" / fly["id"]
+    assert c.challenge_dir("oldrun") == old
+    main_run = home / "challenges" / "mainrun"                            # ...or in the first server's folder
+    main_run.mkdir(parents=True)
+    assert c.challenge_dir("mainrun") == main_run
+    assert c.challenge_dir("newrun") == home / "servers" / fly["id"] / "challenges" / "newrun"

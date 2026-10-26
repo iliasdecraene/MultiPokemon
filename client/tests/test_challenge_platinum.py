@@ -364,3 +364,247 @@ def test_ds_failing_inside_a_challenge_goes_back_to_the_main_game(tmp_path, monk
     appmod._main([], cfg, diag)
     assert starts == [None, {"id": "run1", "game": "platinum"}]
     assert seen == [None] and "active_challenge" not in Config()
+
+
+# --- review fixes: doubles, spills, partner battles, poison, unreadable slots -------------------------------------
+class Ledger:
+    """Both players' SoulLink over one shared ledger; our events come from a Referee on a FakePM."""
+
+    def __init__(self, rules=None):
+        self.sent = []
+        self.sl = SoulLink("me", "you", {"dupes": True, "shiny": True, **(rules or {})})
+        self.seq = 0
+
+    def post(self, ev, p="me"):
+        self.seq += 1
+        ev = {**ev, "p": p, "seq": self.seq}
+        if p == "me":
+            self.sent.append(ev)
+        self.sl.add(ev)
+
+    def referee(self, pm):
+        ref = Referee(self.sl, view_for(pm), lambda ev: self.post(ev), lambda *a: None)
+        ref.fresh_load = False
+        return ref
+
+
+def settle(ref, n=Referee.SAFE_EVERY * 3):
+    for _ in range(n):
+        ref.step()
+
+
+def started(pm, led, ref, starter=mk(387, 0x100)):
+    """Starter as a gift (linked with the partner's), balls in the bag, standing on a route."""
+    pm.map, pm.party = 411, [starter]
+    settle(ref)
+    led.post({"t": "enc", "area": platinum.area_of(411), "dex": 390, "status": "caught", "key": "pstart", "gift": True},
+             p="you")
+    pm.balls, pm.map = True, 0
+    settle(ref)
+    return pk4.mon_key(starter)
+
+
+def battle(ref, pm, info, frames=3):
+    pm.battle = info
+    settle(ref, frames)
+
+
+def end_battle(ref, pm):
+    pm.battle = None
+    settle(ref, Referee.END_FRAMES + 2)
+
+
+def wild2(k1, d1, k2, d2, **kw):
+    return {"kind": "wild", "dex": d1, "shiny": False, "safari": False, "contest": False, "key": k1,
+            "keys": [k1, k2], "dexes": [d1, d2], **kw}
+
+
+def test_double_battle_catch_of_the_second_mon_counts():
+    pm, led = FakePM(), Ledger()
+    ref = led.referee(pm)
+    started(pm, led, ref)
+    route = platinum.area_of(0)
+    first, second = mk(396, 0x201), mk(399, 0x202)
+    battle(ref, pm, wild2(pk4.mon_key(first), 396, pk4.mon_key(second), 399))
+    assert led.sent[-1]["status"] == "open" and led.sent[-1]["area"] == route
+    pm.party.append(second)                          # the player caught the SECOND wild mon
+    end_battle(ref, pm)
+    settle(ref)
+    enc = led.sl.mine()["enc"][route]
+    assert enc["status"] == "caught" and enc["key"] == pk4.mon_key(second) and enc["dex"] == 399
+    assert not [e for e in led.sent if e["t"] == "dead"]                  # not an "extra gift"
+    assert led.sl.usable(pk4.mon_key(second))
+
+
+def test_double_battle_catching_the_dupe_is_a_missed_encounter():
+    pm, led = FakePM(), Ledger()
+    ref = led.referee(pm)
+    started(pm, led, ref, starter=mk(396, 0x100))   # Starly family already caught
+    route = platinum.area_of(0)
+    dupe, other = mk(397, 0x201), mk(399, 0x202)
+    battle(ref, pm, wild2(pk4.mon_key(dupe), 397, pk4.mon_key(other), 399))
+    assert led.sent[-1] == {**led.sent[-1], "status": "open", "dex": 399}      # the encounter = the non-dupe
+    pm.party.append(dupe)
+    end_battle(ref, pm)
+    assert led.sl.mine()["enc"][route]["status"] == "failed"
+    assert led.sl.mine()["dead"].get(pk4.mon_key(dupe)) == "not first encounter"
+
+
+@pytest.mark.parametrize("with_keys", [True, False])
+def test_catch_spilling_into_another_box_is_not_confused_with_an_older_mon(with_keys):
+    """Full party + full current box: the catch lands in the next box, next to an older mon of the same species."""
+    pm, led = FakePM(), Ledger({"dupes": False})
+    ref = led.referee(pm)
+    started(pm, led, ref)
+    pm.party += [mk(16 + i, 0x300 + i) for i in range(5)]
+    pm.box = [mk(10, 0x400 + i, party=False) for i in range(30)]
+    old = mk(399, 0x500, party=False)
+    pm.m.put(1, 0, old)                              # box 2 already holds an older Bidoof
+    for i, r in enumerate(pm.box):
+        pm.m.put(0, i, r)
+    new = mk(399, 0x501, party=False)
+    info = {"kind": "wild", "dex": 399, "shiny": False, "safari": False, "contest": False}
+    if with_keys:
+        info.update(key=pk4.mon_key(new), keys=[pk4.mon_key(new)], dexes=[399])
+    battle(ref, pm, info)
+    pm.m.put(1, 1, new)
+    pm.box = [old, new]                              # box 2 is the current box now
+    end_battle(ref, pm)
+    enc = led.sl.mine()["enc"][platinum.area_of(0)]
+    assert enc["status"] == "caught" and enc["key"] == pk4.mon_key(new)
+
+
+def _partner_battle(result, spare=True):
+    """A partner (tag) battle in which all of the player's mons faint; the battle ends with `result`."""
+    pm, led = FakePM(), Ledger()
+    ref = led.referee(pm)
+    a = started(pm, led, ref)
+    pm.party.append(mk(399, 0x600))
+    b = pk4.mon_key(pm.party[1])
+    led.post({"t": "enc", "area": "test_b", "dex": 399, "status": "caught", "key": b, "gift": True})
+    led.post({"t": "enc", "area": "test_b", "dex": 16, "status": "caught", "key": "pb", "gift": True}, p="you")
+    if spare:
+        c = mk(25, 0x700, party=False)
+        pm.box = [c]
+        pm.m.put(0, 0, c)
+        led.post({"t": "enc", "area": "test_c", "dex": 25, "status": "caught", "key": pk4.mon_key(c), "gift": True})
+        led.post({"t": "enc", "area": "test_c", "dex": 25, "status": "caught", "key": "pc", "gift": True}, p="you")
+    settle(ref)
+    pm.battle = {"kind": "trainer", "dex": 0, "shiny": False, "safari": False, "contest": False, "result": 0}
+    for slot in (0, 1):
+        pm.slot = (slot, 0)
+        settle(ref, 3)
+    pm.battle = dict(pm.battle, result=result)       # the game's verdict, on the battle's last frames
+    settle(ref, 3)
+    pm.slot = None
+    pm.party = [mk(387, 0x100, hp=30), mk(399, 0x600, hp=30)]       # healed after the battle
+    end_battle(ref, pm)
+    return led, ref, a, b
+
+
+def test_partner_battle_all_fainted_but_won_is_no_blackout():
+    led, ref, a, b = _partner_battle(1)                              # BATTLE_RESULT_WIN
+    assert led.sl.status(a) == "dead" and led.sl.status(b) == "dead"  # the deaths count
+    assert not [e for e in led.sent if e["t"] == "blackout"] and not ref.ended
+    settle(ref)                                                      # the run goes on with the spare from the PC
+    assert not [e for e in led.sent if e["t"] == "blackout"]
+
+
+@pytest.mark.parametrize("result", [2, 3])                          # LOSE, DRAW: the game whites out
+def test_lost_battle_is_a_blackout(result):
+    led, ref, a, b = _partner_battle(result)
+    assert [e for e in led.sent if e["t"] == "blackout"] and ref.ended
+
+
+def test_faint_in_battle_kills_both_partners():
+    pm, led = FakePM(), Ledger()
+    ref = led.referee(pm)
+    a = started(pm, led, ref)
+    pm.party.append(mk(399, 0x600))
+    battle(ref, pm, {"kind": "trainer", "dex": 0, "shiny": False, "safari": False, "contest": False}, 2)
+    pm.slot = (0, 21)
+    settle(ref, 2)
+    pm.slot = (0, 0)
+    settle(ref, 1)
+    assert led.sl.status(a) != "dead"                # one frame at 0 HP isn't enough (switch in progress)
+    settle(ref, 1)
+    assert led.sl.mine()["dead"].get(a) == "fainted"
+    theirs = SoulLink("you", "me", None, led.sl.ledger)
+    assert {"t": "dead", "key": "pstart", "why": "partner fainted"} in theirs.needed_deaths()
+
+
+def test_platinum_field_poison_leaves_one_hp():
+    """pret Pokemon_DoPoisonDamage: HP never drops below 1 outside battle (then the poison is cured) - checked on
+    the ROM too (dev/e2e/soullink_platinum.py). A poisoned mon at 1 HP is alive."""
+    pm, led = FakePM(), Ledger()
+    ref = led.referee(pm)
+    a = started(pm, led, ref)
+    pm.party = [mk(387, 0x100, hp=1)]
+    settle(ref)
+    assert led.sl.usable(a) and not [e for e in led.sent if e["t"] in ("dead", "blackout")]
+
+
+def test_unreadable_day_care_skips_the_full_scan():
+    pm = FakePM()
+    pm.party = [mk(387, 1)]
+    v = view_for(pm)
+    assert v.all_keys() is not None
+    pm.daycare = None                               # platinum.daycare_records(): a slot can't be read right now
+    assert v.all_keys() is None
+
+
+def test_a_bad_egg_is_logged_once(caplog):
+    pm = FakePM()
+    pm.party = [mk(387, 1)]
+    bad = bytearray(mk(16, 5, party=False))
+    bad[50] ^= 1
+    pm.m.put(2, 7, bytes(bad))
+    v = view_for(pm)
+    with caplog.at_level("WARNING", logger="yellowlink.challenge"):
+        for _ in range(6):
+            assert v.all_keys() is None
+    hits = [r for r in caplog.records if "box 3 slot 8" in r.getMessage()]
+    assert len(hits) == 1
+
+
+def test_battle_result_read_from_the_battle_data():
+    pm = FakePM()
+    pm.battle = {"kind": "wild", "dex": 399}
+    pm.battle_dto = lambda: 0x3000
+    pm.r32 = lambda a: 5 if a == 0x3000 + 0x14 else 0
+    assert view_for(pm).battle()["result"] == 5
+
+
+def test_forced_move_without_rom_data_is_logged_once(caplog):
+    pm = FakePM()
+
+    def boom(_i):
+        raise RuntimeError("move_party_to_box needs PlatinumMemory(bus, rom)")
+    pm.move_party_to_box = pm.move_box_to_party = boom
+    v = view_for(pm)
+    with caplog.at_level("ERROR", logger="yellowlink.challenge"):
+        assert not v.to_box(0) and not v.to_box(1) and not v.to_party(0)
+    assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 1
+
+
+def test_game_tip_blames_an_old_server_or_an_old_client():
+    from yellowlink import panels
+    app = FakeApp(["platinum"], [])
+    app.challenge_games = lambda: ["platinum"]
+    form = {"uid": "x", "name": "Alex"}
+    app.roster = [{"uid": "x", "games": ["platinum"]}]                          # no challenge_games at all
+    assert "server needs updating" in panels._game_tip(app, form, "platinum")
+    app.roster = [{"uid": "x", "games": ["platinum"], "challenge_games": None}]   # new server, old client
+    assert "Alex needs to update" in panels._game_tip(app, form, "platinum")
+
+
+def test_waiting_for_the_partner_keeps_ds_sound_paused():
+    from yellowlink import app as appmod
+    calls = []
+    fake = types.SimpleNamespace(nds=types.SimpleNamespace(closed=False, pause_audio=calls.append),
+                                 _ds_chal_paused=True)
+    appmod.App._pause_ds_audio(fake, False)           # e.g. after the F3 window / a file picker
+    assert calls == []
+    fake._ds_chal_paused = False
+    appmod.App._pause_ds_audio(fake, False)
+    assert calls == [False]

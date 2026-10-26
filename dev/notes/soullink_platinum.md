@@ -42,10 +42,13 @@ Everything is heap-allocated, so all of it is reached through pointers (see dev/
 * dict: `kind, dex` (national dex = Gen-4 species id), `shiny` (Gen-4 rule with the wild mon's own OT ids — the game
   gives wild mons the player's TID/SID), `safari` (Great Marsh), `contest` False, `level`; extras `battle_type`,
   `pid`, `key` (the mon_key the mon has once caught — verified equal on a real catch), `map` (DTO mapHeaderID),
-  `others` (species of the other wild mon(s) of a double).
+  `others` (species of the other wild mon(s) of a double), `keys` / `dexes` (lists for ALL wild mons of the
+  battle, first = `key` / `dex`; verified against battlers 1 and 3 of the real double with Cheryl; a trainer
+  battle lists only its first mon).
+* If a wild mon's DTO record is unreadable on some frame (being worked on), battle_info() returns None for that
+  frame instead of reporting the next mon (never seen: the DTO copies are only touched while the battle starts).
 * **Wild doubles (partner)**: `dex` = the first wild mon (battler 1); `others` = [battler 3]. The player can catch
-  the second one instead → the referee's "caught mon has the encounter's dex" match fails for it; match on `key`
-  or `others` if that matters.
+  the second one instead → match the catch on `keys` (a caught mon keeps its key).
 * Trainer battles: `dex` = the trainer's first mon (DTO party), not the one currently out.
 * Catching tutorial (Dawn, Route 202, real): kind special, dex BIDOOF, battle_party_slot() None on every frame.
 * The first rival battle (Barry, Route 201) is a TRAINER battle with BATTLE_STATUS_FIRST_BATTLE (pret).
@@ -120,7 +123,19 @@ an empty pocket → True.
   game leaves heap garbage there (seen 0x157, 0x12B, 0x36/0x9C); `pk4.to_party` writes 0. The game never reads them
   (mail type NONE). The game's own WITHDRAW takes back a mon we deposited.
 * Both need `PlatinumMemory(bus, rom)` / `pm.rom = ndsrom.PlatinumData` (move PP, base stats, growth) — the app sets
-  `game.rom = plat_data`. Call only while `is_safe()`; Gen-4 withdrawing heals (dead mons must be tracked by key).
+  `game.rom = plat_data`.
+* **Cross-frame stability:** `party_checked()`'s "two reads agree" happens inside one paused DS frame, so it can't
+  see an operation the game is still in the middle of. `observe_stable()` records (party via party_checked, current
+  box id, the current box's 30 raw slots) with the emulator's frame counter (`NDSCore.frame_count` / `ds.DS.frame`)
+  and returns True when it equals the observation from an EARLIER frame. Both forced moves call it first and return
+  False ("try again later", nothing written) unless the state was already seen identical on an earlier frame — by a
+  previous `observe_stable()` (the referee's view should call it in its safe() check) or a previous attempt of the
+  move. Real game: an unobserved first attempt and a second one on the same frame write nothing; the move then went
+  through on a later frame (with a 6-mon party whose lead is decrypted in place on about half the frames).
+* Stats use the mon's **form** (`pk4.calc_stats` → `PlatinumData.form_base_stats`; pret Pokemon_GetFormNarcIndex:
+  Deoxys forms 1-3 → personal 496-498, Wormadam 1-2 → 499-500, Giratina Origin → 501, Shaymin Sky → 502, Rotom 1-5 →
+  503-507; values checked against the ROM's personal NARC, which has 508 entries). Before, a withdrawn Rotom
+  appliance / Giratina-O / Deoxys form got its base form's stats. Call only while `is_safe()`; Gen-4 withdrawing heals (dead mons must be tracked by key).
 * **Mid-frame decryption (important):** in the overworld the game decrypts the lead of a 6-mon party in place
   on ~half of the frames (60/120 measured), sometimes **only the 100-byte party section** — the box checksum is
   still valid then, so a checksum check alone reads garbage HP/level. `party_checked()` now also requires every
@@ -130,7 +145,9 @@ an empty pocket → True.
 
 ## Day Care (Solaceon)
 
-`daycare_records()`: [slot 1, slot 2] box records (only non-empty slots). Real, via the warp trick into map 437 and the
+`daycare_records()`: [slot 1, slot 2] box records (only non-empty slots); **None** if a slot reads "bad"
+(being decrypted right now, or corrupt) — "unknown, skip this scan", never a silently shorter list (unit-tested;
+the game only touches the slots when it adds step exp). Real, via the warp trick into map 437 and the
 Day-Care Lady: both deposits read back in order, each byte-identical to the party record's first 136 bytes
 (BoxPokemon_FromPokemon; no PP restore) with the same key. Taking the first one back (after 4 steps: exp 57 → 61)
 gives the same key in the party and the other mon moves to slot 1 (Daycare_ShiftMonSlots). Day Care mons may hold
@@ -143,11 +160,17 @@ decrypted in place (it can't fix a record caught half re-encrypted: use records 
 current_box_records() / daycare_records()). Verified stable: catch (= battle_info key), PC deposit/withdraw (game
 and ours), Day Care in/out, a real level-up evolution TURTWIG → GROTLE (Lv 18), every clean overworld frame.
 Hatching keeps PID and OT ID (pret Egg_CreateHatchedMonInternal; only a shiny Manaphy egg from Pokémon Ranger gets a
-new PID). Gifts get the player's TID/SID (Bebe's EEVEE, real). Collisions need equal 32-bit PIDs among the player's
+new PID) — verified on a real hatch (below). Gifts get the player's TID/SID (Bebe's EEVEE, real). Collisions need equal 32-bit PIDs among the player's
 own mons: negligible. `mon_info(rec)` (Platinum extra) = {key, dex, hp (party; −1 box), egg, nick, level} or None
 (empty/unreadable).
 
 ## Gift Pokémon / eggs
+
+**Eggs, real:** the Day Care man's egg (RAM: Daycare.offspringPersonality = 0x12345678 at body+0x1654+0x1D8 = "egg
+waiting"; talking to him runs the game's egg creation) is a level-1 party record with HP 12/12 → it passes
+`party_section_ok()`, `party_checked()` is clean on ~half the frames as usual (the lead's in-place decryption),
+`mon_info()['egg']` True, key = 12345678 + the player's TID/SID. Hatch (RAM: the egg's cycles 0, Day Care step
+counter 254 at +0x1DC): the game's hatch scene runs on the next step; the hatched BIDOOF has the same key.
 
 Real gift (warp trick into Bebe's house, Hearthome, map 115, from a 5-mon party): EEVEE Lv20 appears in the party
 during the script, `battle_info()` is None throughout, the player stands in area `hearthome_city`, key final at once.
@@ -170,7 +193,9 @@ Corner, Veilstone Store → Veilstone City; Sunyshore Market, Vista Lighthouse �
 Floaroma Town; Pokémon Day Care → Solaceon Town; Pokémon Mansion → Route 212; Footstep House + Grand Lake hotel →
 Route 213; Café → Route 210; Restaurant + Grand Lake houses → Valor Lakefront; Villa → Resort Area; Battleground →
 Survival Area), the **Lost Tower** separate from Route 209 (own wild Pokémon, like Crystal's Team Rocket Base), and
-each "Mystery Zone" map (Underground, Union Room, Colosseums, unused maps) its own area. 131 areas. Names not in the
+each "Mystery Zone" map (Underground, Union Room, Colosseums, unused maps) its own area. 131 areas. Keys are at most
+37 characters (the server accepts `^[A-Za-z0-9_*-]{1,40}$` and the referee appends `*n` for shiny-clause catches;
+the generator refuses longer keys — map 352 is `unused_eterna_gate_route_206`). Names not in the
 ROM (Lost Tower, Underground, …) are written in the generator. `location_of(map)` keeps the plain label.
 `area_name()` strips the shiny-clause `*n` suffix.
 
@@ -185,7 +210,7 @@ RAM writes used to save time (all harmless, listed in the script): pt_pc's dupli
 Balls in the pocket; FLAG_RECEIVED_PARCEL (the tutorial needs it); battle HP 1 for faint tests; FLAG_HAS_PARTNER +
 partner = Cheryl; safari flag + 30 Safari Balls; lead's exp 1 short of Lv 18; party/box copied from pt_sl_party6 into
 pt_pc; Mail / HP 0 / full boxes for the refusal checks; player teleported next to Lass Natalie inside the loaded
-Route 202 (MapObject x/z/pos); the **warp trick** — the current map's warp events (FieldSystem+0x14 MapHeaderData:
+Route 202 (MapObject x/z/pos); Day Care egg/hatch counters (see Eggs); the **warp trick** — the current map's warp events (FieldSystem+0x14 MapHeaderData:
 numWarps +8, warps +0x18, 12 bytes {x, z, destHeaderID, destWarpID}) pointed at the Day Care (437), Bebe's house (115)
 or the Hall of Fame (187), then the player walks out of the Pokémon Center door: the game's own warp code loads the
 target map with its scripts.
@@ -195,4 +220,4 @@ target map with its scripts.
 Link, Battle Tower/Frontier, Pal Park, debug and partner-trainer (TRAINER+AI) battles: classification by their bits
 only (pret encounter.c / ov104 build those DTOs). Roamers, fishing, honey trees, legendaries: same DTO path as
 grass (BATTLE_TYPE_WILD_MON / ROAMER). A real Great Marsh visit (the safari test used the real safari battle code on
-Route 202). Overworld poison faints (see Blackout). Eggs in the party (egg flag / hatch: pret only). Girl player.
+Route 202). Overworld poison faints (see Blackout). A "bad" Day Care slot (unit-tested only). Girl player.

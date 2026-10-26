@@ -438,7 +438,7 @@ players in the same challenge are drawn.
 ### Record (server, `data/challenges.json`)
 ```
 {"id", "kind": "soul_link", "game": "yellow"|"crystal"|"platinum", "players": [uidA, uidB], "names": {uid: name},
- "rules": {"dupes": bool, "shiny": bool}, "status": "active"|"completed"|"failed"|"abandoned",
+ "rules": {"dupes": bool, "shiny": bool, "exp_share": bool}, "status": "active"|"completed"|"failed"|"abandoned",
  "created", "updated", "ended", "reason": str, "progress": {uid: {"badges": int, "hof": bool}},
  "ledger": [event, ...]}
 ```
@@ -448,7 +448,7 @@ Summaries (`ledger` omitted, plus `"online": [uid...]` = players currently in th
 ### Messages
 | client → server | fields | notes |
 |---|---|---|
-| `library` | `games` list[str], `challenge_games` list[str] (optional) | games the player has installed with the verified ROM (sent on connect); shown in roster as `games`. `challenge_games` (clients after 0.7.2) = the games this client can run a challenge in; shown in the roster as `challenge_games` (null = offline or older client) |
+| `library` | `games` list[str], `challenge_games` list[str] (optional), `challenge_rules` list[str] (optional) | games the player has installed with the verified ROM (sent on connect); shown in roster as `games`. `challenge_games` (clients after 0.7.2) = the games this client can run a challenge in; `challenge_rules` (clients after 0.7.3) = optional run rules it knows, today `["exp_share"]`. Both shown in the roster under the same names (null = offline or older client) |
 | `challenge_request` | `to`, `kind`, `game`, `rules` — or `to`, `challenge_id` to continue | target must be online and free |
 | `challenge_respond` | `request_id`, `accept` bool | |
 | `challenge_join` | `challenge_id` | sent after loading into the challenge game (and after every reconnect while in it) |
@@ -469,6 +469,14 @@ Summaries (`ledger` omitted, plus `"online": [uid...]` = players currently in th
 | `challenge_event` | `challenge_id`, `event` (with `seq`, `p` = uid, `ts`) |
 | `challenge_list` | `challenges` list[summary] (after `hello`) |
 | `challenge_update` | `challenge` (summary) — any status/progress change |
+
+Rules: `dupes` (default on), `shiny` (default on; not used in Yellow), `exp_share` (Exp Share All for BOTH players
+of the run, default off; set when the run is created and never changed). A run whose record has no `exp_share`
+(created before it existed) = off: the original games' rule. In a run the client applies the run's `exp_share`, not
+the player's own Settings toggle (the main game keeps that). A client that doesn't know the rule would apply its own
+setting, so the server refuses a request with `exp_share` on unless BOTH players listed `exp_share` in
+`challenge_rules` ("X needs a newer YellowLink for Exp Share All in a Soul Link - update (U) or turn it off"); the
+same check runs when such a run is continued. Off works with every client.
 
 Which games (server, `challenges.can_play`): Yellow/Crystal need the game in `games` (unknown `games` = allowed,
 as before). Platinum also needs it in `challenge_games`: 0.7.0-0.7.2 clients list `platinum` in `games` but have no

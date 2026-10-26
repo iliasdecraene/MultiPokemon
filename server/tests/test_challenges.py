@@ -37,7 +37,7 @@ async def test_request_accept_creates_record(server, connect_client):
     b = await connect_client("Alex")
     c = await start_challenge(a, b, rules={"dupes": False})
     assert c["players"] == [a.uid, b.uid] and c["status"] == "active" and c["game"] == "yellow"
-    assert c["rules"] == {"dupes": False, "shiny": True}
+    assert c["rules"] == {"dupes": False, "shiny": True, "exp_share": False}
     assert c["names"] == {a.uid: "Ilias", b.uid: "Alex"}
     # it's in both players' lists when they reconnect
     await a.close()
@@ -350,3 +350,79 @@ async def test_continue_platinum_after_partner_downgraded(server, connect_client
     await a.send(type="challenge_request", to=b2.uid, challenge_id=c["id"])
     assert "Alex needs a newer YellowLink" in (await a.expect("error"))["message"]
     await b2.expect_none("challenge_request")
+
+
+# --- Exp Share All as a run rule (clients after 0.7.3 list it in `library.challenge_rules`) ----------------------
+RULES_LIB = dict(type="library", games=["yellow"], challenge_games=["yellow"], challenge_rules=["exp_share"])
+
+
+async def test_exp_share_rule_is_stored_and_sent_to_both(server, connect_client):
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    for c in (a, b):
+        await c.send(**RULES_LIB)
+    await asyncio.sleep(0.1)
+    assert next(e for e in server.roster() if e["uid"] == b.uid)["challenge_rules"] == ["exp_share"]
+    await a.send(type="challenge_request", to=b.uid, kind="soul_link", game="yellow",
+                 rules={"dupes": True, "shiny": False, "exp_share": True})
+    req = await b.expect("challenge_request")
+    assert req["rules"] == {"dupes": True, "shiny": False, "exp_share": True}
+    await b.send(type="challenge_respond", request_id=req["request_id"], accept=True)
+    ga, gb = await a.expect("challenge_go"), await b.expect("challenge_go")
+    assert ga["challenge"]["rules"]["exp_share"] is True and gb["challenge"]["rules"]["exp_share"] is True
+    cid = ga["challenge"]["id"]
+    assert server.challenges.records[cid]["rules"]["exp_share"] is True
+    # default (not sent) = off
+    await join_both(a, b, cid)
+    await a.send(type="challenge_abandon", challenge_id=cid)
+    await asyncio.sleep(0.1)
+    c2 = await start_challenge(a, b, rules={"dupes": True})
+    assert c2["rules"]["exp_share"] is False
+
+
+async def test_exp_share_on_needs_both_clients_to_know_it(server, connect_client):
+    a = await connect_client("Ilias")
+    old = await connect_client("Alex")
+    await a.send(**RULES_LIB)
+    await old.send(type="library", games=["yellow"], challenge_games=["yellow"])      # a 0.7.3 client
+    await asyncio.sleep(0.1)
+    await a.send(type="challenge_request", to=old.uid, kind="soul_link", game="yellow", rules={"exp_share": True})
+    err = (await a.expect("error"))["message"]
+    assert "Alex needs a newer YellowLink for Exp Share All" in err and "turn it off" in err
+    await old.expect_none("challenge_request")
+    await old.send(type="challenge_request", to=a.uid, kind="soul_link", game="yellow", rules={"exp_share": True})
+    assert "You need a newer YellowLink" in (await old.expect("error"))["message"]
+    # off works with everyone
+    c = await start_challenge(a, old, rules={"exp_share": False})
+    assert c["rules"]["exp_share"] is False
+
+
+async def test_continue_exp_share_run_after_partner_downgraded(server, connect_client):
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    for c in (a, b):
+        await c.send(**RULES_LIB)
+    await asyncio.sleep(0.1)
+    c = await start_challenge(a, b, rules={"exp_share": True})
+    await join_both(a, b, c["id"])
+    await b.send(type="challenge_leave", challenge_id=c["id"], reason="paused")
+    await a.expect("challenge_partner_left")
+    await b.close()
+    b2 = await connect_client("Alex", uid=b.uid)
+    await b2.send(type="library", games=["yellow"], challenge_games=["yellow"])
+    await asyncio.sleep(0.1)
+    await a.send(type="challenge_request", to=b2.uid, challenge_id=c["id"])
+    assert "Exp Share All" in (await a.expect("error"))["message"]
+
+
+async def test_legacy_record_without_exp_share_continues(server, connect_client):
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    c = await start_challenge(a, b)
+    rec = server.challenges.records[c["id"]]
+    rec["rules"].pop("exp_share", None)              # a run created before the rule existed
+    await join_both(a, b, c["id"])
+    await a.send(type="challenge_leave", challenge_id=c["id"], reason="paused")
+    await b.expect("challenge_partner_left")
+    c2 = await start_challenge(b, a, cid=c["id"])
+    assert "exp_share" not in c2["rules"]            # = off for the clients

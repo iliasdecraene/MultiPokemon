@@ -166,6 +166,7 @@ class Client:
     challenge_id: str | None = None   # set while in (or loading into) a challenge session
     games: list | None = None         # installed games (from `library`), None = unknown (old client)
     challenge_games: list | None = None   # games it can run a challenge in (`library`, after 0.7.2); None = old
+    challenge_rules: list | None = None   # optional run rules it knows (`library`, after 0.7.3), e.g. ["exp_share"]
     last_report: float = 0.0
     _rate_window: float = 0.0
     _rate_count: int = 0
@@ -320,6 +321,7 @@ class YellowLinkServer:
                 "challenge": self._challenge_kind(self.clients[uid]) if online else None,
                 # games they can run a challenge in right now (None: offline, or a client from 0.7.2 or older)
                 "challenge_games": self.clients[uid].challenge_games if online else None,
+                "challenge_rules": self.clients[uid].challenge_rules if online else None,
                 "online": online,
                 "party_size": len(species),
                 "levels": levels,
@@ -1191,6 +1193,13 @@ class YellowLinkServer:
         changed = cg is not None and sorted(set(cg)) != client.challenge_games
         if cg is not None:
             client.challenge_games = sorted(set(cg))
+        cr = msg.get("challenge_rules")                   # optional (clients after 0.7.3)
+        if cr is not None and (not isinstance(cr, list) or len(cr) > 8 or not all(
+                isinstance(g, str) and re.fullmatch(r"[a-z0-9_]{1,16}", g) for g in cr)):
+            raise Invalid("challenge_rules must be a list of rule names")
+        if cr is not None and sorted(set(cr)) != client.challenge_rules:
+            client.challenge_rules = sorted(set(cr))
+            changed = True
         if self.store.set_games(client.uid, client.games) or changed:
             await self.broadcast_roster()
 
