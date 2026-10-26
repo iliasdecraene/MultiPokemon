@@ -213,6 +213,13 @@ def draw_servers(surf, f, app, game_w, game_h, offset):
             st = app.net.status
             sub += " · " + {"online": "connected"}.get(st, st) + \
                 (f" ({app.net.status_detail})" if st != "online" and app.net.status_detail else "")
+        owner = app.cfg.save_owner(s)
+        if owner is not None:
+            sub += " · save of " + app.cfg.server_label(owner)
+        elif s.get("save_dir"):
+            sub += " · shared save"
+        elif any(o.get("save_dir") == s["id"] for o in app.cfg.servers):
+            sub += " · save shared"
         while sub and f.small.size(sub)[0] > maxw:
             sub = sub[:-1]
         text(surf, f.small, sub, (card.x + 14, card.y + 29), GOOD if here and app.net.status == "online" else DIM)

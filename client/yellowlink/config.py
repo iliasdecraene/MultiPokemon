@@ -182,7 +182,8 @@ class Config(dict):
         return twin
 
     def remove_server(self, sid: str):
-        """Forget a server (not the one you're on). Its saves stay on disk (servers/<id>/)."""
+        """Forget a server (not the one you're on). Its saves stay on disk (servers/<id>/) - also for other
+        servers that share them (they point to the folder, not to the entry)."""
         if sid == self.server_id or len(self["servers"]) < 2:
             raise ValueError("You can't remove the server you're playing on.")
         self["servers"] = [s for s in self["servers"] if s["id"] != sid]
@@ -207,19 +208,63 @@ class Config(dict):
         self.pop("active_challenge", None)
         self.save()
 
+    # --- one save on several servers ------------------------------------------------------------------------
+    @staticmethod
+    def save_folder(s: dict) -> str:
+        """Which folder an entry's saves live in: its own, or another server's when it shares that save."""
+        return s.get("save_dir") or s["id"]
+
+    def save_owner(self, s: dict) -> dict | None:
+        """The entry whose save this one uses (None = its own save)."""
+        if not s.get("save_dir"):
+            return None
+        return next((o for o in self["servers"] if o["id"] == s["save_dir"]), None)
+
+    def share_save(self, sid: str, origin: str | None):
+        """Let server `sid` use the saves + PC of server `origin` (None = back to its own saves).
+        The player keeps their own identity (uid) on each server; only the folder and the PC store are shared."""
+        s = self.server(sid)
+        if s is None:
+            raise ValueError("That server is gone.")
+        if origin in (None, "", sid):
+            for k in ("save_dir", "save_uid"):
+                s.pop(k, None)
+        else:
+            o = self.server(origin)
+            if o is None:
+                raise ValueError("That server is gone.")
+            if o.get("save_dir"):
+                o = self.server(o["save_dir"]) or o            # no chains: share with the save's real owner
+            if o["id"] == sid:
+                for k in ("save_dir", "save_uid"):
+                    s.pop(k, None)
+            else:
+                if any(x.get("save_dir") == sid for x in self["servers"]):
+                    raise ValueError("Other servers use this server's save - change those first.")
+                self._sync_active()
+                s["save_dir"], s["save_uid"] = o["id"], o.get("uid") or self["uid"]
+        self.save()
+
     @property
     def data_dir(self) -> Path:
-        """This server's folder. The first server uses the app folder itself (where everything lived before)."""
-        sid = self.server_id
-        if sid == MAIN_SERVER:
+        """This server's folder (or the folder of the server whose save it shares). The first server uses the app
+        folder itself (where everything lived before)."""
+        folder = self.save_folder(self.active_server)
+        if folder == MAIN_SERVER:
             return app_dir()
-        d = app_dir() / "servers" / "".join(ch for ch in sid if ch.isalnum())[:20]
+        d = app_dir() / "servers" / "".join(ch for ch in folder if ch.isalnum())[:20]
         (d / "saves").mkdir(parents=True, exist_ok=True)
         return d
 
     @property
     def pc_path(self) -> Path:
-        return self.data_dir / "pc" / f"{self['uid']}.json"
+        """The PC store file. A shared save uses the owner's store (named after the owner's player id)."""
+        return self.data_dir / "pc" / f"{self.active_server.get('save_uid') or self['uid']}.json"
+
+    @property
+    def pc_keys(self) -> tuple:
+        """(this server's key, the store's home server key) for PCSync (per-server sync state)."""
+        return self.server_id, self.save_folder(self.active_server)
 
     def save(self):
         self._sync_active()

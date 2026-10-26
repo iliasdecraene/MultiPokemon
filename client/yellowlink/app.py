@@ -154,7 +154,9 @@ class App(ChallengeMixin, TradeMixin):
         self.save_tag = f"challenge-{cfg.challenge['id']}" if cfg.challenge else self.game_id
         self.game_info = self.lib.info(self.game_id)
         self.travel_to = None
-        self.pcsync = pcdb.PCSync(cfg.pc_path)       # per server (each group of friends has its own)
+        # per server (each group of friends has its own) - or shared by servers that share one save (SPEC.md 8)
+        self.pcsync = pcdb.PCSync(cfg.pc_path, *cfg.pc_keys)
+        self.pc_ready = not cfg.save_owner(cfg.active_server)   # shared save: no trades until synced here
         self.switch_to = None        # set -> main loop restarts on that server
         self._confirm_remove = None
         self.pc_codec = None
@@ -600,9 +602,11 @@ class App(ChallengeMixin, TradeMixin):
 
     def on_connected(self, msg):
         log.info("connected to %s", self.cfg["server_url"])
+        if self.cfg.save_owner(self.cfg.active_server):
+            self.pc_ready = False          # shared save: trade only once this server has our current PC
         if not self.chal:
             self.net.send({"type": "pc_get"})
-            for tid in list(self.pcsync.locks):
+            for tid in self.pcsync.locks_here():
                 self.net.send({"type": "trade_status", "trade_id": tid})
         self.chal_on_connected()
         self.last_state_sent = None
@@ -1267,6 +1271,7 @@ class App(ChallengeMixin, TradeMixin):
 
     def on_pc_saved(self, msg):
         self.pcsync.saved(msg.get("srv_rev", 0))
+        self.pc_ready = True
         log.info("PC store saved on the server (srv_rev %s)", msg.get("srv_rev"))
 
     # chat / view --------------------------------------------------------------
@@ -1409,14 +1414,32 @@ class App(ChallengeMixin, TradeMixin):
                 return str(e)
             return None
         check.added = None
+        cfg = self.cfg
+        saves = [(None, "Its own save (a separate game)")] + [
+            (o["id"], f"Same save as {cfg.server_label(o)}"[:40]) for o in cfg.servers
+            if o is not entry and not o.get("save_dir")]
+        current = (entry or {}).get("save_dir")
         try:
-            res = server_form(entry, check)
+            res = server_form(entry, check, saves, current)
         except Exception:  # noqa: BLE001
             log.exception("server window failed")
             self.toast("Couldn't open the server window.", 4, ui.BAD)
             return
         if not res:
             return
+        choice = res.get("save")
+        target = check.added["id"] if check.added is not None else sid
+        if choice != current:
+            if target == cfg.server_id:
+                # the running game writes into the current folder until it closes: switch saves after that
+                self.pending_share = (target, choice)
+                self._restart_on(target, "Switching saves...")
+                return
+            try:
+                cfg.share_save(target, choice)
+            except ValueError as e:
+                self.toast(str(e), 5, ui.BAD)
+                return
         if check.added is not None:
             name = self.cfg.server_label(check.added)
             if res.get("join"):
@@ -2242,6 +2265,19 @@ class App(ChallengeMixin, TradeMixin):
             except Exception:  # noqa: BLE001
                 pass
 
+    def _await_pc_ack(self, timeout=3.0):
+        """Give the server a moment to confirm our last PC upload before we close: an unconfirmed upload leaves
+        this server's sync state one step behind (harmless - see pcdb 'left' - but it costs a merge next time)."""
+        try:
+            if self.chal or self.net.status != "online" or self.pcsync.uploading is None:
+                return
+            end = time.time() + timeout
+            while self.pcsync.uploading is not None and self.net.status == "online" and time.time() < end:
+                self.handle_net()
+                time.sleep(0.03)
+        except Exception:  # noqa: BLE001 - closing must never fail over this
+            log.exception("waiting for the PC upload confirmation failed")
+
     def shutdown(self):
         try:
             if self.battle:
@@ -2274,6 +2310,7 @@ class App(ChallengeMixin, TradeMixin):
             self.audio.close()
         except Exception:  # noqa: BLE001
             pass
+        self._await_pc_ack()
         self.net.stop()
         thread = getattr(self.net, "_thread", None)
         if thread is not None and thread.is_alive():
@@ -2384,6 +2421,11 @@ def _main(argv, cfg, diag):
                 return
             continue
         app.run()
+        if getattr(app, "pending_share", None):           # the save choice of the server we were on
+            try:
+                cfg.share_save(*app.pending_share)
+            except ValueError:
+                log.exception("could not change which save the server uses")
         if app.switch_to:                                 # another server: its own saves, PC and challenges
             cfg.switch_server(app.switch_to)
             lib = library.Library(cfg, app_dir())

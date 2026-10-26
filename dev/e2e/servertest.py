@@ -114,10 +114,10 @@ A.toggle_panel("multiplayer")
 A.render(); pygame.image.save(A.screen, str(tmp / "0_multiplayer.png"))
 check("Switch server button", click(A, "Switch server") and A.panel == "servers")
 A.render(); pygame.image.save(A.screen, str(tmp / "1_multiplayer_to_servers.png"))
-setup_dialog.server_form = lambda entry, chk: (chk("", "127.0.0.1:8781", "x") and None) or None  # duplicate
+setup_dialog.server_form = lambda entry, chk, *_: (chk("", "127.0.0.1:8781", "x") and None) or None  # duplicate
 check("Add a server button", click(A, "Add a server..."))
 check("duplicate address refused", len(A.cfg.servers) == 1)
-setup_dialog.server_form = lambda entry, chk: None if chk("", "127.0.0.1:8782", "two") else {"join": True}
+setup_dialog.server_form = lambda entry, chk, *_: None if chk("", "127.0.0.1:8782", "two") else {"join": True}
 click(A, "Add a server...")
 check("added and joining", len(A.cfg.servers) == 2 and A.quit_requested and A.switch_to)
 run([A, alex, bea], 5)
@@ -141,7 +141,7 @@ check("Group One's server never saw the new id",
 
 # 2b. edit the current server: a wrong password reconnects and is refused, fixing it reconnects again
 sid2 = B.cfg.server_id
-setup_dialog.server_form = lambda entry, chk: None if chk("", entry["url"], "wrong") else {"join": False}
+setup_dialog.server_form = lambda entry, chk, *_: None if chk("", entry["url"], "wrong") else {"join": False}
 check("Edit button", click(B, "Edit") and B.switch_to == sid2)
 B.switch_to = sid2
 B = restart(B)
@@ -150,7 +150,7 @@ check("wrong password -> rejected", B.net.status == "rejected" and B.net.status_
 B.toggle_panel("servers")
 B.render(); pygame.image.save(B.screen, str(tmp / "3_rejected.png"))
 check("still the same player and folder", B.cfg["uid"] == uid2 and B.cfg.server_id == sid2)
-setup_dialog.server_form = lambda entry, chk: None if chk("Weekend crew", entry["url"], "two") else {"join": False}
+setup_dialog.server_form = lambda entry, chk, *_: None if chk("Weekend crew", entry["url"], "two") else {"join": False}
 click(B, "Edit")
 B = restart(B)
 run([B, alex, bea], 300, lambda: B.net.status == "online" and names(B) == ["Bea"])
