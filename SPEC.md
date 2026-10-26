@@ -231,9 +231,15 @@ Cache own tiles only while `CFC3 & 1 == 0`.
 | wEnemyBattleStatus3 | D068 | bit 3 TRANSFORMED |
 
 Own catch = OT name + OT ID equal to wPlayerName/wPlayerID (Gen 1 has no origin field). Shiny = Gen-2 rule on DVs
-(bytes 27-28). Read from the party, all 12 boxes (pcdb.Gen1PC) and the Day Care; key = `mon_key` (= the PC database
-key). `wild_is_shiny`: only `battle_info()["kind"] == "wild"` (normal + Safari), else None. Catching a transformed
-mon gives a DITTO with the original DVs (pret ItemUseBall), so the indicator matches what is caught.
+(bytes 27-28). Read from the party, all 12 boxes (pcdb.Gen1PC) and the Day Care. Key = **badge key**
+`badges.gen1_badge_key` = OT ID + DVs + evolution-family root (`soullink.family`), 11 hex digits - not the PC/Soul
+Link `mon_key`: its catch-rate byte is 255 for many species and the Time Capsule rewrites it (Yellow -> Crystal ->
+Yellow), so different shinies merged and one mon could get two keys. Identical keys within one reading are numbered
+(`badges.number_keys`: key, key-2, ...); the game reading and the PC-store reading (`badges.store_shiny_keys`) are
+numbered apart and merged, so a mon in both counts once (max per source). `battle_info()["shiny"]` and
+`wild_is_shiny` = the Gen-2 rule on the wild mon's DVs (`GameMemory.wild_dvs`), only for kind "wild" (normal +
+Safari; wild_is_shiny None otherwise, battle_info shiny False). Catching a transformed mon gives a DITTO with the
+original DVs (pret ItemUseBall), so the indicator matches what is caught.
 
 
 ---------------------------------------------------------------------------------------------------
@@ -419,8 +425,10 @@ PyBoy silently reads/writes `<rom>.rtc` next to the ROM. `rtc_file=io.BytesIO()`
 
 Origin = Crystal: caught data (bytes 29-30) non-zero - the game writes it for every catch, gift (`givepoke` without a
 trainer OT goes through SetCaughtData), contest prize and hatch; YellowLink's Gen-1 conversions have 0000. A real
-Route 29 catch got caught data 8202. Eggs don't count until hatched (same `mon_key`). Read from the party, the 14 boxes
-(Gen2PC: only the live sBox before the first save) and both Day Care slots (wBreedMon1/2).
+Route 29 catch got caught data 8202. Eggs don't count until hatched. Read from the party, the 14 boxes (Gen2PC: only
+the live sBox before the first save) and both Day Care slots (wBreedMon1/2). Key = badge key `badges.gen2_badge_key`
+= OT ID + DVs + RAW caught data + family root (15 hex digits; the PC `mon_key` zeroes a hatched mon's caught data,
+which merged all hatched shinies with the same Atk DV), numbered like Yellow's.
 Pokédex for mons arriving through the PC view (section 5): wUnownDex 1:DED9 (26 letters 1-26, 0 = free),
 wFirstUnownSeen 1:DEF4; letter = pret GetUnownLetter (`crystal.unown_letter`).
 
@@ -566,8 +574,10 @@ on one side boxes the partner.
 `current_box_records()`, `move_party_to_box()`, `move_box_to_party()`, `daycare_records()`, module `mon_key()`,
 `AREAS`/`area_of()`/`area_name()`. Addresses, frame timings and gotchas: `dev/notes/soullink_yellow.md` and
 `dev/notes/soullink_crystal.md`; checks: `dev/e2e/soullink_mem_yellow.py` (81) and `dev/crystal/soullink_verify.py` (109).
-Key facts: Yellow `battle_info` is valid from the first frame of `wIsInBattle`; Crystal's is None on frame 0 and valid
-from frame 1 (the referee waits for the first non-None). A faint counts when `battle_party_slot()` shows HP 0 on two
+Key facts: Yellow `battle_info` kind/dex are valid from the first frame of `wIsInBattle`, its `shiny` (badges 0.7.5:
+Gen-2 DV rule, so the shiny clause applies in Yellow too) only from the next frame (LoadEnemyMonData writes the DVs
+right after wIsInBattle is set), so `ChallengeView.battle()` returns None on a Yellow battle's first frame; Crystal's
+is None on frame 0 and valid from frame 1 (the referee waits for the first non-None). A faint counts when `battle_party_slot()` shows HP 0 on two
 frames in a row. Withdrawing heals in Crystal, so deaths are tracked by `mon_key`, never by HP. Bug-Catching Contest
 battles are free; the kept mon arrives later as the National Park "gift". Only call the forced moves while `is_safe()`.
 

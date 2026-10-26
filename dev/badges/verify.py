@@ -268,13 +268,14 @@ def yellow():
        "the caught mon (%s) has the original shiny DVs EA AA and the player's OT name + ID"
        % RD.species_name(caught.species))
     entry = pcdb.Gen1PC(m, RD).entry_from_record(rec)
-    c2 = crystal.gen1_to_gen2(rec, RD.dex_no(caught.species))
+    boxrec = rec[:3] + bytes([caught.data[33], rec[4], rec[5], rec[6], 0x19]) + rec[8:]   # deposited; a catch-rate
+    c2 = crystal.gen1_to_gen2(boxrec, RD.dex_no(caught.species))                       # byte the Time Capsule maps
     back = pcdb.gen2_to_gen1(c2, RD)
     ok(p["shinies"] == [key] and badges.entry_shiny_key(entry, "kanto", p["owner"]) == key and before["shinies"] == []
        and badges.entry_shiny_key(dict(entry, gen1=pcdb._b64(back)), "kanto", p["owner"]) == key,
        "progress(): the catch is an own shiny, badge key %s == the key of its PC-store entry, also after a "
        "Yellow -> Crystal -> Yellow round trip (Time Capsule catch-rate byte %02X -> item %02X -> %02X)"
-       % (key, rec[7], c2[1], back[7]))
+       % (key, boxrec[7], c2 and c2[1], back and back[7]))
     ok(p["dex_caught"] == before["dex_caught"] + (0 if before["dex_caught"] == p["dex_caught"] else 1) and
        g.m[game.DEX_OWNED + (RD.dex_no(caught.species) - 1) // 8] >> ((RD.dex_no(caught.species) - 1) % 8) & 1,
        "the game set the caught species' wPokedexOwned bit (Kanto %d -> %d)" % (before["dex_caught"], p["dex_caught"]))

@@ -3,6 +3,7 @@
   1. both on Route 1 with Poké Balls (starter Pikachu = linked gift from Pallet Town)
   2. Ilias catches his first Route 1 encounter, Alex catches his -> linked pair
   3. Ilias's second Route 1 encounter: caught anyway -> doesn't count, goes to the PC
+  3b. Alex meets a shiny (Gen-2 DV rule): shiny clause, caught as a bonus encounter
   4. Ilias's Pikachu faints for real -> Alex's Pikachu dies too and is moved to Alex's PC
   5. Ilias's last usable mon faints -> blackout -> challenge failed, both get the pop-up
 Needs dev/states/soullink_route1_grass.state (made by dev/e2e/soullink_mem_yellow.py).
@@ -169,6 +170,23 @@ illegal = [e for e in events("dead", ca["uid"]) if e["why"] == "not first encoun
 check("second Route 1 catch is marked as not counting", len(illegal) == 1)
 check("...and was moved to Ilias's PC", illegal and illegal[0]["key"] in box_keys and not third,
       (box_keys, [m.nick_str() for m in A.game.party()]))
+
+# 3b. a shiny (Gen-2 DV rule) Route 1 encounter for Alex: the shiny clause applies in Yellow too
+d = Driven(B, A)
+assert sm.step_until_battle(d, ("up", "down"))
+B.game.write(game.ENEMY_MON_DVS, bytes([0xEA, 0xAA]))         # setup: the wild mon has shiny DVs (frame 0)
+pa._advance_until(d, sm.in_battle_menu, what="battle menu")
+check("Alex's referee sees the shiny (battle_info shiny, one frame after wIsInBattle) -> shiny clause",
+      B.referee.battle is not None and B.referee.battle["mode"] == "shiny", B.referee.battle and B.referee.battle["mode"])
+sm.use_item_in_battle(d, 1)                                    # Master Ball
+sm.finish_battle(d)
+settle(B, A)
+shiny_enc = [e for e in events("enc", cb["uid"]) if e.get("shiny")]
+shiny_mon = B.game.party()[-1]
+check("the shiny catch is logged as a bonus encounter (area ROUTE_1*1) and stays usable",
+      len(shiny_enc) == 1 and shiny_enc[0]["area"] == "ROUTE_1*1" and shiny_enc[0]["status"] == "caught"
+      and shiny_enc[0]["key"] == game.mon_key(shiny_mon.data) and shiny_mon.data[27:29] == bytes([0xEA, 0xAA])
+      and B.sl.usable(shiny_enc[0]["key"]), shiny_enc)
 
 # 4. Ilias's Pikachu faints for real
 m = A.pyboy.memory
