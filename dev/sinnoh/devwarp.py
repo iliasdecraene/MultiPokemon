@@ -76,7 +76,6 @@ class DevWarp:
 
     def register_item(self, item):
         """Bag.registeredItem (the item on the Y button)."""
-        self.d.w32(self.body + E.PAGE_BAG + 0x3D4 + 0x58 * 0 + 0, item) if False else None
         self.d.w32(self.body + E.PAGE_BAG + BAG_REGISTERED, item)
 
     # --- write the battery and continue -------------------------------------------------------------------
@@ -120,4 +119,4 @@ class DevWarp:
         return r
 
 
-BAG_REGISTERED = 0x3D4 * 0 + (165 + 50 + 100 + 12 + 40 + 64 + 15 + 30) * 4     # Bag.registeredItem after the pockets
+BAG_REGISTERED = (165 + 50 + 100 + 12 + 40 + 64 + 15 + 30) * 4     # Bag.registeredItem (u32) after the 8 pockets
