@@ -259,3 +259,94 @@ async def test_damaged_record_is_skipped(tmp_path):
         "names": {}, "rules": {}, "progress": {}, "ledger": []}]}))
     hub = ChallengeHub(None, str(d))
     assert list(hub.records) == ["ok"]
+
+
+# --- Pokémon Platinum (clients after 0.7.2 list it in `library.challenge_games`) -------------------------------
+NEW_LIB = dict(type="library", games=["crystal", "platinum", "yellow"],
+               challenge_games=["crystal", "platinum", "yellow"])
+OLD_LIB = dict(type="library", games=["crystal", "platinum", "yellow"])     # what 0.7.0-0.7.2 send
+
+
+async def test_platinum_challenge_between_new_clients(server, connect_client):
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    for c in (a, b):
+        await c.send(**NEW_LIB)
+    await asyncio.sleep(0.1)
+    roster = {e["uid"]: e for e in server.roster()}
+    assert roster[b.uid]["challenge_games"] == ["crystal", "platinum", "yellow"]
+    c = await start_challenge(a, b, game="platinum")
+    assert c["game"] == "platinum" and server.challenges.records[c["id"]]["game"] == "platinum"
+    await join_both(a, b, c["id"])
+    # Gen-4 national dex numbers (up to 493) are valid in events
+    await a.send(type="challenge_event", challenge_id=c["id"],
+                 event={"t": "enc", "area": "route_201", "dex": 399, "status": "caught", "key": "1a2b3c4d82cc0bb6"})
+    assert (await b.expect("challenge_event"))["event"]["dex"] == 399
+    await a.send(type="challenge_event", challenge_id=c["id"],
+                 event={"t": "enc", "area": "route_202", "dex": 494, "status": "open"})
+    assert "dex" in (await a.expect("error"))["message"]
+    # pause, then continue the Platinum run
+    await a.send(type="challenge_leave", challenge_id=c["id"], reason="paused")
+    await b.expect("challenge_partner_left")
+    c2 = await start_challenge(b, a, cid=c["id"])
+    assert c2["game"] == "platinum"
+    # the record survives a reload (GAMES knows platinum)
+    server.challenges.save_now()
+    hub = chal.ChallengeHub(server, server.challenges.data_dir)
+    assert hub.records[c["id"]]["game"] == "platinum"
+
+
+async def test_old_clients_are_never_asked_into_platinum(server, connect_client):
+    a = await connect_client("Ilias")
+    old = await connect_client("Alex")
+    await a.send(**NEW_LIB)
+    await old.send(**OLD_LIB)            # has the Platinum ROM, but a client without Platinum Soul Link
+    await asyncio.sleep(0.1)
+    assert next(e for e in server.roster() if e["uid"] == old.uid)["challenge_games"] is None
+    await a.send(type="challenge_request", to=old.uid, kind="soul_link", game="platinum")
+    err = (await a.expect("error"))["message"]
+    assert "Alex needs a newer YellowLink" in err
+    await old.expect_none("challenge_request")
+    # ...nor can an old client start one (it never offers it, but a hand-made message must not work either)
+    await old.send(type="challenge_request", to=a.uid, kind="soul_link", game="platinum")
+    assert "You need a newer YellowLink" in (await old.expect("error"))["message"]
+    await a.expect_none("challenge_request")
+    # a client that never sent `library` (unknown games) can't get Platinum either, but Yellow still works
+    x = await connect_client("Misty")
+    await a.send(type="challenge_request", to=x.uid, kind="soul_link", game="platinum")
+    assert "newer YellowLink" in (await a.expect("error"))["message"]
+    # Yellow / Crystal with the old client: unchanged
+    c = await start_challenge(a, old, game="crystal")
+    assert c["game"] == "crystal"
+
+
+async def test_platinum_without_the_rom(server, connect_client):
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    await a.send(**NEW_LIB)
+    await b.send(type="library", games=["yellow"], challenge_games=["yellow"])
+    await asyncio.sleep(0.1)
+    await a.send(type="challenge_request", to=b.uid, kind="soul_link", game="platinum")
+    assert "Alex doesn't have Pokémon Platinum added" in (await a.expect("error"))["message"]
+    # bad challenge_games is refused
+    await b.send(type="library", games=["yellow"], challenge_games="platinum")
+    assert "challenge_games" in (await b.expect("error"))["message"]
+
+
+async def test_continue_platinum_after_partner_downgraded(server, connect_client):
+    a = await connect_client("Ilias")
+    b = await connect_client("Alex")
+    for c in (a, b):
+        await c.send(**NEW_LIB)
+    await asyncio.sleep(0.1)
+    c = await start_challenge(a, b, game="platinum")
+    await join_both(a, b, c["id"])
+    await b.send(type="challenge_leave", challenge_id=c["id"], reason="paused")
+    await a.expect("challenge_partner_left")
+    await b.close()
+    b2 = await connect_client("Alex", uid=b.uid)          # back on an old client
+    await b2.send(**OLD_LIB)
+    await asyncio.sleep(0.1)
+    await a.send(type="challenge_request", to=b2.uid, challenge_id=c["id"])
+    assert "Alex needs a newer YellowLink" in (await a.expect("error"))["message"]
+    await b2.expect_none("challenge_request")

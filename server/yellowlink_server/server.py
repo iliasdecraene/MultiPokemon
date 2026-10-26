@@ -165,6 +165,7 @@ class Client:
     battle_id: str | None = None
     challenge_id: str | None = None   # set while in (or loading into) a challenge session
     games: list | None = None         # installed games (from `library`), None = unknown (old client)
+    challenge_games: list | None = None   # games it can run a challenge in (`library`, after 0.7.2); None = old
     last_report: float = 0.0
     _rate_window: float = 0.0
     _rate_count: int = 0
@@ -317,6 +318,8 @@ class YellowLinkServer:
                 "games": (self.clients[uid].games if online and self.clients[uid].games is not None
                           else p.get("games")),
                 "challenge": self._challenge_kind(self.clients[uid]) if online else None,
+                # games they can run a challenge in right now (None: offline, or a client from 0.7.2 or older)
+                "challenge_games": self.clients[uid].challenge_games if online else None,
                 "online": online,
                 "party_size": len(species),
                 "levels": levels,
@@ -1181,7 +1184,14 @@ class YellowLinkServer:
                 isinstance(g, str) and re.fullmatch(r"[a-z0-9]{1,16}", g) for g in games):
             raise Invalid("games must be a list of game ids")
         client.games = sorted(set(games))
-        if self.store.set_games(client.uid, client.games):
+        cg = msg.get("challenge_games")                   # optional (clients after 0.7.2), see SPEC.md section 7
+        if cg is not None and (not isinstance(cg, list) or len(cg) > 8 or not all(
+                isinstance(g, str) and re.fullmatch(r"[a-z0-9]{1,16}", g) for g in cg)):
+            raise Invalid("challenge_games must be a list of game ids")
+        changed = cg is not None and sorted(set(cg)) != client.challenge_games
+        if cg is not None:
+            client.challenge_games = sorted(set(cg))
+        if self.store.set_games(client.uid, client.games) or changed:
             await self.broadcast_roster()
 
     def _chal(name):  # noqa: N805 - builds a handler that maps ChallengeError -> Invalid

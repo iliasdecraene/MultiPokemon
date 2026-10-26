@@ -15,6 +15,11 @@ log = logging.getLogger("yellowlink.challenge")
 
 KIND_NAMES = {"soul_link": "Soul Link"}
 FINISHED = ("completed", "failed", "abandoned")
+CHALLENGE_GAMES = ("yellow", "crystal", "platinum")     # order of the buttons in the new-challenge form
+LEGACY_GAMES = ("yellow", "crystal")    # every challenge client (0.6.0+) plays these; others need `challenge_games`
+# What the referee needs from a game adapter's memory class (crystal.py / platinum.py "Soul Link" sections)
+REFEREE_HELPERS = ("battle_info", "battle_party_slot", "has_poke_balls", "current_box_records", "move_party_to_box",
+                   "move_box_to_party", "daycare_records", "badges")
 
 
 class ChallengeMixin:
@@ -56,6 +61,10 @@ class ChallengeMixin:
 
     def dex_name(self, dex: int) -> str:
         try:
+            if getattr(self, "ds", False):                 # Platinum: national dex = Gen-4 species id
+                data = self.plat_data
+                return data.species_name(int(dex)).title() if data is not None and 1 <= int(dex) <= 493 \
+                    else f"#{dex}"
             if self.gen2:
                 return self.rom.species_name(dex).title()
             sp = self.rom.species_for_dex(dex)
@@ -68,8 +77,11 @@ class ChallengeMixin:
 
     # --- connection ------------------------------------------------------------------------------------------
     def chal_on_connected(self):
-        # only games the rules can be enforced in (e.g. not Crystal v1.1)
-        self.net.send({"type": "library", "games": sorted(g for g in self.lib.games if self._game_supported(g))})
+        # only games the rules can be enforced in (e.g. not Crystal v1.1); `challenge_games` tells the server which
+        # of them this client can run a challenge in (0.7.x clients list Platinum in `games` but have no Platinum
+        # Soul Link, so the server only allows Platinum for clients that send it - SPEC.md section 7)
+        self.net.send({"type": "library", "games": sorted(g for g in self.lib.games if self._game_supported(g)),
+                       "challenge_games": self.challenge_games()})
         if self.chal:
             if self.chal_wait == "offline":
                 self.chal_wait = "load"           # back online: wait until the server says both are in
@@ -106,10 +118,12 @@ class ChallengeMixin:
     def on_challenge_request(self, msg):
         busy = self.chal or self.trade or self.battle or self.live or self.prompt
         game = msg.get("game", "yellow")
-        if busy or not self._game_supported(game):
+        playable = game in self.challenge_games()
+        if busy or not playable:
             self.net.send({"type": "challenge_respond", "request_id": msg.get("request_id"), "accept": False})
-            if not self._game_supported(game):
-                self.toast(f"{msg.get('name')} invited you to a Soul Link in {library.GAMES_BY_ID[game].title}, "
+            if not playable:
+                info = library.GAMES_BY_ID.get(game)
+                self.toast(f"{msg.get('name')} invited you to a Soul Link in {info.title if info else game}, "
                            f"but you don't have that game added (Regions; Crystal needs v1.0).", 8, ui.BAD)
             return
         self.prompt = {"kind": "challenge", "id": msg["request_id"], "name": msg.get("name", "?"),
@@ -138,7 +152,7 @@ class ChallengeMixin:
         if "id" not in c:
             return
         self.challenges[c["id"]] = c
-        if not self._game_supported(c.get("game")):
+        if c.get("game") not in self.challenge_games():
             self.net.send({"type": "challenge_leave", "challenge_id": c["id"], "reason": "game missing"})
             self.toast("You don't have that game added (Regions; Crystal needs v1.0).", 6, ui.BAD)
             return
@@ -284,9 +298,23 @@ class ChallengeMixin:
             self._chal_flush()
         if self.chal and self.referee and not self.chal_wait and not self.chal_popup:
             try:
+                if getattr(self, "ds", False):
+                    self._chal_pc_poll()
                 self.referee.step()
             except Exception:  # noqa: BLE001 - never stop the game over a rules bug
                 log.exception("soul link referee failed")
+
+    def _chal_pc_poll(self):
+        """Platinum has no PC hook in a challenge (the PC database is off there): the box UI running = PC open."""
+        try:
+            now = bool(self.game.pc_open())
+        except Exception:  # noqa: BLE001
+            return
+        if now != self.referee.pc_open:
+            if now:
+                self.referee.on_pc_open()
+            else:
+                self.referee.on_pc_close()
 
     # --- leaving -------------------------------------------------------------------------------------------
     def chal_end_popup(self, title, lines):
@@ -335,10 +363,40 @@ class ChallengeMixin:
                           "dupes": True, "shiny": True}
 
     def shared_games(self, uid) -> list:
+        """Games both of us can run a Soul Link in (form buttons). Yellow/Crystal: the partner's `games` (None =
+        unknown, allowed as before); Platinum also needs it in their `challenge_games` (clients after 0.7.2)."""
         e = next((r for r in self.roster if r.get("uid") == uid), {}) or {}
         theirs = e.get("games")
-        mine = [g for g in ("yellow", "crystal") if g in self.lib.games and self._game_supported(g)]
-        return [g for g in mine if theirs is None or g in theirs]
+        their_chal = e.get("challenge_games") or []
+        out = []
+        for g in self.challenge_games():
+            if g in LEGACY_GAMES:
+                ok = theirs is None or g in theirs
+            else:
+                ok = g in their_chal and (theirs is None or g in theirs)
+            if ok:
+                out.append(g)
+        return out
+
+    def challenge_games(self) -> list:
+        """Games this client can run a challenge in: added, the verified ROM, and an adapter with the referee's
+        memory helpers (Platinum: platinum.py's Soul Link section)."""
+        return [g for g in CHALLENGE_GAMES if g in self.lib.games and self._game_supported(g)
+                and self._referee_ready(g)]
+
+    @staticmethod
+    def _referee_ready(game_id) -> bool:
+        if game_id in LEGACY_GAMES:
+            return True
+        if game_id == "platinum":
+            try:
+                from . import platinum
+            except Exception:  # noqa: BLE001 - adapter missing/broken: no Platinum challenges
+                return False
+            pm = getattr(platinum, "PlatinumMemory", None)
+            return pm is not None and all(hasattr(pm, n) for n in REFEREE_HELPERS) \
+                and hasattr(platinum, "area_of") and hasattr(platinum, "area_name")
+        return False
 
     def _game_supported(self, game_id) -> bool:
         """The exact ROM the rules were verified on (hashing a ROM is slow: cached per path)."""
@@ -376,7 +434,7 @@ class ChallengeMixin:
         self.mode = "chal_popup"
 
     def continue_challenge(self, c):
-        if not self._game_supported(c.get("game")):
+        if c.get("game") not in self.challenge_games():
             self.toast("You need that game added (Regions; Crystal needs v1.0).", 5, ui.BAD)
             return
         if not self.has_challenge_save(c["id"]):

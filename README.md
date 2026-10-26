@@ -11,14 +11,15 @@ Everyone plays their **own** game with their own save and story. On top of that:
 - **Wide view** (press **V**): see twice as much of the world around you, NPCs and friends included. The real Game Boy picture stays untouched in the middle.
 - **Straight into your game**: with a save, the intro and title screen are skipped and Continue is picked for you.
 - **Two regions**: Kanto is Pokémon Yellow, Johto is Pokémon Crystal. Add your Crystal game file in **Regions** and travel between them from the sidebar. Each game keeps its own progress. In Crystal you see friends and trade (trade evolutions included, Metal Coat and friends too); live battles, practice and wide view are Yellow-only for now.
-- **Sinnoh (Pokémon Platinum, Nintendo DS)**: add your Platinum game file in **Regions** and travel there like any region. Both DS screens are shown (top above bottom) and the **mouse is the touch screen** (click/drag on the lower screen). You see your Platinum friends walking around in Sinnoh, and trades/gifts work with Yellow and Crystal players through the shared PC. Battles, practice, wide view and Soul Link aren't available in Platinum (yet).
+- **Sinnoh (Pokémon Platinum, Nintendo DS)**: add your Platinum game file in **Regions** and travel there like any region. Both DS screens are shown (top above bottom) and the **mouse is the touch screen** (click/drag on the lower screen). You see your Platinum friends walking around in Sinnoh, and trades/gifts work with Yellow and Crystal players through the shared PC. Soul Link works in Platinum too; battles, practice and wide view aren't available there (yet).
 - **One PC for all games**: your PC boxes live in your own database (also backed up on the server). Deposit a Pokémon in Yellow and it's in the PC in Crystal and Platinum, and the other way round. In Platinum your YellowLink PC fills boxes 1-14, 20 per box; anything you put elsewhere is tidied into free spots. Pokémon that can't exist in a game (a Chikorita in Yellow) show up as `?CHIKORITA` and stay safely in the PC.
 - **No saving needed**: closing YellowLink remembers exactly where you were (it also snapshots every 30 seconds), and every game resumes where you left it.
 - **Challenges: Soul Link.** In Multiplayer, click a friend → **Challenges** → *Start a Soul Link*. You both start a
-  fresh save (separate from your main games) of Yellow or Crystal, and YellowLink referees the Nuzlocke for you: only the
-  first encounter per area counts, catches in the same area are linked partners, a fainted Pokémon (and its partner)
-  goes to the PC for good, boxing one boxes its partner, and a blackout ends the run. The run only plays while you're
-  both in it; pause any time and **Continue** together later. Finish it (both reach the Hall of Fame) to earn the badge.
+  fresh save (separate from your main games) of Yellow, Crystal or Platinum, and YellowLink referees the Nuzlocke for
+  you: only the first encounter per area counts, catches in the same area are linked partners, a fainted Pokémon (and
+  its partner) goes to the PC for good, boxing one boxes its partner, and a blackout ends the run. The run only plays
+  while you're both in it; pause any time and **Continue** together later. Finish it (both reach the Hall of Fame) to
+  earn the badge. A Platinum Soul Link needs both of you on the latest YellowLink (press **U** to update).
 - **Chat.** You can also see who's online, and the app shows a notice when an update is available.
 
 > **No ROM is included, and none ever should be.** Each player needs their own copy of

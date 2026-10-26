@@ -215,3 +215,11 @@
   clause works for Gen-3/4 species (e.g. Magnezone = Magnemite family). sl-mem: I code against crystal.py's names;
   ChallengeView expects current_box_records() -> list of encrypted 136-byte records (non-empty slots of the box the
   game deposits to) and daycare_records() -> list of 136/236-byte records. Tell me here if yours differ.
+- 2026-10-26 15:05 sl-app: server + client wiring done (unit tests pass). Uses sl-mem's PlatinumMemory helpers +
+  platinum.mon_info/mon_key; in a challenge the app sets PlatinumMemory.rom = plat_data (forced moves need it).
+  dev/e2e/challenge_flow_platinum.py ALL PASS (36 checks: invite -> fresh blank save even with the MAIN save planted
+  in DeSmuME's .dsv -> paused until partner -> partner lost/back -> pause home (main save intact) -> continue = exact
+  DS snapshot -> partner closes -> home). Partner simulated with server messages (one DeSmuME per process).
+  sl-mem: for dev/e2e/soullink_platinum.py I'd like (a) pt_sl_* states: on a route next to grass with Poké Balls +
+  2-3 party mons (one low HP for a faint), ideally one right before a wild battle, and (b) your drive helpers
+  (walk_until_battle / throw_ball / run_away / finish_battle style) importable from dev/platinum/. Which names/where?

@@ -387,13 +387,17 @@ PyBoy silently reads/writes `<rom>.rtc` next to the ROM. `rtc_file=io.BytesIO()`
 
 ## 7. Challenges (Soul Link) — added in 0.6.0
 
-A challenge is a co-op run between two players on **fresh, separate saves** of the same game (Yellow or Crystal).
+A challenge is a co-op run between two players on **fresh, separate saves** of the same game (Yellow, Crystal or
+Platinum - Platinum since the release after 0.7.2).
 It only runs while **both** players are in it. The server keeps the challenge record and an append-only **ledger**
 of rule events; each client derives the rule state from the ledger (`client/yellowlink/soullink.py`) and enforces
 it in its own game.
 
 ### Local storage (client)
-`<server folder>/challenges/<challenge_id>/game.sav` (server folder: see section 8), `resume.state`, `game.rtc`. While playing a challenge,
+`<server folder>/challenges/<challenge_id>/game.sav` (server folder: see section 8; always the server's OWN folder,
+also when it shares another server's main save - a run belongs to the server it's played on. Runs a 0.7.2 client put in
+the shared folder are still found there), `resume.state`, `game.rtc` (Crystal). Platinum: `game.sav` = the 512 KB
+battery, `resume.state` = a DeSmuME savestate. While playing a challenge,
 `cfg["active_challenge"] = {"id", "game"}`; `Config.game_id/save_path/resume_path` point at the challenge.
 The main game's library, saves, PC database and party snapshot are untouched. On a fresh start of the app
 (e.g. after a crash) `active_challenge` is cleared, so the player always starts in their main game.
@@ -402,7 +406,7 @@ players in the same challenge are drawn.
 
 ### Record (server, `data/challenges.json`)
 ```
-{"id", "kind": "soul_link", "game": "yellow"|"crystal", "players": [uidA, uidB], "names": {uid: name},
+{"id", "kind": "soul_link", "game": "yellow"|"crystal"|"platinum", "players": [uidA, uidB], "names": {uid: name},
  "rules": {"dupes": bool, "shiny": bool}, "status": "active"|"completed"|"failed"|"abandoned",
  "created", "updated", "ended", "reason": str, "progress": {uid: {"badges": int, "hof": bool}},
  "ledger": [event, ...]}
@@ -413,7 +417,7 @@ Summaries (`ledger` omitted, plus `"online": [uid...]` = players currently in th
 ### Messages
 | client → server | fields | notes |
 |---|---|---|
-| `library` | `games` list[str] | games the player has installed (sent on connect); shown in roster as `games` |
+| `library` | `games` list[str], `challenge_games` list[str] (optional) | games the player has installed with the verified ROM (sent on connect); shown in roster as `games`. `challenge_games` (clients after 0.7.2) = the games this client can run a challenge in; shown in the roster as `challenge_games` (null = offline or older client) |
 | `challenge_request` | `to`, `kind`, `game`, `rules` — or `to`, `challenge_id` to continue | target must be online and free |
 | `challenge_respond` | `request_id`, `accept` bool | |
 | `challenge_join` | `challenge_id` | sent after loading into the challenge game (and after every reconnect while in it) |
@@ -435,6 +439,11 @@ Summaries (`ledger` omitted, plus `"online": [uid...]` = players currently in th
 | `challenge_list` | `challenges` list[summary] (after `hello`) |
 | `challenge_update` | `challenge` (summary) — any status/progress change |
 
+Which games (server, `challenges.can_play`): Yellow/Crystal need the game in `games` (unknown `games` = allowed,
+as before). Platinum also needs it in `challenge_games`: 0.7.0-0.7.2 clients list `platinum` in `games` but have no
+Platinum Soul Link, so they are never sent a Platinum request (the requester gets "X needs a newer YellowLink...") and
+can't start one. The same check runs when a run is continued.
+
 Session rules (server): a join from a player of an active challenge marks them present; when both are present →
 `challenge_ready` to both. `challenge_leave` or a disconnect lasting > 30 s ends the session and the other player
 gets `challenge_partner_left`. A player who loads in but whose partner doesn't join within 90 s also gets
@@ -443,7 +452,7 @@ gets `challenge_partner_left`. A player who loads in but whose partner doesn't j
 ### Ledger events (`event` objects; server adds `seq`, `p`, `ts`)
 | `t` | fields | meaning |
 |---|---|---|
-| `enc` | `area`, `dex`, `status`: "open"\|"caught"\|"failed"\|"skipped", `key` (when caught), `gift` bool, `shiny` bool | first encounter of an area for player `p`. "open" when a counting wild battle starts; then "caught"/"failed". "skipped" = didn't count (dupes clause, shiny clause, no balls yet) |
+| `enc` | `area`, `dex` (national dex 0-493), `status`: "open"\|"caught"\|"failed"\|"skipped", `key` (when caught), `gift` bool, `shiny` bool | first encounter of an area for player `p`. "open" when a counting wild battle starts; then "caught"/"failed". "skipped" = didn't count (dupes clause, shiny clause, no balls yet) |
 | `dead` | `key`, `why` | a mon fainted, was released, or vanished — permanently unusable |
 | `loc` | `key`, `where`: "party"\|"box" | player moved a linked mon (PC rule propagates to the partner) |
 | `swap` | `old`, `new` | in-game NPC trade: the link moves to the received mon |
@@ -467,6 +476,26 @@ from frame 1 (the referee waits for the first non-None). A faint counts when `ba
 frames in a row. Withdrawing heals in Crystal, so deaths are tracked by `mon_key`, never by HP. Bug-Catching Contest
 battles are free; the kept mon arrives later as the National Park "gift". Only call the forced moves while `is_safe()`.
 
+**Pokémon Platinum** (`PlatinumMemory`, platinum.py "Soul Link" section by the same names + `badge_mask()`,
+module `mon_key()`/`mon_info()`/`area_of()`/`area_name()`; details: `dev/notes/soullink_platinum.md`):
+- Areas = the map's location label (`twinleaf_town` for the town and every house in it, `route_201`, ...).
+- Mon key = PID + TID + SID (16 hex digits): unchanged by level-up, evolution, PC, Day Care, hatching. Dex = Gen-4
+  species id (= national dex). The dupes clause uses evolution families for all 493 species (`soullink.FAMILY`).
+- The game decrypts records in place mid-frame: the party is read with `party_checked()` (None = read again next
+  frame); box/Day Care records are normalised (`platinum_pc.normalise`); a slot that can't be read makes the full PC
+  scan return None (no "released" verdict from an unreadable slot). `current_box_records()` leaves empty/unreadable
+  slots out; `move_box_to_party(i)` takes an index into that list.
+- The forced moves rebuild the party/box record like the game (PP, stats) and need the ROM data:
+  in a challenge the app sets `PlatinumMemory.rom` (ndsrom.PlatinumData).
+- No hold state (no Bug-Catching Contest). The Great Marsh counts like any area (Safari Balls count as balls while
+  the safari game runs).
+- The PC: no PC-database hook inside a challenge, so the box UI running (`pc_open()`) is polled every frame and given
+  to the referee as PC open/close.
+- Friends: the Sinnoh `state` carries `challenge` while in a run; only players in the same run are drawn.
+- While the run is paused (partner loading / reconnecting / own connection) DeSmuME isn't ticked and its sound
+  device is paused. If the DS emulator can't start inside a challenge, `active_challenge` is dropped (main game
+  next start; the partner gets "didn't load in").
+
 ## 8. Servers (one per group of friends) — added in 0.6.4 (client only, no protocol change)
 
 A player can be on several servers (each group of friends runs its own, see server/DEPLOY.md) and switches between
@@ -480,7 +509,8 @@ game files (ROMs) and settings are shared.
   (the server-side PC store and challenge records are keyed by uid).
 - **Folder per server** (`Config.data_dir`): the first server (`id "main"`, created from a pre-0.6.4 config) keeps the
   original folders (`<appdir>/saves`, `resume`, `pc`, `challenges`); others use `<appdir>/servers/<id>/` with the same
-  layout. Saves, resume snapshots, backups, the PC database and challenge saves all live there.
+  layout. Saves, resume snapshots, backups, the PC database and challenge saves all live there (challenge saves stay
+  in the server's own folder even when it shares another server's save, see section 7).
 - `game` = the region/game last played on that server; restored on switch (each group is somewhere else).
 - `label` (the player's own name for it) or else `seen_name` (the server's `server_name` from `welcome`) or else
   the address is shown in the list.

@@ -19,7 +19,12 @@ from dataclasses import dataclass, field
 log = logging.getLogger("yellowlink.challenges")
 
 KINDS = {"soul_link": "Soul Link"}
-GAMES = {"yellow": "Pokémon Yellow", "crystal": "Pokémon Crystal"}
+GAMES = {"yellow": "Pokémon Yellow", "crystal": "Pokémon Crystal", "platinum": "Pokémon Platinum"}
+# Games every challenge-capable client (0.6.0+) can play. Others need the client to list them in
+# `library.challenge_games` (clients after 0.7.2): 0.7.x clients already report "platinum" in `games` (a verified ROM since
+# 0.7.0) but have no Platinum Soul Link, so they must never be asked into one.
+LEGACY_GAMES = ("yellow", "crystal")
+MAX_DEX = 493                # national dex (Platinum)
 REQUEST_TIMEOUT = 60.0
 LOAD_TIMEOUT = 90.0          # both players must load into the challenge within this
 GRACE = 30.0                 # a dropped connection may come back within this
@@ -33,6 +38,29 @@ ENC_STATUS = {"open", "caught", "failed", "skipped"}
 
 class ChallengeError(Exception):
     """Invalid challenge message; the text goes back to the client as an error."""
+
+
+def can_play(client, game: str) -> bool:
+    """Whether this connected client can run a challenge in `game` (SPEC.md section 7, `library`)."""
+    games = getattr(client, "games", None)
+    if game in LEGACY_GAMES:
+        return games is None or game in games            # unknown (pre-0.5 client): don't block Yellow/Crystal
+    chal = getattr(client, "challenge_games", None)
+    return chal is not None and game in chal and (games is None or game in games)
+
+
+def _missing(client, me, game: str, anymore: bool = False) -> str:
+    """Why `client` can't play `game` (for the error shown to `me`)."""
+    who = "You" if client is me else client.name
+    games = getattr(client, "games", None)
+    if game not in LEGACY_GAMES and getattr(client, "challenge_games", None) is None \
+            and (games is None or game in games):
+        return (f"{who} need{'' if client is me else 's'} a newer YellowLink for a {GAMES[game]} challenge "
+                f"(press U to update)")
+    end = " anymore" if anymore else ""
+    if game == "crystal":
+        return f"{who} {'don' if client is me else 'doesn'}'t have {GAMES[game]} (v1.0) added{end}"
+    return f"{who} {'don' if client is me else 'doesn'}'t have {GAMES[game]} added{end}"
 
 
 def _str(v, what, maxlen=40, pattern=ID_RE):
@@ -54,7 +82,7 @@ def validate_event(ev) -> dict:
     if t == "enc":
         out["area"] = _str(ev.get("area"), "area", pattern=AREA_RE)
         dex = ev.get("dex", 0)
-        if isinstance(dex, bool) or not isinstance(dex, int) or not 0 <= dex <= 255:
+        if isinstance(dex, bool) or not isinstance(dex, int) or not 0 <= dex <= MAX_DEX:
             raise ChallengeError("dex is invalid")
         out["dex"] = dex
         if ev.get("status") not in ENC_STATUS:
@@ -267,15 +295,14 @@ class ChallengeHub:
                 raise ChallengeError("that challenge is with someone else")
             kind, game, rules = rec["kind"], rec["game"], rec["rules"]
             for c in (client, target):
-                if c.games is not None and game not in c.games:
-                    who = "You don't" if c is client else f"{c.name} doesn't"
-                    raise ChallengeError(f"{who} have {GAMES[game]} (v1.0 for Crystal) added anymore")
+                if not can_play(c, game):
+                    raise ChallengeError(_missing(c, client, game, anymore=True))
         else:
             kind, game = msg.get("kind"), msg.get("game")
             if kind not in KINDS:
                 raise ChallengeError("unknown challenge type")
             if game not in GAMES:
-                raise ChallengeError("challenges work in Pokémon Yellow and Pokémon Crystal")
+                raise ChallengeError("challenges work in Pokémon Yellow, Crystal and Platinum")
             rules_in = msg.get("rules") if isinstance(msg.get("rules"), dict) else {}
             rules = {"dupes": bool(rules_in.get("dupes", True)), "shiny": bool(rules_in.get("shiny", True))}
             existing = self.open_between(client.uid, target.uid, kind)
@@ -283,9 +310,8 @@ class ChallengeHub:
                 raise ChallengeError(f"you already have a {KINDS[kind]} with {target.name} - continue it, "
                                      f"or abandon it first")
             for c in (client, target):
-                if c.games is not None and game not in c.games:
-                    who = "You don't" if c is client else f"{c.name} doesn't"
-                    raise ChallengeError(f"{who} have {GAMES[game]} added")
+                if not can_play(c, game):
+                    raise ChallengeError(_missing(c, client, game))
         req = Request(uuid.uuid4().hex[:12], client.uid, target.uid, kind, game, rules, cid)
         self.requests[req.id] = req
         req.timer = asyncio.get_running_loop().create_task(self._expire(req))

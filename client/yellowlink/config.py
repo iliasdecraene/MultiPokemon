@@ -249,7 +249,10 @@ class Config(dict):
     def data_dir(self) -> Path:
         """This server's folder (or the folder of the server whose save it shares). The first server uses the app
         folder itself (where everything lived before)."""
-        folder = self.save_folder(self.active_server)
+        return self._folder_path(self.save_folder(self.active_server))
+
+    @staticmethod
+    def _folder_path(folder: str) -> Path:
         if folder == MAIN_SERVER:
             return app_dir()
         d = app_dir() / "servers" / "".join(ch for ch in folder if ch.isalnum())[:20]
@@ -286,7 +289,15 @@ class Config(dict):
         return c if isinstance(c, dict) and c.get("id") and c.get("game") else None
 
     def challenge_dir(self, cid: str) -> Path:
-        d = self.data_dir / "challenges" / "".join(ch for ch in cid if ch.isalnum() or ch in "-_")[:40]
+        """A run's own save folder. Challenges belong to the server they're played on (record, partner), not to
+        the main save it may share (SPEC.md section 8): always the server's OWN folder, so sharing or un-sharing a
+        save never hides a run. A run a 0.7.2 client put in the shared save's folder is still found there."""
+        name = "".join(ch for ch in cid if ch.isalnum() or ch in "-_")[:40]
+        d = self._folder_path(self.active_server["id"]) / "challenges" / name
+        if not d.exists():
+            legacy = self.data_dir / "challenges" / name
+            if legacy != d and legacy.exists():
+                return legacy
         d.mkdir(parents=True, exist_ok=True)
         return d
 

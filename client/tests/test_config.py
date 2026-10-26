@@ -178,3 +178,28 @@ def test_shared_save_uses_the_owners_folder_and_pc(home):
     assert c.data_dir == home / "servers" / fly["id"] and c.pc_path.name == f"{fly['uid']}.json"
     c2 = Config()                              # persisted
     assert c2.server(third["id"])["save_dir"] == "main"
+
+
+def test_challenge_saves_stay_with_their_server_when_saves_are_shared(home):
+    """A shared main save must not move a server's challenge runs (they belong to that server's records)."""
+    c = make(home, {"server_url": "ws://1.2.3.4:8765", "room_key": "one", "name": "Ilias", "uid": "u-main",
+                    "current_game": "platinum"})
+    fly = c.add_server("Fly", "ws://1.2.3.4:8766", "two")
+    c.switch_server(fly["id"])
+    own = home / "servers" / fly["id"] / "challenges" / "run1"
+    assert c.challenge_dir("run1") == own
+    (own / "game.sav").write_bytes(b"x")
+    c.share_save(fly["id"], "main")                 # Fly now plays the main save...
+    assert c.data_dir == home
+    assert c.challenge_dir("run1") == own           # ...but its Soul Link run is still found
+    c["active_challenge"] = {"id": "run2", "game": "platinum"}
+    assert c.save_path == home / "servers" / fly["id"] / "challenges" / "run2" / "game.sav"
+    assert c.resume_path.parent == c.save_path.parent
+    c.pop("active_challenge")
+    assert c.save_path == home / "saves" / "platinum.sav"          # the main (shared) save is untouched
+    # a run a 0.7.2 client put in the shared folder is still found there
+    legacy = home / "challenges" / "old"
+    legacy.mkdir(parents=True)
+    assert c.challenge_dir("old") == legacy
+    c.share_save(fly["id"], None)
+    assert c.challenge_dir("run1") == own

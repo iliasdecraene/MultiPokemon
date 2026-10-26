@@ -398,6 +398,8 @@ class App(ChallengeMixin, TradeMixin):
         self.emu = self.nds
         log.info("DS game %s started (save %s, %s)", self.game_id, save, "loaded" if self.nds.loaded_save else "none")
         self.game = self.G.PlatinumMemory(self.nds)
+        if self.chal and self.full and hasattr(self.game, "rom"):
+            self.game.rom = self.plat_data       # Soul Link's forced PC moves need the ROM (move PP, stats)
         self._start_pt_pc()
         if self.wide:
             self.wide = False
@@ -1001,6 +1003,8 @@ class App(ChallengeMixin, TradeMixin):
         except (TypeError, ValueError):
             return
         st.update(type="state", visible=True, game=self.game_id)
+        if self.chal:
+            st["challenge"] = self.chal["id"]     # only players in the same run draw us (and we them)
         now = time.time()
         if st != self.last_state_sent or now - self.last_state_time > 2:
             self.net.send(st)
@@ -2107,7 +2111,7 @@ class App(ChallengeMixin, TradeMixin):
                              (f"{game.title if game else p['game']}, fresh save (your main game is kept safe).",
                               ui.DIM),
                              ("Dupes clause " + ("on" if rules.get("dupes", True) else "off")
-                              + (", shiny clause on" if rules.get("shiny") and p["game"] == "crystal" else ""),
+                              + (", shiny clause on" if rules.get("shiny") and p["game"] != "yellow" else ""),
                               ui.DIM)]
                 r = ui.modal(sub, self.fonts, self.game_w, self.game_h, "Challenge!", lines + [(f"({left}s)", ui.DIM), ""],
                              "[Y] accept    [N] decline")
@@ -2184,6 +2188,10 @@ class App(ChallengeMixin, TradeMixin):
         self.handle_net()
         paused = self.chal_paused()
         if self.ds:
+            if paused != getattr(self, "_ds_chal_paused", False):
+                # waiting for the Soul Link partner: no emulation, so stop DeSmuME's sound (it loops otherwise)
+                self._ds_chal_paused = paused
+                self._pause_ds_audio(paused)
             ticks = 0 if paused else (DS_FAST_TICKS if self.fast and not self.trade else 1)
             if ticks:
                 self.nds.tick(ticks)      # DeSmuME plays the sound itself (see _sync_ds_audio)
@@ -2417,6 +2425,8 @@ def _main(argv, cfg, diag):
         except nds_core.DSUnavailable as e:
             # never get stuck crashing on start: go back to a Game Boy game and say why
             log.exception("DS game could not start")
+            if cfg.pop("active_challenge", None) is not None:     # a Platinum Soul Link: back to the main game
+                cfg.save()                                         # (the partner gets "didn't load in")
             if not _ds_fallback(cfg, diag, e):
                 return
             continue

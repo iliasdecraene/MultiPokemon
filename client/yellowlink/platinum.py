@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import struct
 
+from . import pk4
+
 PLATINUM_SHA1 = "ce81046eda7d232513069519cb2085349896dec7"   # Pokémon Platinum (USA) rev 0, "POKEMON PL" CPUE
 
 RAM_LO, RAM_HI = 0x02000000, 0x02400000
@@ -98,6 +100,52 @@ RUN_ACTIONS = range(88, 92)                            # MOVEMENT_ACTION_RUN_NOR
 MAP_HEADERS = 0x020E601C          # sMapHeaders in ARM9: 593 x 24 bytes, mapLabelTextID at +18 (verified = table)
 NUM_MAP_HEADERS = 593
 
+# --- Soul Link (verified by dev/platinum/soullink_verify.py; dev/notes/soullink_platinum.md) ----------------
+# Battle: the battle child app (overlay 16): args (+0x18) = FieldBattleDTO, data (+0x1C) = BattleSystem.
+DTO_PARTIES = 0x04                # Party *parties[4] (0 player, 1 enemy, 2 partner/player 2, 3 enemy 2)
+DTO_MAP_LABEL = 0x158             # mapLabelTextID
+DTO_MAP_HEADER = 0x15C            # mapHeaderID
+DTO_PC_BOXES = 0x114              # PCBoxes* (= save body + PAGE_PC_BOXES in every DTO the field builds)
+DTO_SAVE_DATA = 0x1C0             # SaveData* (not set for the catching tutorial)
+BS_BATTLE_TYPE = 0x2C             # BattleSystem.battleType
+BS_CTX = 0x30                     # BattleSystem.battleCtx (BattleContext*)
+BS_PARTIES = 0x68                 # BattleSystem.parties[4] (the battle's own copies)
+CTX_SELECTED_SLOT = 0x219C        # BattleContext.selectedPartySlot[4] (index into the battle party)
+CTX_BATTLE_MONS = 0x2D40          # BattleContext.battleMons[4], 0xC0 bytes each
+BATTLE_MON_SIZE = 0xC0
+BM_SPECIES, BM_CUR_HP, BM_MAX_HP, BM_PID = 0x00, 0x4C, 0x50, 0x68
+# BATTLE_TYPE_* (pret include/constants/battle.h)
+BATTLE_TYPE_TRAINER, BATTLE_TYPE_DOUBLES, BATTLE_TYPE_LINK, BATTLE_TYPE_2VS2 = 0x1, 0x2, 0x4, 0x8
+BATTLE_TYPE_TAG, BATTLE_TYPE_SAFARI, BATTLE_TYPE_AI, BATTLE_TYPE_FRONTIER = 0x10, 0x20, 0x40, 0x80
+BATTLE_TYPE_ROAMER, BATTLE_TYPE_PAL_PARK, BATTLE_TYPE_CATCH_TUTORIAL = 0x100, 0x200, 0x400
+BATTLE_TYPE_DEBUG = 0x80000000
+SPECIAL_BATTLE_TYPES = (BATTLE_TYPE_LINK | BATTLE_TYPE_FRONTIER | BATTLE_TYPE_PAL_PARK | BATTLE_TYPE_CATCH_TUTORIAL
+                        | BATTLE_TYPE_DEBUG)
+KNOWN_BATTLE_TYPE_BITS = 0x7FF | BATTLE_TYPE_DEBUG
+# battles where battle_party_slot() reports nothing: not the player's real party / no player mon sent out
+NO_PLAYER_MON_TYPES = (BATTLE_TYPE_LINK | BATTLE_TYPE_FRONTIER | BATTLE_TYPE_PAL_PARK | BATTLE_TYPE_CATCH_TUTORIAL
+                       | BATTLE_TYPE_SAFARI | BATTLE_TYPE_DEBUG)
+# Save body pages (page table at SaveData+0x20024)
+PAGE_BAG = 0x0630                 # Bag: items 165, key 50, TMs 100, mail 12, medicine 40, berries 64, balls 15, battle 30
+BAG_BALLS = 0x6BC                 # Bag.pokeballs[15] = {u16 item, u16 quantity}
+BALL_POCKET_SIZE = 15
+BALL_FIRST, BALL_LAST = 1, 16     # ITEM_MASTER_BALL .. ITEM_CHERISH_BALL
+PAGE_VARS_FLAGS = 0x0DAC          # VarsFlags: u16 vars[288] (VARS_START 16384..), then u8 flags[2912 / 8]
+VF_FLAGS = 0x240
+VARS_START, VARS_END, NUM_FLAGS = 16384, 16672, 2912
+FLAG_HAS_PARTNER = 2401           # walking with Cheryl/Mira/Riley/Marley/Buck (wild battles are doubles)
+FLAG_GAME_COMPLETED = 2404        # set by ClearGame (the Hall of Fame script)
+FLAG_SAFARI_GAME_ACTIVE = 2407    # Great Marsh
+VAR_PARTNER_TRAINER_ID = 16447
+PAGE_DAYCARE = 0x1654             # Daycare: DaycareMon[2] {BoxPokemon 136, DaycareMail, u32 steps}, ...
+DAYCARE_MON_SIZE = 0xF0
+PAGE_GAME_RECORDS = 0x61B0        # GameRecords: u32[71], u16[77], pad, EncodingSeed {u16 byteSum, u16 modifier}
+GAME_RECORDS_SIZE = 0x1BC
+RECORD_TIMES_ENTERED_HALL_OF_FAME = 73
+HALL_OF_FAME_MAP = 187            # MAP_HEADER_POKEMON_LEAGUE_HALL_OF_FAME
+MAIL_FIRST, MAIL_LAST = 137, 148  # ITEM_GRASS_MAIL .. ITEM_BRICK_MAIL
+SPECIES_SHAYMIN = 492
+
 
 def _ptr(v: int) -> bool:
     return RAM_LO <= v < RAM_HI
@@ -146,8 +194,9 @@ def _decode(codes) -> str:
 class PlatinumMemory:
     """Same role as game.GameMemory / crystal.CrystalMemory, for Pokémon Platinum."""
 
-    def __init__(self, bus):
+    def __init__(self, bus, rom=None):
         self.m = bus
+        self.rom = rom          # ndsrom.PlatinumData: needed only by the Soul Link forced moves (move PP, stats)
 
     # raw access ------------------------------------------------------------------------------------------
     def r8(self, a):
@@ -422,6 +471,409 @@ class PlatinumMemory:
         """Write one encrypted 136-byte record. Only call while is_safe() (or the PC UI is closed)."""
         assert len(rec) == BOX_MON_SIZE
         self.m.write(self.box_slot_addr(box, slot), bytes(rec))
+
+    # =====================================================================================================
+    # Soul Link (Nuzlocke) helpers -- same names/shapes as crystal.py's Soul Link section.
+    # Verified on the real ROM by dev/platinum/soullink_verify.py; details in dev/notes/soullink_platinum.md.
+    # =====================================================================================================
+    # Soul Link: battle --------------------------------------------------------------------------------------
+    def _battle_app(self):
+        """The battle child app (ApplicationManager, overlay 16) of the field system, or None."""
+        fs = self.field_system()
+        if fs is None:
+            return None
+        _parent, child, _pause = self._procs(fs)
+        if not _ptr(child) or self.m.r32(child + 0x0C) != OVERLAY_BATTLE:
+            return None
+        return child
+
+    def battle_dto(self):
+        """Address of this battle's FieldBattleDTO (the battle app's args), or None outside battles. Built by the
+        field before the battle app starts (wild mon / trainer party already in it) and freed after the encounter
+        task has copied the party back into the save."""
+        app = self._battle_app()
+        if app is None:
+            return None
+        dto = self.m.r32(app + 0x18)
+        if not _ptr(dto) or self.m.r32(dto) & ~KNOWN_BATTLE_TYPE_BITS:
+            return None
+        return dto
+
+    def battle_type(self):
+        """FieldBattleDTO.battleType (BATTLE_TYPE_* bit mask) or None outside battles."""
+        dto = self.battle_dto()
+        return self.m.r32(dto) if dto else None
+
+    def battle_kind(self) -> str | None:
+        """'wild' | 'trainer' | 'special' or None outside battles. Right from the battle app's first frame (the
+        type is fixed when the field builds the DTO).
+
+        special = no encounter can count and/or not the player's own party: catching tutorial (Dawn/Lucas),
+        Pal Park, link, Battle Tower/Frontier, debug, and trainer battles with an AI partner (Cheryl, Mira,
+        Riley, Marley, Buck; faints there are still real). Wild = grass/surf/fishing/honey tree/scripted
+        statics and legendaries, roamers, the Great Marsh (safari) and wild double battles while walking with a
+        partner (BATTLE_TYPE_AI_PARTNER, no trainer bit). Trainer = everything else with the trainer bit
+        (incl. two-trainer double battles, BATTLE_TYPE_TAG without partner)."""
+        bt = self.battle_type()
+        if bt is None:
+            return None
+        return battle_kind_of(bt)
+
+    def _party_mon(self, party_ptr: int, slot: int):
+        """Plain bytes (pk4 plain order) of a mon in a Party struct {capacity, count, 6 x 236} or None."""
+        if not _ptr(party_ptr):
+            return None
+        n = self.m.r32(party_ptr + 4)
+        if not 0 <= slot < min(n, 6):
+            return None
+        return _plain_mon(self.m.read(party_ptr + 8 + slot * PARTY_MON_SIZE, PARTY_MON_SIZE))
+
+    def battle_info(self) -> dict | None:
+        """None outside battles; else the encounter as the Soul Link referee needs it:
+          kind     'wild' | 'trainer' | 'special' (battle_kind)
+          dex      national dex number (Gen-4 species ids are dex numbers) of the wild mon -- in a wild double
+                   battle (walking with a partner) the FIRST wild mon (DTO enemy party 1 slot 0); for trainers
+                   their first mon
+          shiny    Gen-4 rule: (TID ^ SID ^ PID_hi ^ PID_lo) < 8 with the wild mon's own OT ids (= the player's)
+          safari   True in the Great Marsh (BATTLE_TYPE_SAFARI); contest always False
+          level    the wild mon's level
+        Platinum extras: battle_type (bit mask), pid, key (= mon_key the mon will have once caught: PID+TID+SID
+        don't change on capture), map (DTO mapHeaderID), others (dex of the other wild mon(s) in a double).
+        Valid from the battle app's first frame to its last: the field builds the DTO (and the wild mon) before
+        the battle starts, and every battle has a fresh DTO -> never a mon from the previous battle."""
+        dto = self.battle_dto()
+        if dto is None:
+            return None
+        bt = self.m.r32(dto)
+        kind = battle_kind_of(bt)
+        mons = []
+        for battler in (1, 3):                          # BATTLER_ENEMY_1 / BATTLER_ENEMY_2
+            party = self.m.r32(dto + DTO_PARTIES + 4 * battler)
+            n = self.m.r32(party + 4) if _ptr(party) else 0
+            for slot in range(min(n, 6) if battler == 1 or kind == "wild" else 0):
+                p = self._party_mon(party, slot)
+                if p is not None:
+                    mons.append(p)
+                if kind != "wild" and mons:
+                    break
+        if not mons:
+            return {"kind": kind, "dex": 0, "shiny": False, "safari": False, "contest": False, "level": 0,
+                    "battle_type": bt, "pid": 0, "key": None, "map": self.m.r32(dto + DTO_MAP_HEADER), "others": []}
+        first = mons[0]
+        pid = struct.unpack_from("<I", first, 0)[0]
+        tid, sid = struct.unpack_from("<HH", first, 0x08 + 4)
+        return {"kind": kind, "dex": struct.unpack_from("<H", first, 0x08)[0],
+                "shiny": _gen4_shiny(pid, tid, sid), "safari": bool(bt & BATTLE_TYPE_SAFARI), "contest": False,
+                "level": first[0x8C], "battle_type": bt, "pid": pid, "key": "%08x%04x%04x" % (pid, tid, sid),
+                "map": self.m.r32(dto + DTO_MAP_HEADER),
+                "others": [struct.unpack_from("<H", m, 0x08)[0] for m in mons[1:]] if kind == "wild" else []}
+
+    def _battle_ctx(self):
+        app = self._battle_app()
+        if app is None:
+            return None, None
+        bs = self.m.r32(app + 0x1C)
+        if not _ptr(bs):
+            return None, None
+        ctx = self.m.r32(bs + BS_CTX)
+        return (bs, ctx) if _ptr(ctx) else (bs, None)
+
+    def battle_party_slot(self):
+        """(save-party index of the player's active mon, its current battle HP) or None.
+
+        None outside battles, before the first send-out (the BattleContext is zeroed when it is created), in
+        battles where the player's party isn't at stake or no mon of the player is out (link, Frontier,
+        catching tutorial, Pal Park, Great Marsh) and in the instant of a switch where the battler slot doesn't
+        hold a mon of the save party yet. The battle works on a copy of the party; the index returned is the
+        position in the SAVE party (matched by PID) - the order party_checked()/the referee's party() use.
+        Doubles (two of the player's mons out, or a partner): battlers 0 and 2; the partner's mons never match
+        the save party. A player mon at HP 0 is preferred, so a faint of the second mon is reported too."""
+        bs, ctx = self._battle_ctx()
+        if ctx is None:
+            return None
+        bt = self.m.r32(bs + BS_BATTLE_TYPE)
+        if bt & NO_PLAYER_MON_TYPES:
+            return None
+        pids = self._save_party_pids()
+        if not pids:
+            return None
+        found = []
+        for battler in (0, 2):
+            bm = ctx + CTX_BATTLE_MONS + battler * BATTLE_MON_SIZE
+            pid = self.m.r32(bm + BM_PID)
+            species = self.m.r16(bm + BM_SPECIES)
+            max_hp = self.m.r32(bm + BM_MAX_HP)
+            if not species or not max_hp or pid not in pids:
+                continue
+            slot = self.m.r8(ctx + CTX_SELECTED_SLOT + battler)
+            bparty = self.m.r32(bs + BS_PARTIES + 4 * battler)
+            # the battle party's mon in that slot is this battler? (PID = first word, never encrypted; the record
+            # itself may be decrypted in place right now)
+            if not _ptr(bparty) or not 0 <= slot < min(self.m.r32(bparty + 4), 6) \
+                    or self.m.r32(bparty + 8 + slot * PARTY_MON_SIZE) != pid:
+                continue
+            hp = self.m.r32(bm + BM_CUR_HP)
+            found.append((pids.index(pid), hp if hp < 0x80000000 else 0))
+        if not found:
+            return None
+        fainted = [f for f in found if f[1] == 0]
+        return fainted[0] if fainted else found[0]
+
+    def _save_party_pids(self) -> list:
+        body = self.save_body()
+        if not body:
+            return []
+        return [self.m.r32(body + PAGE_PARTY + 8 + i * PARTY_MON_SIZE) for i in range(self.party_count())]
+
+    # Soul Link: bag / Hall of Fame / flags ------------------------------------------------------------------
+    def balls(self) -> list:
+        """[(item id, quantity)] in the bag's Poké Balls pocket (non-empty slots)."""
+        body = self.save_body()
+        if not body:
+            return []
+        raw = self.m.read(body + PAGE_BAG + BAG_BALLS, 4 * BALL_POCKET_SIZE)
+        out = []
+        for i in range(BALL_POCKET_SIZE):
+            item, qty = struct.unpack_from("<HH", raw, 4 * i)
+            if item:
+                out.append((item, qty))
+        return out
+
+    def has_poke_balls(self) -> bool:
+        """Any ball (items 1-16, Master .. Cherish Ball) with quantity > 0 in the Poké Balls pocket -- or a Great
+        Marsh safari game is running (Safari Balls are a counter there, not a bag item)."""
+        return any(BALL_FIRST <= item <= BALL_LAST and qty > 0 for item, qty in self.balls()) or \
+            self.flag(FLAG_SAFARI_GAME_ACTIVE)
+
+    def flag(self, n: int) -> bool:
+        """VarsFlags flag n (pret generated/vars_flags.txt numbering)."""
+        body = self.save_body()
+        if not body or not 0 <= n < NUM_FLAGS:
+            return False
+        return bool(self.m.r8(body + PAGE_VARS_FLAGS + VF_FLAGS + n // 8) >> (n % 8) & 1)
+
+    def var(self, n: int) -> int:
+        """VarsFlags var n (16384 = VARS_START ..)."""
+        body = self.save_body()
+        if not body or not VARS_START <= n < VARS_END:
+            return 0
+        return self.m.r16(body + PAGE_VARS_FLAGS + 2 * (n - VARS_START))
+
+    def in_safari_game(self) -> bool:
+        return self.flag(FLAG_SAFARI_GAME_ACTIVE)
+
+    def has_partner(self) -> bool:
+        """Walking with a partner (Cheryl, Mira, Riley, Marley, Buck): wild battles are doubles."""
+        return self.flag(FLAG_HAS_PARTNER)
+
+    def in_hall_of_fame(self) -> bool:
+        """Standing in the Hall of Fame room (map 187)."""
+        return self.map_id() == HALL_OF_FAME_MAP
+
+    def hall_of_fame_count(self) -> int:
+        """GameRecords RECORD_TIMES_ENTERED_HALL_OF_FAME (+1 by ClearGame each time; saved). The records are
+        stored XOR-encrypted (GameRecords_IncrementRecordValue decodes/re-encodes around every change)."""
+        body = self.save_body()
+        if not body:
+            return 0
+        raw = self.m.read(body + PAGE_GAME_RECORDS, GAME_RECORDS_SIZE)
+        return game_record(raw, RECORD_TIMES_ENTERED_HALL_OF_FAME)
+
+    def entered_hall_of_fame(self) -> bool:
+        """Persistent (saved) proof the Champion was beaten and the Hall of Fame entered: FLAG_GAME_COMPLETED or
+        TrainerInfo.isMainStoryCleared (both set by ClearGame, the Hall of Fame script's routine) or the HoF
+        record count."""
+        if self.flag(FLAG_GAME_COMPLETED):
+            return True
+        if self._trainer(0x1D, 1)[0] & 1:
+            return True
+        return self.hall_of_fame_count() > 0
+
+    # Soul Link: current box + forced moves ------------------------------------------------------------------
+    def _box_slots(self, box: int) -> list:
+        """[(slot, normalised 136-byte record)] of the non-empty slots of a box (records the game is working on
+        right now are returned as it will write them back; unreadable 'bad' slots are skipped)."""
+        from .platinum_pc import normalise
+        out = []
+        for i, rec in enumerate(self.box_raw(box)):
+            kind, r = normalise(rec)
+            if kind == "mon":
+                out.append((i, r))
+        return out
+
+    def current_box_records(self) -> list:
+        """Mons of the current box (PCBoxes.currentBoxID: the box the PC opens on, where the game stores a catch
+        when the party is full) as encrypted 136-byte records, in slot order, empty slots left out. Index i of
+        this list is what move_box_to_party(i) takes."""
+        if not self.in_game():
+            return []
+        return [r for _slot, r in self._box_slots(self.current_box())]
+
+    def move_party_to_box(self, slot: int) -> bool:
+        """Deposit a party mon like the box UI's STORE does (PCBoxes_TryStoreBoxMonInBox + Party_Remove...):
+        box part with PP restored (BoxPokemon_RestorePP) and Shaymin back in Land Form, into the first empty
+        slot of the current box; if that box is full, into the first box with space after it, which then
+        becomes the current box (what the battle does with a catch when the party is full). The party shifts up
+        and the last slot is cleared (Pokemon_Init). Call only while is_safe().
+
+        False (nothing changed) if the slot doesn't exist, the party isn't readable right now, no OTHER non-egg
+        party mon has HP > 0, the mon holds Mail or has a Ball Capsule (the game refuses both) or all 18
+        boxes are full."""
+        if self.rom is None:
+            raise RuntimeError("move_party_to_box needs PlatinumMemory(bus, rom) (move PP)")
+        party = self.party_checked()
+        if party is None or not 0 <= slot < len(party) or len(party) < 2:
+            return False
+        plains = [pk4.decrypt(r) for r in party]
+        others_ok = any(not _is_egg_plain(p) and struct.unpack_from("<H", p, 0x8E)[0] > 0
+                        for i, p in enumerate(plains) if i != slot)
+        mon = pk4.PK4(plains[slot])
+        if not others_ok or MAIL_FIRST <= mon.item <= MAIL_LAST or mon.d[0x8D]:
+            return False
+        target = self._free_box_slot()
+        if target is None:
+            return False
+        box, pos = target
+        box_pk = pk4.PK4(bytes(mon.d[:BOX_MON_SIZE]))
+        box_pk.pp = [(self.rom.move_pp(m) + self.rom.move_pp(m) * min(u, 3) // 5) if m else p
+                     for m, u, p in zip(box_pk.moves, box_pk.pp_ups, box_pk.pp)]
+        if box_pk.species == SPECIES_SHAYMIN and box_pk.form:
+            box_pk.form = 0
+        rec = pk4.encrypt(box_pk.plain())
+        if box != self.current_box():
+            self.m.w32(self.pc_boxes_addr(), box)
+        self.write_box_slot(box, pos, rec)
+        self._remove_party(slot, party)
+        return True
+
+    def _free_box_slot(self):
+        """(box, slot) of the first empty slot in the current box, else in the next boxes (wrapping), or None."""
+        cur = self.current_box()
+        if not 0 <= cur < NUM_BOXES:
+            return None
+        for k in range(NUM_BOXES):
+            box = (cur + k) % NUM_BOXES
+            for i, rec in enumerate(self.box_raw(box)):
+                if rec == pk4.EMPTY_BOX or (pk4.valid(rec) and pk4.is_empty(rec)):
+                    return box, i
+        return None
+
+    def _remove_party(self, slot: int, party: list):
+        """Party_RemovePokemonBySlotIndex: shift the following mons up, Pokemon_Init the last slot, count - 1."""
+        body = self.save_body()
+        n = len(party)
+        base = body + PAGE_PARTY + 8
+        for i in range(slot, n - 1):
+            self.m.write(base + i * PARTY_MON_SIZE, bytes(party[i + 1]))
+        self.m.write(base + (n - 1) * PARTY_MON_SIZE, pk4.EMPTY_PARTY)
+        self.m.w32(body + PAGE_PARTY + 4, n - 1)
+
+    def move_box_to_party(self, box_index: int) -> bool:
+        """Withdraw entry `box_index` of current_box_records() into the party like the box UI does
+        (Pokemon_FromBoxPokemon = pk4.to_party: level from exp, stats recomputed, HP = max, no status, empty
+        mail/capsule; Party_AddPokemon) and clear its box slot (BoxPokemon_Init). False if the party is full or
+        not readable right now, or the index doesn't exist. Call only while is_safe()."""
+        if self.rom is None:
+            raise RuntimeError("move_box_to_party needs PlatinumMemory(bus, rom) (stats, growth)")
+        party = self.party_checked()
+        if party is None or len(party) >= 6:
+            return False
+        box = self.current_box()
+        slots = self._box_slots(box) if 0 <= box < NUM_BOXES else []
+        if not 0 <= box_index < len(slots):
+            return False
+        pos, rec = slots[box_index]
+        body = self.save_body()
+        n = len(party)
+        self.m.write(body + PAGE_PARTY + 8 + n * PARTY_MON_SIZE, pk4.to_party(rec, self.rom))
+        self.m.w32(body + PAGE_PARTY + 4, n + 1)
+        self.write_box_slot(box, pos, pk4.EMPTY_BOX)
+        return True
+
+    def daycare_records(self) -> list:
+        """Mons left at the Solaceon Pokémon Day Care as encrypted 136-byte box records: [mon 1, mon 2], each only
+        if its slot isn't empty (Daycare = 2 x DaycareMon {BoxPokemon, DaycareMail, steps} at body+0x1654)."""
+        from .platinum_pc import normalise
+        body = self.save_body()
+        if not body:
+            return []
+        out = []
+        for i in range(2):
+            kind, rec = normalise(self.m.read(body + PAGE_DAYCARE + i * DAYCARE_MON_SIZE, BOX_MON_SIZE))
+            if kind == "mon":
+                out.append(rec)
+        return out
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Soul Link module helpers
+# ---------------------------------------------------------------------------------------------------------
+def battle_kind_of(bt: int) -> str:
+    """'wild' | 'trainer' | 'special' for a FieldBattleDTO.battleType (see PlatinumMemory.battle_kind)."""
+    if bt & SPECIAL_BATTLE_TYPES:
+        return "special"
+    if bt & BATTLE_TYPE_TRAINER:
+        return "special" if bt & BATTLE_TYPE_AI else "trainer"
+    return "wild"
+
+
+def _plain_mon(raw: bytes):
+    """Plain (A,B,C,D) bytes of an encrypted or in-place-decrypted box/party mon, or None if unreadable."""
+    try:
+        p = pk4._plain_of(raw)
+    except ValueError:
+        return None
+    if pk4.checksum(p) != struct.unpack_from("<H", p, 6)[0]:
+        return None
+    return p
+
+
+def _gen4_shiny(pid: int, tid: int, sid: int) -> bool:
+    return (tid ^ sid ^ (pid >> 16) ^ (pid & 0xFFFF)) < 8
+
+
+def _is_egg_plain(p: bytes) -> bool:
+    return pk4.PK4(p).is_egg
+
+
+def mon_key(record: bytes) -> str:
+    """Identity of a Platinum mon (box/party/day-care record, encrypted, plain or decrypted in place):
+    PID + TID + SID as 16 hex digits (pk4.mon_key). None of them change on level-up, evolution, PC moves,
+    Day Care, nicknaming or hatching (an egg keeps its PID; the hatcher's IDs are already in it)."""
+    return pk4.mon_key(record)
+
+
+def mon_info(record: bytes) -> dict | None:
+    """What the Soul Link referee needs of one record (box 136 / party 236 bytes, any of the game's states):
+    {key, dex, hp (party records; -1 for box records), egg, nick, level (party records; else 0)} or None if
+    the record is empty or unreadable. (Platinum extra; the app builds MonInfo from it.)"""
+    p = _plain_mon(bytes(record))
+    if p is None:
+        return None
+    pk = pk4.PK4(p)
+    if pk.species == 0:
+        return None
+    party = len(p) == PARTY_MON_SIZE
+    return {"key": "%08x%04x%04x" % (pk.pid, pk.tid, pk.sid), "dex": pk.species, "hp": pk.hp if party else -1,
+            "egg": pk.is_egg, "nick": pk.nickname, "level": pk.party_level if party else 0}
+
+
+def game_record(raw: bytes, rec_id: int) -> int:
+    """Value of one GameRecords record from the raw (encrypted) GameRecords bytes (pret game_records.c:
+    records 1.. are XORed with the LCRNG stream seeded by byteSum | modifier << 16; record 0 = steps, plain)."""
+    raw = bytes(raw)
+    if len(raw) < GAME_RECORDS_SIZE:
+        return 0
+    n32, n16 = 71, 77
+    byte_sum, modifier = struct.unpack_from("<HH", raw, 4 * n32 + 2 * n16 + 2)
+    if rec_id == 0:
+        return struct.unpack_from("<I", raw, 0)[0]
+    dec = raw[:4] + pk4._crypt(raw[4:4 * n32 + 2 * n16 + 2], byte_sum | modifier << 16)
+    if rec_id < n32:
+        return struct.unpack_from("<I", dec, 4 * rec_id)[0]
+    if rec_id < n32 + n16:
+        return struct.unpack_from("<H", dec, 4 * n32 + 2 * (rec_id - n32))[0]
+    return 0
 
 
 def party_records(pm: PlatinumMemory) -> list:

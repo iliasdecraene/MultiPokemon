@@ -6,6 +6,7 @@ import math
 import pygame
 
 from . import library
+from .challenge import CHALLENGE_GAMES
 from .ui import ACCENT, BAD, DIM, GOOD, PANEL, PANEL_HI, TEXT, box, text, wrap
 
 BTN = (58, 64, 86)
@@ -409,7 +410,7 @@ def draw_challenges(surf, f, app, game_w, game_h, offset):
         can = online and not e.get("challenge") and not app.chal and bool(shared)
         tip = ("Leave your current challenge first." if app.chal else f"{name} needs to be online." if not online
                else f"{name} is busy in another challenge." if e.get("challenge")
-               else "You both need Pokémon Yellow or Crystal (v1.0) added in Regions.")
+               else "You both need Pokémon Yellow, Crystal (v1.0) or Platinum added in Regions.")
         button(surf, app, f, pygame.Rect(card.x + 66, card.y + 82, 170, 30), "Start a Soul Link",
                lambda: app.new_challenge_form(uid, name), enabled=can, offset=offset, primary=True, tip=tip)
     y = card.bottom + 14
@@ -438,6 +439,17 @@ def _toggle(surf, app, f, rect, label, on, cb, offset):
     app.click_targets.append((rect.move(offset), cb, label))
 
 
+def _game_tip(app, form, g) -> str:
+    """Why a game button in the Soul Link form is off."""
+    title = library.GAMES_BY_ID[g].title
+    if g not in app.challenge_games():
+        return f"Add {title} in Regions first" + (" (v1.0)." if g == "crystal" else ".")
+    e = next((x for x in app.roster if x.get("uid") == form["uid"]), {}) or {}
+    if g not in ("yellow", "crystal") and g in (e.get("games") or []) and not e.get("challenge_games"):
+        return f"{form['name']} needs to update YellowLink (press U) for a {title} Soul Link."
+    return f"{form['name']} doesn't have {title} added" + (" (v1.0)." if g == "crystal" else ".")
+
+
 def _draw_challenge_form(surf, f, app, r, y, offset):
     form = app.chal_form
     narrow = r.w < NARROW_W
@@ -455,22 +467,24 @@ def _draw_challenge_form(surf, f, app, r, y, offset):
         y += 50
     text(surf, f.body, "Game", (r.x + 18, y + 6), TEXT)
     shared = app.shared_games(form["uid"])
-    gw = (r.right - 18 - (r.x + 90) - 10) // 2 if narrow else 180
-    for i, g in enumerate(("yellow", "crystal")):
+    games = CHALLENGE_GAMES
+    x0 = r.x + 82 if narrow else r.x + 100
+    gw = (r.right - 18 - x0 - 10 * (len(games) - 1)) // len(games)
+    full = not narrow and all(f.body.size(library.GAMES_BY_ID[g].title)[0] <= gw - 14 for g in games)
+    for i, g in enumerate(games):
         info = library.GAMES_BY_ID[g]
-        rect = pygame.Rect(r.x + 90 + i * (gw + 10), y, gw, 34) if narrow else \
-            pygame.Rect(r.x + 100 + i * 190, y, 180, 34)
+        rect = pygame.Rect(x0 + i * (gw + 10), y, gw, 34)
         sel = form["game"] == g
         if sel:
             pygame.draw.rect(surf, ACCENT, rect.inflate(6, 6), 2, border_radius=9)
-        button(surf, app, f, rect, info.title.replace("Pokémon ", "") if narrow else info.title,
-               lambda g=g: form.__setitem__("game", g), enabled=g in shared,
-               offset=offset, primary=sel, tip="You both need this game added (Crystal: v1.0).")
+        label = info.title if full else info.title.replace("Pokémon ", "")
+        button(surf, app, f, rect, label, lambda g=g: form.__setitem__("game", g), enabled=g in shared,
+               offset=offset, primary=sel, tip=_game_tip(app, form, g))
     y += 54
     tw = r.w - 36 if narrow else 420
-    shiny_ok = form["game"] == "crystal"
+    shiny_ok = form["game"] != "yellow"
     dupes = "Dupes clause (skip families you already caught)"
-    shiny = "Shiny clause (shinies are a free catch)" + ("" if shiny_ok else " - Crystal only")
+    shiny = "Shiny clause (shinies are a free catch)" + ("" if shiny_ok else " - not in Yellow")
     if narrow:
         dupes, shiny = fit(f.body, dupes, tw - 56), fit(f.body, shiny, tw - 56)
     _toggle(surf, app, f, pygame.Rect(r.x + 18, y, tw, 30), dupes,
@@ -507,20 +521,31 @@ def _draw_challenge_form(surf, f, app, r, y, offset):
 def draw_soullink(surf, f, app, game_w, game_h, offset):
     """In a run: the linked pairs, and the Pause button."""
     _, partner = app.chal_partner()
-    r = _panel_frame(surf, app, f, game_w, game_h, f"Soul Link with {partner}", offset)
+    narrow = _panel_w(game_w) < NARROW_W
+    title = f"Soul Link with {partner}"
+    r = _panel_frame(surf, app, f, game_w, game_h, fit(f.title, title, _panel_w(game_w) - 90) if narrow else title,
+                     offset)
     y = r.y + 54
     sl = app.sl
+    # columns: area / you / partner (the DS window and small Game Boy windows are narrower)
+    if narrow:
+        cw = (r.w - 36) // 3
+        cx = (r.x + 18, r.x + 18 + cw + 4, r.x + 18 + 2 * cw + 8)
+        cols = (cw, cw - 4, r.right - 18 - cx[2])
+    else:
+        cx, cols = (r.x + 18, r.x + 200, r.x + 390), (180, 188, r.right - 18 - (r.x + 390))
     if sl is None:
         text(surf, f.body, "Connecting...", (r.x + 18, y), DIM)
     else:
         cnt = sl.counts()
-        text(surf, f.small, f"{cnt['alive']} alive · {cnt['dead']} lost · rules: "
-             + ("dupes clause on" if sl.rules["dupes"] else "dupes clause off")
-             + (", shiny clause on" if sl.rules["shiny"] else ""), (r.x + 18, y), DIM)
+        line = (f"{cnt['alive']} alive · {cnt['dead']} lost · rules: "
+                + ("dupes clause on" if sl.rules["dupes"] else "dupes clause off")
+                + (", shiny clause on" if sl.rules["shiny"] else ""))
+        text(surf, f.small, fit(f.small, line, r.w - 36) if narrow else line, (r.x + 18, y), DIM)
         y += 26
-        text(surf, f.small, "Area", (r.x + 18, y), DIM)
-        text(surf, f.small, "You", (r.x + 200, y), DIM)
-        text(surf, f.small, partner, (r.x + 390, y), DIM)
+        text(surf, f.small, "Area", (cx[0], y), DIM)
+        text(surf, f.small, "You", (cx[1], y), DIM)
+        text(surf, f.small, fit(f.small, partner, cols[2]) if narrow else partner, (cx[2], y), DIM)
         y += 20
         view = app.referee.view if app.referee else None
         rows = sl.pairs()
@@ -538,21 +563,29 @@ def draw_soullink(surf, f, app, game_w, game_h, offset):
                 return "in battle...", ACCENT
             return "-", DIM
 
+        bottom = r.bottom - (110 if narrow else 70)
         for area, ka, kb, sa, sb, da, db in rows:
-            if y > r.bottom - 70:
+            if y > bottom:
                 text(surf, f.small, "...", (r.x + 18, y), DIM)
                 break
             label = view.area_name(area) if view else area
             if "*" in area:
                 label += " (shiny)"
-            text(surf, f.small, label[:24], (r.x + 18, y), TEXT)
             s1, c1 = cell(ka, sa, da, mine_dead)
             s2, c2 = cell(kb, sb, db, theirs_dead)
-            text(surf, f.small, s1, (r.x + 200, y), c1)
-            text(surf, f.small, s2, (r.x + 390, y), c2)
+            if narrow:
+                label, s1, s2 = fit(f.small, label, cols[0] - 4), fit(f.small, s1, cols[1] - 4), \
+                    fit(f.small, s2, cols[2])
+            text(surf, f.small, label[:24], (cx[0], y), TEXT)
+            text(surf, f.small, s1, (cx[1], y), c1)
+            text(surf, f.small, s2, (cx[2], y), c2)
             y += 20
     button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 50, 210, 36), "Pause & go back",
            lambda: app.leave_to_main("paused"), offset=offset, primary=True)
+    if narrow:
+        text_wrapped(surf, f.small, "Your run is saved. Continue it together any time from Multiplayer > "
+                     "Challenges.", (r.x + 18, r.bottom - 92), r.w - 36, DIM, 18)
+        return
     text(surf, f.small, "Your run is saved. Continue it together any time", (r.x + 240, r.bottom - 48), DIM)
     text(surf, f.small, "from Multiplayer > Challenges.", (r.x + 240, r.bottom - 30), DIM)
 
