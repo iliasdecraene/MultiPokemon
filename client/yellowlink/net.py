@@ -119,6 +119,11 @@ class NetClient:
         else:
             self.status = "offline"
             self.status_detail = reason or ""
+            r = self.status_detail
+            if "getaddrinfo" in r or "11001" in r or "Name or service not known" in r:
+                self.status_detail = "server address not found - check it with F2"
+            elif "1225" in r or "Connection refused" in r or "10061" in r:
+                self.status_detail = "server not running - try again in a minute"
         self.inbox.put({"type": "_disconnected", "reason": self.status_detail})
 
     async def _pump(self, ws):

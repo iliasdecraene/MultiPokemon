@@ -1699,6 +1699,10 @@ class App(ChallengeMixin, TradeMixin):
         except Exception:  # noqa: BLE001
             log.exception("shutdown save failed")
         self.chal_shutdown()
+        try:
+            self.audio.close()
+        except Exception:  # noqa: BLE001
+            pass
         self.net.stop()
         thread = getattr(self.net, "_thread", None)
         if thread is not None and thread.is_alive():

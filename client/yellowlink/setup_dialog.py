@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from . import library, text
-from .config import app_dir
+from .config import app_dir, normalize_url, url_looks_ok
 
 
 def run_setup(cfg, first_run: bool) -> bool:
@@ -68,9 +68,11 @@ def run_setup(cfg, first_run: bool) -> bool:
         if not name:
             messagebox.showerror("YellowLink", "Please enter a name (letters, numbers, spaces; max 10).")
             return
-        url = fields["server_url"].get().strip()
-        if not (url.startswith("ws://") or url.startswith("wss://")):
-            url = "ws://" + url
+        url = normalize_url(fields["server_url"].get())
+        if not url_looks_ok(url):
+            messagebox.showerror("YellowLink", "That server address doesn't look right.\n"
+                                               "It should look like ws://91.107.193.182:8765 (copy-paste it).")
+            return
         rom = fields["rom_path"].get().strip().strip('"')
         if not rom or not Path(rom).is_file():
             messagebox.showerror("YellowLink", "Please select your Pokémon game file (.gb/.gbc).")
@@ -156,6 +158,12 @@ def server_form(entry, check):
             row=5, column=0, columnspan=2, sticky="w", **pad)
 
     def on_ok(*_):
+        from .config import normalize_url, url_looks_ok
+        if not url_looks_ok(normalize_url(values["url"].get())):
+            messagebox.showerror("YellowLink", "That server address doesn't look right.\n"
+                                               "It should look like ws://91.107.193.182:8766 (copy-paste it).",
+                                 parent=root)
+            return
         err = check(values["label"].get(), values["url"].get(), values["key"].get())
         if err:
             messagebox.showerror("YellowLink", err, parent=root)

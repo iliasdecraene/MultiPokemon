@@ -118,3 +118,16 @@ def test_switching_leaves_a_challenge(home):
 def test_fresh_install(home):
     c = make(home)
     assert c.server_id == cfgmod.MAIN_SERVER and c.active_server["uid"] == c["uid"]
+
+
+def test_address_typos_are_caught():
+    from yellowlink.config import normalize_url, url_looks_ok
+    good = ["91.107.193.182:8766", " ws://91.107.193.182:8765 ", "http://91.107.193.182:8765", "91.107.193.182 :8766",
+            "wss://example.com", "ws://localhost:8765", "WS://91.107.193.182:8765/"]
+    bad = ["ws://91,107.193.182:8765", "ws://91.1O7.193.182:8765", "ws://ws://91.107.193.182:8765",
+           "ws://91.107.193:8765", "ws://91.107.193.300:8765", "", "ws://abc"]
+    for u in good:
+        assert url_looks_ok(normalize_url(u)), u
+    for u in bad:
+        assert not url_looks_ok(normalize_url(u)), u
+    assert normalize_url("https://91.107.193.182:8765") == "ws://91.107.193.182:8765"

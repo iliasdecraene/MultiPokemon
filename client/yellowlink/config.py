@@ -37,13 +37,28 @@ MAIN_SERVER = "main"      # the first server: keeps the original folders (saves/
 
 
 def normalize_url(url: str) -> str:
-    url = (url or "").strip().strip('"')
+    url = "".join((url or "").split()).strip('"')          # no spaces anywhere (pasted addresses)
     scheme, sep, rest = url.partition("://")
     if sep and scheme.lower() in ("ws", "wss"):
         return scheme.lower() + "://" + rest
     if sep and scheme.lower() in ("http", "https"):          # pasted with the wrong prefix
-        return ("wss" if scheme.lower() == "https" else "ws") + "://" + rest
+        host = rest.split("/", 1)[0].split(":", 1)[0]
+        secure = scheme.lower() == "https" and not host.replace(".", "").isdigit()   # plain IPs have no TLS
+        return ("wss" if secure else "ws") + "://" + rest
     return "ws://" + url if url else url
+
+
+def url_looks_ok(url: str) -> bool:
+    """ws://host:port with a sane host (catches typos like spaces, commas, a letter O in an IP, a doubled prefix)."""
+    import re
+    m = re.fullmatch(r"wss?://([A-Za-z0-9.\-]+)(?::(\d{1,5}))?/?", url or "")
+    if not m:
+        return False
+    host = m.group(1)
+    if any(ch.isdigit() for ch in host.rsplit(".", 1)[-1]):   # meant as an IP address: exactly 4 numbers 0-255
+        parts = host.split(".")
+        return len(parts) == 4 and all(p.isdigit() and int(p) <= 255 for p in parts)
+    return "." in host or host == "localhost"
 
 
 def _url_key(url: str) -> str:
@@ -118,7 +133,7 @@ class Config(dict):
 
     def _check_url(self, url: str, skip: str | None = None) -> str:
         url = normalize_url(url)
-        if len(url) < 8 or " " in url:
+        if not url_looks_ok(url):
             raise ValueError("Please enter the server address (like ws://1.2.3.4:8765).")
         for s in self["servers"]:
             if s["id"] != skip and _url_key(s.get("url", "")) == _url_key(url):
