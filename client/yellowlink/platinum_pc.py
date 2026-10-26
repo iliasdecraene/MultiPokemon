@@ -36,6 +36,40 @@ log = logging.getLogger("yellowlink.platinum_pc")
 ALL_SLOTS = NUM_BOXES * BOX_SLOTS              # 540
 EMPTY = pk4.EMPTY_BOX
 
+# Bag (pret include/bag.h; save body + PAGE_BAG, page 0x774 bytes): pockets of BagItem {u16 item, u16 quantity}
+# in this order. Verified: the save's TM27 (item 354) sits in the TM pocket at +0x35C; struct size = 0x774.
+PAGE_BAG = 0x630
+BAG_POCKETS = {0: (0x000, 165), 7: (0x294, 50), 3: (0x35C, 100), 5: (0x4EC, 12), 1: (0x51C, 40), 4: (0x5BC, 64),
+               2: (0x6BC, 15), 6: (0x6F8, 30)}     # POCKET_* id -> (offset, slots): items, key, TM/HM, mail, ...
+POCKET_TMHMS = 3
+ITEM_DATA_NARC = "/itemtool/itemdata/pl_item_data.narc"
+NUM_ITEMS = 468
+
+
+def item_data_id(item: int) -> int:
+    """sItemArchiveIDs[item].dataID (ARM9 table at 0x020F0CC4; checked for all 468 items against the RAM):
+    items 113-134 are unused (data 0), from 135 on the data member is item - 22."""
+    return item if item <= 112 else (0 if item <= 134 else item - 22)
+
+
+def load_item_pockets(path):
+    """Field pocket (POCKET_*) of every item id, from the ROM's item data (ItemData.fieldPocket: u16 at +8, bits
+    7-10), or None."""
+    if not path:
+        return None
+    try:
+        from . import ndsrom
+        rom = ndsrom.NDSRom(path)
+        try:
+            narc = rom.narc(ITEM_DATA_NARC)
+            return [(struct.unpack_from("<H", narc.member(item_data_id(i), 8, 2))[0] >> 7) & 0xF
+                    for i in range(NUM_ITEMS)]
+        finally:
+            rom.close()
+    except Exception:  # noqa: BLE001
+        log.exception("could not read Platinum item data from %s", path)
+        return None
+
 
 def load_data(path):
     """ndsrom.PlatinumData of the player's Platinum ROM (cached), or None if there's no usable file."""
@@ -49,14 +83,24 @@ def load_data(path):
         return None
 
 
-def classify(rec: bytes) -> str:
-    """'empty', 'mon' or 'bad' (checksum mismatch: the game shows a Bad Egg; we never harvest or erase it)."""
+def normalise(rec: bytes) -> tuple:
+    """(kind, record): kind 'empty', 'mon' or 'bad'. A record the game has decrypted in place right now (it does
+    that while working on a mon, and a DS frame can end in the middle) is valid *plain* data: it is returned
+    encrypted again (= what the game writes back). 'bad' = no valid checksum either way (a Bad Egg in the game):
+    never harvested or erased."""
     rec = bytes(rec)
     if rec == EMPTY:
-        return "empty"
+        return "empty", rec
     if not pk4.valid(rec):
-        return "bad"
-    return "empty" if pk4.is_empty(rec) else "mon"
+        if pk4.checksum(rec) == struct.unpack_from("<H", rec, 6)[0]:      # plain, mid-update
+            enc = pk4.encrypt(rec)
+            return ("empty" if pk4.is_empty(enc) else "mon"), enc
+        return "bad", rec
+    return ("empty" if pk4.is_empty(rec) else "mon"), rec
+
+
+def classify(rec: bytes) -> str:
+    return normalise(rec)[0]
 
 
 def fold(slots: list, known=frozenset()) -> tuple:
@@ -69,7 +113,7 @@ def fold(slots: list, known=frozenset()) -> tuple:
     for b in range(NUM_BOXES):
         for s in range(BOX_SLOTS):
             rec = bytes(slots[b][s]) if b < len(slots) and s < len(slots[b]) else EMPTY
-            kind = classify(rec)
+            kind, rec = normalise(rec)
             if kind == "empty":
                 continue
             if kind == "bad":
@@ -120,10 +164,14 @@ def layout(boxes: list, unplaced=()) -> list:
 class Gen4PC:
     """Read/write Platinum's 18 x 30 PC boxes in the save RAM as the store's 14 x 20 view."""
 
-    def __init__(self, pm, rom):
-        """pm: platinum.PlatinumMemory (memory bus at pm.m); rom: ndsrom.PlatinumData of the running ROM."""
+    edits_in_box = True             # the box UI can mark a mon or give/take its item in place (pcdb._match_edits)
+
+    def __init__(self, pm, rom, pockets=None):
+        """pm: platinum.PlatinumMemory (memory bus at pm.m); rom: ndsrom.PlatinumData of the running ROM;
+        pockets: load_item_pockets() (needed to give items back to the bag)."""
         self.pm = pm
         self.rom = rom
+        self.pockets = pockets
         self.known = set()          # records of the store's last view (PCSync._prime)
         self.unplaced = []          # records left in the game because the store is full (or with a bad checksum)
         self.harvested = 0          # Pokémon folded in from slots 21-30 / boxes 15-18 at the last read
@@ -210,6 +258,72 @@ class Gen4PC:
 
     def entry_from_record(self, rec: bytes, origin="platinum", entry_id=None) -> dict:
         return pk4.entry_from_pk4(rec, self.rom, origin=origin, entry_id=entry_id)
+
+    def updated_entry(self, entry: dict, rec: bytes, origin="platinum") -> dict:
+        """A stored mon the box UI changed in place (same entry id). Only markings changed on a mon from another
+        game -> the entry stays as it is (marks are cosmetic; its own game's exact data is kept). Anything else
+        (an item given/taken) -> the entry's current representation becomes these Platinum bytes."""
+        try:
+            old = pk4.PK4(pk4.decrypt(self.record_for(entry)))
+            new = pk4.PK4(pk4.decrypt(rec))
+            new_no_marks = pk4.PK4(new.plain)
+            new_no_marks.markings = old.markings
+            if entry.get("origin") != origin and new_no_marks.plain == old.plain:
+                return entry
+        except ValueError:
+            pass
+        return pk4.entry_from_pk4(rec, self.rom, origin=origin, entry_id=entry["id"])
+
+    @staticmethod
+    def held_item(rec: bytes) -> int:
+        try:
+            return pk4.PK4(pk4._plain_of(bytes(rec))[:pk4.BOX_SIZE]).item
+        except ValueError:
+            return 0
+
+    def items_added(self, old: bytes, new: bytes) -> list:
+        """[item] if `new` holds an item `old` didn't (given to a mon whose stored copy we put back)."""
+        item = self.held_item(new)
+        return [item] if item and item != self.held_item(old) else []
+
+    @staticmethod
+    def distance(a: bytes, b: bytes) -> int:
+        """Bytes that differ between two mons' decrypted data (encryption hides how close two records are)."""
+        try:
+            pa, pb = pk4._plain_of(bytes(a))[:pk4.BOX_SIZE], pk4._plain_of(bytes(b))[:pk4.BOX_SIZE]
+        except ValueError:
+            pa, pb = bytes(a), bytes(b)
+        return sum(x != y for x, y in zip(pa, pb)) + abs(len(pa) - len(pb))
+
+    def give_item(self, item: int) -> bool:
+        """Bag_TryAddItem(bag, item, 1): onto the pocket's stack of that item, else its first empty slot (max 999,
+        TMs/HMs 99). False if it doesn't fit or the item is unknown."""
+        if not self.pockets or not 0 < item < len(self.pockets):
+            return False
+        pocket = self.pockets[item]
+        if pocket not in BAG_POCKETS:
+            return False
+        body = self.pm.save_body()
+        if not body:
+            return False
+        off, size = BAG_POCKETS[pocket]
+        base = body + PAGE_BAG + off
+        m = self.pm.m
+        slots = [struct.unpack_from("<HH", m.read(base + 4 * k, 4)) for k in range(size)]
+        cap = 99 if pocket == POCKET_TMHMS else 999
+        free = None
+        for k, (it, q) in enumerate(slots):
+            if it == item:
+                if q + 1 > cap:
+                    return False
+                m.write(base + 4 * k, struct.pack("<HH", item, q + 1))
+                return True
+            if free is None and it == 0 and q == 0:
+                free = k
+        if free is None:
+            return False
+        m.write(base + 4 * free, struct.pack("<HH", item, 1))
+        return True
 
     @staticmethod
     def key(rec: bytes) -> str:
