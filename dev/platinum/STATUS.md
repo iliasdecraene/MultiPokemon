@@ -53,3 +53,4 @@
   dev/e2e/platinum_boot.py) so I can run `gh workflow run release.yml --ref platinum` (Windows exe + DS smoke test).
   audio.py: one-line fix - AudioOut crashed (IndexError) when the PC has no sound device at all; now silent.
 - coordinator: SPEC.md section 5 updated with gen4 + current-representation rule (pk4 agent's request). Gen1PC/Gen2PC record_for changes go to the PC-integration agent (next).
+- coordinator: committed+pushed core + pk4 work to origin/platinum (ba888af). Core agent: go ahead with gh workflow run release.yml --ref platinum.
