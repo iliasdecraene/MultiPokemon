@@ -419,7 +419,7 @@ since then as gone.
 ## 7. Challenges (Soul Link) — added in 0.6.0
 
 A challenge is a co-op run between two players on **fresh, separate saves** of the same game (Yellow, Crystal or
-Platinum - Platinum since the release after 0.7.2).
+Platinum - Platinum since 0.7.4).
 It only runs while **both** players are in it. The server keeps the challenge record and an append-only **ledger**
 of rule events; each client derives the rule state from the ledger (`client/yellowlink/soullink.py`) and enforces
 it in its own game.
@@ -449,7 +449,7 @@ Summaries (`ledger` omitted, plus `"online": [uid...]` = players currently in th
 ### Messages
 | client → server | fields | notes |
 |---|---|---|
-| `library` | `games` list[str], `challenge_games` list[str] (optional), `challenge_rules` list[str] (optional) | games the player has installed with the verified ROM (sent on connect); shown in roster as `games`. `challenge_games` (clients after 0.7.2) = the games this client can run a challenge in; `challenge_rules` (clients after 0.7.3) = optional run rules it knows, today `["exp_share"]`. Both shown in the roster under the same names (null = offline or older client) |
+| `library` | `games` list[str], `challenge_games` list[str] (optional), `challenge_rules` list[str] (optional) | games the player has installed with the verified ROM (sent on connect); shown in roster as `games`. `challenge_games` (clients 0.7.4+) = the games this client can run a challenge in; `challenge_rules` (clients 0.7.4+) = optional run rules it knows, today `["exp_share"]`. Both shown in the roster under the same names (null = offline or older client) |
 | `challenge_request` | `to`, `kind`, `game`, `rules` — or `to`, `challenge_id` to continue | target must be online and free |
 | `challenge_respond` | `request_id`, `accept` bool | |
 | `challenge_join` | `challenge_id` | sent after loading into the challenge game (and after every reconnect while in it) |
@@ -480,7 +480,7 @@ setting, so the server refuses a request with `exp_share` on unless BOTH players
 same check runs when such a run is continued. Off works with every client.
 
 Which games (server, `challenges.can_play`): Yellow/Crystal need the game in `games` (unknown `games` = allowed,
-as before). Platinum also needs it in `challenge_games`: 0.7.0-0.7.2 clients list `platinum` in `games` but have no
+as before). Platinum also needs it in `challenge_games`: 0.7.0-0.7.3 clients list `platinum` in `games` but have no
 Platinum Soul Link, so they are never sent a Platinum request (the requester gets "X needs a newer YellowLink...") and
 can't start one. The same check runs when a run is continued.
 

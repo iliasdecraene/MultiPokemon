@@ -165,8 +165,8 @@ class Client:
     battle_id: str | None = None
     challenge_id: str | None = None   # set while in (or loading into) a challenge session
     games: list | None = None         # installed games (from `library`), None = unknown (old client)
-    challenge_games: list | None = None   # games it can run a challenge in (`library`, after 0.7.2); None = old
-    challenge_rules: list | None = None   # optional run rules it knows (`library`, after 0.7.3), e.g. ["exp_share"]
+    challenge_games: list | None = None   # games it can run a challenge in (`library`, 0.7.4+); None = old
+    challenge_rules: list | None = None   # optional run rules it knows (`library`, 0.7.4+), e.g. ["exp_share"]
     last_report: float = 0.0
     _rate_window: float = 0.0
     _rate_count: int = 0
@@ -1186,14 +1186,14 @@ class YellowLinkServer:
                 isinstance(g, str) and re.fullmatch(r"[a-z0-9]{1,16}", g) for g in games):
             raise Invalid("games must be a list of game ids")
         client.games = sorted(set(games))
-        cg = msg.get("challenge_games")                   # optional (clients after 0.7.2), see SPEC.md section 7
+        cg = msg.get("challenge_games")                   # optional (clients 0.7.4+), see SPEC.md section 7
         if cg is not None and (not isinstance(cg, list) or len(cg) > 8 or not all(
                 isinstance(g, str) and re.fullmatch(r"[a-z0-9]{1,16}", g) for g in cg)):
             raise Invalid("challenge_games must be a list of game ids")
         changed = cg is not None and sorted(set(cg)) != client.challenge_games
         if cg is not None:
             client.challenge_games = sorted(set(cg))
-        cr = msg.get("challenge_rules")                   # optional (clients after 0.7.3)
+        cr = msg.get("challenge_rules")                   # optional (clients 0.7.4+)
         if cr is not None and (not isinstance(cr, list) or len(cr) > 8 or not all(
                 isinstance(g, str) and re.fullmatch(r"[a-z0-9_]{1,16}", g) for g in cr)):
             raise Invalid("challenge_rules must be a list of rule names")

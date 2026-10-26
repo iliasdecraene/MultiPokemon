@@ -21,11 +21,11 @@ log = logging.getLogger("yellowlink.challenges")
 KINDS = {"soul_link": "Soul Link"}
 GAMES = {"yellow": "Pokémon Yellow", "crystal": "Pokémon Crystal", "platinum": "Pokémon Platinum"}
 # Games every challenge-capable client (0.6.0+) can play. Others need the client to list them in
-# `library.challenge_games` (clients after 0.7.2): 0.7.x clients already report "platinum" in `games` (a verified ROM since
+# `library.challenge_games` (clients 0.7.4+): 0.7.x clients already report "platinum" in `games` (a verified ROM since
 # 0.7.0) but have no Platinum Soul Link, so they must never be asked into one.
 LEGACY_GAMES = ("yellow", "crystal")
 MAX_DEX = 493                # national dex (Platinum)
-# Optional run rules a client must know to play them (`library.challenge_rules`, clients after 0.7.3). A client that
+# Optional run rules a client must know to play them (`library.challenge_rules`, clients 0.7.4+). A client that
 # doesn't know `exp_share` would apply its own Exp Share All setting, so a run with it on needs both to know it.
 OPTIONAL_RULES = ("exp_share",)
 REQUEST_TIMEOUT = 60.0

@@ -398,7 +398,7 @@ class ChallengeMixin:
 
     def shared_games(self, uid) -> list:
         """Games both of us can run a Soul Link in (form buttons). Yellow/Crystal: the partner's `games` (None =
-        unknown, allowed as before); Platinum also needs it in their `challenge_games` (clients after 0.7.2)."""
+        unknown, allowed as before); Platinum also needs it in their `challenge_games` (clients 0.7.4+)."""
         e = next((r for r in self.roster if r.get("uid") == uid), {}) or {}
         theirs = e.get("games")
         their_chal = e.get("challenge_games") or []
