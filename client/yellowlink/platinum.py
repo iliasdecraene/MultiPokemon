@@ -482,3 +482,91 @@ MAP_LOCATION = bytes.fromhex(
     "2a2b2b2b34343434343456564243453568063e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e"
     "3e3e3e3e3e3e3e3e61707050717472736576764775797a7575757575757575757575333306457b327c2b7d"
 )
+LOCATION_NAMES = dict(LOCATIONS)
+
+
+def area_of(map_id: int) -> str:
+    """Area key of a map = its location label (e.g. 'twinleaf_town' for the town and every house in it)."""
+    if 0 <= map_id < len(MAP_LOCATION):
+        return LOCATIONS[MAP_LOCATION[map_id]][0]
+    return "map_%04x" % map_id
+
+
+def area_name(area: str) -> str:
+    return LOCATION_NAMES.get(area, area.replace("_", " ").title())
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Boot: title screen -> CONTINUE
+# ---------------------------------------------------------------------------------------------------------
+def _press(core, key: str, frames: int = 4):
+    if hasattr(core, "press"):                          # dev/platinum/ds.DS
+        try:
+            core.press(key, 2)
+        except TypeError:
+            core.press(key)
+        return
+    core.button_press(key)                              # nds_core.NDSCore
+    _run(core, frames)
+    core.button_release(key)
+
+
+def _run(core, n: int):
+    if hasattr(core, "run"):
+        core.run(n)
+    else:
+        core.tick(n, False) if _tick_takes_render(core) else core.tick(n)
+
+
+def _tick_takes_render(core) -> bool:
+    try:
+        import inspect
+        return "render" in inspect.signature(core.tick).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def fast_continue(core, on_progress=None, max_frames: int = 7200) -> str:
+    """From power-on: skip the intro movie + title screen and pick CONTINUE. Returns 'loaded' (player in control in
+    the overworld), 'no save' (stops on the main menu, which then only offers NEW GAME - nothing is pressed there)
+    or 'timeout'.
+
+    Verified (dev/platinum/verify.py): START/A are only pressed while sApplication.currOverlayID is 77
+    (game_opening: logos, intro movie, PRESS START), so a stray press can never pick NEW GAME; on the main menu
+    (overlay 97) CONTINUE is the default entry -> A, but only if SaveData.dataExists.
+    `core` needs press(key)/run(frames) (ds.DS) or button_press/button_release/tick (NDSCore) + the bus methods.
+    """
+    pm = PlatinumMemory(core)
+    f = 0
+    last_press = -999
+    menu_since = None
+    toggle = 0
+    while f < max_frames:
+        if pm.in_game():
+            # wait for the map fade-in / load task to finish
+            if pm.is_safe():
+                _run(core, 10)
+                return "loaded"
+        else:
+            ov = pm.top_overlay()
+            if ov == OVERLAY_GAME_OPENING and f - last_press >= 30:
+                _press(core, ("start", "a")[toggle])
+                toggle ^= 1
+                last_press = f
+                f += 6
+            elif ov == OVERLAY_MAIN_MENU:
+                if menu_since is None:
+                    menu_since = f
+                if not pm.has_save():
+                    return "no save"
+                if f - menu_since >= 40 and f - last_press >= 60:
+                    _press(core, "a")
+                    last_press = f
+                    f += 6
+            else:
+                menu_since = None
+        _run(core, 1)
+        f += 1
+        if on_progress and f % 120 == 0:
+            on_progress()
+    return "timeout"
