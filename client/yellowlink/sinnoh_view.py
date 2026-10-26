@@ -16,13 +16,16 @@ Everything below was checked on the real ROM (dev/platinum/MEMORY_MAP.md "Friend
     1 orthographic: interiors), +0x46 fovY u16. Outdoors lookAt.target == the player's MapObject pos.
   * Billboard anchor = MapObject.pos + spriteJumpOffset + spritePosOffset + spriteTerrainOffset + (0, 0, 6)
     (ov5_021EDEB4); the model (mmodel.narc generic_32x32) is a quad x -16..16, y 0..32 in camera space above it.
-    Measured on screen: NPC sprite bounding boxes match the projected quad within ~1 px (perspective outdoors,
-    exact indoors (orthographic)).
+    Measured on screen: indoors (orthographic) the projected quad matches the drawn sprite exactly; outdoors
+    (perspective) DeSmuME draws it ~1 px right / 0.5 px lower than the exact maths (PERSPECTIVE_NUDGE), after
+    which the local player's sprite matches pixel for pixel and NPC bounding boxes within ~1 px.
   * The top screen shows the 3D scene of 3 emulated frames ago (geometry/display pipeline): project with the
     camera read 3 frames earlier (DISPLAY_LAG) or friends shift by 2-4 px while the camera scrolls.
   * Player textures: mmodel.narc member 90 (BTX0 "pl_boy01c") / 91 ("pl_girl01c"): 32 4bpp 32x32 frames
     "<name>.1".."<name>.32": frames 0-15 walk (4 per direction: up, down, left, right = the game's DIR_* order;
-    stand, step, stand, step), 16-31 run (same order). Palette colour 0 is transparent.
+    stand, step, stand, step), 16-31 run (same order). Palette colour 0 is transparent. Bike: members 92/93
+    ("pl_cyclehero"/"pl_cycheroine", 24 frames, 0-15 in the same order; checked on the decoded texture only -
+    no save with a bike to try it in game).
   * Outdoor maps (map header mapMatrixID == 0) share the global Sinnoh grid; other maps have local coordinates
     and several maps may share one matrix (e.g. all Pokémon Centers) -> friends only show on the same map id, or
     when both players are on matrix-0 maps (then a friend one town over is still placed correctly).
@@ -46,8 +49,12 @@ BILLBOARD_Z = 6                   # ov5_021EDEB4: billboard pos.z += 6
 QUAD_W, QUAD_H = 32, 32           # generic_32x32 billboard: x -16..16, y 0..32
 SCREEN_W, SCREEN_H = 256, 192
 DISPLAY_LAG = 3                   # emulated frames between the camera in RAM and the picture on the top screen
+PERSPECTIVE_NUDGE = (1.0, 0.5)    # DeSmuME draws perspective billboards this many px right/down of the exact maths
 MMODEL_NARC = "/data/mmodel/mmodel.narc"
-PLAYER_TEXTURES = {0: (90, "pl_boy01c"), 1: (91, "pl_girl01c")}
+# (gender, avatar kind) -> (mmodel.narc member, texture name): kind 0 = walking/running, 1 = cycling
+PLAYER_TEXTURES = {(0, 0): (90, "pl_boy01c"), (1, 0): (91, "pl_girl01c"),
+                   (0, 1): (92, "pl_cyclehero"), (1, 1): (93, "pl_cycheroine")}
+MIN_FRAMES = {0: 32, 1: 24}
 SHADOW_W, SHADOW_H, SHADOW_ALPHA = 13, 6, 28    # the game's shadow: ellipse ending at the anchor, ~10 % darker
 
 RAM_LO, RAM_HI = 0x02000000, 0x02400000
@@ -162,6 +169,8 @@ class Camera:
         s = self.px_per_unit(v[2])
         if not s or math.isnan(sx):
             return None
+        if self.projection == 0:
+            sx, sy = sx + PERSPECTIVE_NUDGE[0], sy + PERSPECTIVE_NUDGE[1]
         return (sx - w / 2 * s, sy - h * s, w * s, h * s, v[2])
 
 
@@ -180,6 +189,23 @@ def billboard_anchor(px: float, ph: float, py: float) -> tuple:
     """World anchor of a person standing at the published smooth position (platinum.position(): px/py = pos - 8
     in world units (= tile*16 when standing), ph = pos.y)."""
     return (px + 8, ph, py + 8 + BILLBOARD_Z)
+
+
+def pack_img(gender: int, running: bool, state: int, ph: int) -> int:
+    """Platinum's `img` state field (the relay server keeps only known int fields): bit 0 gender (1 = Dawn),
+    bit 1 running, bits 2-3 avatar kind (0 walking, 1 cycling, 2 surfing, 3 other), bits 4+ = height
+    (MapObject pos.y in world units, signed)."""
+    kind = state if state in (0, 1, 2) else 3
+    return (int(ph) << 4) | (kind << 2) | (2 if running else 0) | (int(gender) & 1)
+
+
+def unpack_img(img) -> dict:
+    """Inverse of pack_img: {"gender", "running", "kind", "ph"} (defaults for junk)."""
+    try:
+        v = int(img)
+    except (TypeError, ValueError):
+        v = 0
+    return {"gender": v & 1, "running": bool(v & 2), "kind": (v >> 2) & 3, "ph": v >> 4}
 
 
 def map_matrix(bus, map_id: int, cache: dict | None = None) -> int:
@@ -278,7 +304,8 @@ _SPRITE_CACHE: dict = {}
 
 
 def player_sprites(rom_path: str) -> dict:
-    """{gender: decode_btx0 result} for Lucas (0) and Dawn (1), read from the player's own Platinum ROM.
+    """{(gender, kind): decode_btx0 result} for Lucas (0) / Dawn (1) walking (kind 0) and cycling (kind 1), read
+    from the player's own Platinum ROM.
     Cached per ROM path. Raises (OSError/ValueError/KeyError) if the ROM doesn't have them."""
     if rom_path in _SPRITE_CACHE:
         return _SPRITE_CACHE[rom_path]
@@ -287,11 +314,11 @@ def player_sprites(rom_path: str) -> dict:
     try:
         narc = rom.narc(MMODEL_NARC)
         out = {}
-        for gender, (member, name) in PLAYER_TEXTURES.items():
+        for key, (member, name) in PLAYER_TEXTURES.items():
             tex = decode_btx0(narc.member(member))
-            if tex["name"] != name or len(tex["frames"]) < 32:
+            if tex["name"] != name or len(tex["frames"]) < MIN_FRAMES[key[1]]:
                 raise ValueError(f"mmodel member {member} is {tex['name']!r}, expected {name!r}")
-            out[gender] = tex
+            out[key] = tex
     finally:
         rom.close()
     _SPRITE_CACHE[rom_path] = out
@@ -308,11 +335,11 @@ def sample_quad(rect, w: int, h: int):
     if rw <= 0 or rh <= 0:
         return
     for sy in range(max(0, int(math.floor(top))), min(SCREEN_H, int(math.ceil(top + rh)))):
-        v = int((sy + 0.5 - top) / rh * h)
+        v = math.floor((sy + 0.5 - top) / rh * h)
         if not 0 <= v < h:
             continue
         for sx in range(max(0, int(math.floor(left))), min(SCREEN_W, int(math.ceil(left + rw)))):
-            u = int((sx + 0.5 - left) / rw * w)
+            u = math.floor((sx + 0.5 - left) / rw * w)
             if 0 <= u < w:
                 yield sx, sy, u, v
 
@@ -355,6 +382,7 @@ class FriendSprite:
     anchor: tuple            # world billboard anchor (billboard_anchor())
     gender: int
     frame: int               # frame_index()
+    kind: int = 0            # 0 walking/running, 1 cycling
 
 
 class SinnohView:
@@ -364,7 +392,8 @@ class SinnohView:
         self.rom_path = rom_path
         self.sprites = None          # {gender: {"name", "frames"}}
         self.error = None
-        self.cams: list = []         # [(emu frame, Camera)]
+        self.cams: list = []         # [(emu frame, Camera | None, my anchor)]
+        self.idle: dict = {}         # uid -> app frames a friend hasn't moved
         self.tint = (1.0, 1.0, 1.0)
         self._surf_cache: dict = {}
         self._matrix_cache: dict = {}
@@ -375,25 +404,28 @@ class SinnohView:
             self.error = f"{type(exc).__name__}: {exc}"
 
     # camera history ----------------------------------------------------------------------------------------
-    def record_camera(self, bus, fs, frame: int):
-        """Call once per app frame after the emulator ran (frame = emulated frame counter)."""
+    def record_camera(self, bus, fs, frame: int, me_anchor=None):
+        """Call once per app frame after the emulator ran (frame = emulated frame counter; fs = FieldSystem while
+        the overworld runs, else None). me_anchor = the local player's billboard anchor right now."""
         cam = read_camera(bus, fs) if fs else None
         if self.cams and frame <= self.cams[-1][0]:
             self.cams.clear()                     # state loaded / reset
-        self.cams.append((frame, cam))
+        self.cams.append((frame, cam, me_anchor))
         if len(self.cams) > 12:
             del self.cams[:-12]
 
-    def display_camera(self, frame: int):
-        """The camera the top screen is currently showing (DISPLAY_LAG frames ago); None during a hand-over."""
+    def display(self, frame: int):
+        """(camera, local player's anchor) as the top screen shows them now = DISPLAY_LAG emulated frames ago.
+        (None, None) right after a map change / while another camera is active."""
         best = None
-        for f, cam in self.cams:
-            if f <= frame - DISPLAY_LAG:
-                best = cam
-            elif best is None:
-                best = cam                         # not enough history yet (just started): newest-but-one is fine
-                break
-        return best
+        for item in self.cams:
+            if item[0] <= frame - DISPLAY_LAG:
+                best = item
+        if best is None:
+            return None, None
+        if any(c is None for f, c, _m in self.cams if f >= best[0]):
+            return None, None                      # the camera went away in between (warp, battle, menu)
+        return best[1], best[2]
 
     def matrix_of(self, bus):
         return lambda m: map_matrix(bus, m, self._matrix_cache)
@@ -403,7 +435,7 @@ class SinnohView:
         """Estimate the area light from the local player's standing sprite (call only while he stands still)."""
         if not self.sprites or cam is None:
             return
-        tex = self.sprites.get(gender & 1)
+        tex = self.sprites.get((gender & 1, 0))
         rect = cam.billboard(my_anchor)
         if not tex or not rect:
             return
@@ -412,13 +444,14 @@ class SinnohView:
             self.tint = tuple(round(0.5 * a + 0.5 * b, 3) for a, b in zip(self.tint, g))
 
     # drawing ------------------------------------------------------------------------------------------------
-    def _surface(self, gender: int, frame: int, w: int, h: int):
+    def _surface(self, gender: int, kind: int, frame: int, w: int, h: int):
         import pygame
         tint = tuple(min(255, int(t * 255)) // 8 * 8 for t in self.tint)   # quantised: the cache stays small
-        key = (gender, frame, w, h, tint)
+        key = (gender, kind, frame, w, h, tint)
         s = self._surf_cache.get(key)
         if s is None:
-            fw, fh, rgba = self.sprites[gender & 1]["frames"][frame]
+            frames = self.sprites[(gender & 1, kind)]["frames"]
+            fw, fh, rgba = frames.get(frame) or frames[0]
             base = pygame.image.frombuffer(rgba, (fw, fh), "RGBA").copy()
             if min(tint) < 248:
                 base.fill((*tint, 255), special_flags=pygame.BLEND_RGBA_MULT)
@@ -457,7 +490,7 @@ class SinnohView:
                 shadow = pygame.Surface((sw, sh), pygame.SRCALPHA)
                 pygame.draw.ellipse(shadow, (0, 0, 0, SHADOW_ALPHA), shadow.get_rect())
                 surf.blit(shadow, (int(round(left + w / 2 - sw / 2)), int(round(top + h)) - sh))
-                img = self._surface(f.gender, f.frame, iw, ih)
+                img = self._surface(f.gender, f.kind if f.kind in (0, 1) else 0, f.frame, iw, ih)
                 if me_rect and depth < me_rect[4] and me_mask_frames:
                     img = self._behind_me(img, (x0, y0), me_rect, me_mask_frames)
                 surf.blit(img, (x0, y0))
@@ -486,3 +519,31 @@ class SinnohView:
                 if 0 <= lx < iw and 0 <= ly < ih:
                     img.set_at((lx, ly), (0, 0, 0, 0))
         return img
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Smooth movement of remote players between state messages (sent every 4 frames)
+# ---------------------------------------------------------------------------------------------------------
+GLIDE_SNAP = 64          # world units (4 tiles): farther jumps (warps, reconnects) snap instead of gliding
+
+
+def glide(cx: float, cy: float, tx: float, ty: float) -> tuple:
+    """One app frame of gliding from (cx, cy) towards the last reported (tx, ty), in world units.
+    The step is a quarter of the remaining distance (at least 1), so a friend who walks (1 unit/frame), runs (2)
+    or cycles (4) and reports every 4 frames is drawn moving at his real, steady speed.
+    Returns (x, y, moved) with moved = units travelled this frame (0 when snapped or standing)."""
+    dx, dy = tx - cx, ty - cy
+    if abs(dx) > GLIDE_SNAP or abs(dy) > GLIDE_SNAP:
+        return tx, ty, 0
+    if not dx and not dy:
+        return cx, cy, 0
+    spd = max(1, math.ceil(max(abs(dx), abs(dy)) / 4))
+    sx = max(-spd, min(spd, dx))
+    sy = max(-spd, min(spd, dy))
+    return cx + sx, cy + sy, max(abs(sx), abs(sy))
+
+
+def walk_step(anim: float) -> int:
+    """Walking animation step (0-3: stand, step, stand, step) from the distance walked: one change every half
+    tile, like the game."""
+    return int(anim // 8) % 4

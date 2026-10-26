@@ -31,6 +31,7 @@ try:                                   # Platinum's PC boxes as a view of the PC
     from . import platinum_pc
 except ImportError:
     platinum_pc = None
+from . import sinnoh_view                # friends walking around in Platinum's 3D overworld
 
 log = logging.getLogger("yellowlink")
 
@@ -964,7 +965,10 @@ class App(ChallengeMixin, TradeMixin):
             st = {k: v for k, v in pos.items() if isinstance(v, (int, float, str, bool)) and not isinstance(v, float)}
             st.update({"map": int(pos.get("map", 0)), "x": x, "y": y,
                        "px": int(pos.get("px", x * 16)), "py": int(pos.get("py", y * 16)),
-                       "facing": int(pos.get("facing", 0)), "img": int(pos.get("img", 0))})
+                       "facing": int(pos.get("facing", 0)),
+                       # gender/running/bike/height for friends' screens (SPEC.md 2; the server keeps only img)
+                       "img": sinnoh_view.pack_img(pos.get("gender", 0), pos.get("running"), pos.get("state", 0),
+                                                   pos.get("ph", 0))})
         except (TypeError, ValueError):
             return
         st.update(type="state", visible=True, game=self.game_id)
@@ -1008,12 +1012,17 @@ class App(ChallengeMixin, TradeMixin):
             return
         if not self.pc_codec or not self.pcsync.session_open:
             return
-        report = self.pcsync.close_session(self.game_id, self.pc_codec, self.G.party_records(self.game))
-        remove_slot = getattr(self.pc_codec, "remove_party_slot", None) or self.game.remove_party_slot
-        for slot in sorted(report["standin_party_slots"], reverse=True):
-            remove_slot(slot)
+        party = self.G.party_records(self.game)
+        report = self.pcsync.close_session(self.game_id, self.pc_codec, party)
         if self.ds:
+            # Platinum: taken out of the party once the game isn't in the middle of updating it (_pt_pc_poll)
+            if report["standin_party_slots"]:
+                self._pt_party_fix = ({self.pc_codec.key(party[i]) for i in report["standin_party_slots"]},
+                                      self.frame + 600)
             self._pt_pc_report()
+        else:
+            for slot in sorted(report["standin_party_slots"], reverse=True):
+                self.game.remove_party_slot(slot)
         if report.get("locked_returned"):
             names = ", ".join(n.title() for n in report["locked_returned"][:3])
             self.toast(f"{names} is part of a trade that's still finishing - it stays in the PC.", 6, ui.ACCENT)
@@ -1036,6 +1045,7 @@ class App(ChallengeMixin, TradeMixin):
     def _start_pt_pc(self):
         self._pt_pc = None               # None | "opening" (hook fired) | "open" (box UI running)
         self._pt_pc_wait = 0
+        self._pt_party_fix = None        # (mon keys, give-up frame): party mons to take out after the PC closed
         if not (self.full and platinum_pc and not self.chal and hasattr(self.G, "HOOK_PC_OPEN")):
             return
         data = self.plat_data
@@ -1055,6 +1065,8 @@ class App(ChallengeMixin, TradeMixin):
     def _pt_pc_poll(self, frames):
         """Every host frame: notice the box UI closing (pc_open() goes False) -> on_pc_close."""
         if self._pt_pc is None:
+            if self._pt_party_fix:
+                self._pt_fix_party()
             return
         now_open = self.game.pc_open()
         if self._pt_pc == "opening":
@@ -1068,6 +1080,25 @@ class App(ChallengeMixin, TradeMixin):
         elif not now_open:
             self._pt_pc = None
             self.on_pc_close()
+
+    def _pt_fix_party(self):
+        """Take stand-ins (and traded-away / locked mons) back out of Platinum's party. The game decrypts party
+        records in place while it works on them and a DS frame can end in the middle of that, so this waits for a
+        moment where every record is encrypted with a valid checksum and two reads agree (party_checked)."""
+        keys, give_up = self._pt_party_fix
+        recs = self.game.party_checked()
+        if recs is None:
+            if self.frame > give_up:
+                log.warning("Platinum party never settled; stand-ins left in the party")
+                self._pt_party_fix = None
+            return
+        codec = self.pc_codec
+        drop = [i for i, r in enumerate(recs) if codec.is_standin(r[:136]) or codec.key(r[:136]) in keys]
+        for i in reversed(drop):
+            codec.remove_party_slot(i)
+        self._pt_party_fix = None
+        if drop:
+            log.info("took %d Pokémon back out of the Platinum party", len(drop))
 
     def _pt_pc_report(self):
         codec = self.pc_codec
@@ -1681,6 +1712,9 @@ class App(ChallengeMixin, TradeMixin):
     # --------------------------------------------------------------- render
     def update_friends(self):
         """Glide remote players toward their last reported position (1-2 px/frame)."""
+        if self.ds:
+            self._update_friends_ds()
+            return
         for f in self.friends.values():
             st = f.state
             if not st:
@@ -1699,6 +1733,77 @@ class App(ChallengeMixin, TradeMixin):
                 f.anim += 1
             else:
                 f.anim = 0
+
+    # Platinum: friends walking around in Sinnoh (sinnoh_view.py) ---------------------------------------------
+    def _sinnoh(self):
+        """The Platinum friend renderer (camera history + Lucas/Dawn decoded from the player's ROM) or None."""
+        sv = getattr(self, "_sv", None)
+        if sv is None and self.full and self.ds:
+            sv = self._sv = sinnoh_view.SinnohView(self.cfg["rom_path"])
+            if sv.error:
+                log.warning("friends in Sinnoh disabled: %s", sv.error)
+        return sv if sv is not None and not sv.error else None
+
+    def _update_friends_ds(self):
+        """Platinum: remember the camera (the top screen shows it a few frames late) and glide friends."""
+        sv = self._sinnoh()
+        if sv is None:
+            return
+        g = self.game
+        fs = g.field_system() if g.overworld_running() else None
+        me = None
+        if fs:
+            p = g.position()
+            me = sinnoh_view.billboard_anchor(p["px"], p["ph"], p["py"])
+        sv.record_camera(self.nds, fs, self.nds.frame_count, me)
+        for f in self.friends.values():
+            st = f.state
+            if not st:
+                continue
+            if f.cur_map != st.get("map"):
+                self._snap(f)
+            idle = sv.idle.get(f.uid, 99)
+            f.cur_px, f.cur_py, moved = sinnoh_view.glide(f.cur_px, f.cur_py, st.get("px", 0), st.get("py", 0))
+            if moved:
+                f.anim = (f.anim if idle < 6 else 8) + moved      # first half tile shows a step, like the game
+                sv.idle[f.uid] = 0
+            else:
+                sv.idle[f.uid] = idle + 1
+
+    def _draw_friends_ds(self):
+        """Platinum: draw friends on the top screen like NPCs; returns name tags [(name, x, y)] in view pixels."""
+        sv = self._sinnoh()
+        g = self.game
+        if sv is None or not g.overworld_running() or g.field_task():
+            return []          # battle, menus/other screens (bag, PC...), text boxes, scripts, warps
+        cam, me = sv.display(self.nds.frame_count)
+        if cam is None:
+            return []
+        p = g.position()
+        if self.frame % 30 == 0 and me and g.is_safe() and p.get("state") == 0:
+            sv.update_tint(self.nds.screen_rgb(), cam, me, p.get("gender", 0), p.get("facing", 1))
+        matrix_of = sv.matrix_of(self.nds)
+        my_map = p.get("map", 0)
+        show = []
+        for f in self.friends.values():
+            st = f.state
+            if not st or not st.get("visible") or st.get("game") != self.game_id \
+                    or st.get("challenge") != (self.chal or {}).get("id") \
+                    or not sinnoh_view.same_space(my_map, st.get("map", -1), matrix_of):
+                continue
+            info = sinnoh_view.unpack_img(st.get("img", 0))
+            kind = info["kind"] if info["kind"] in (0, 1) else 0
+            step = sinnoh_view.walk_step(f.anim) if sv.idle.get(f.uid, 99) < 6 else 0
+            frame = sinnoh_view.frame_index(st.get("facing", 1), step, info["running"] and kind == 0)
+            show.append(sinnoh_view.FriendSprite(f.name, sinnoh_view.billboard_anchor(f.cur_px, info["ph"], f.cur_py),
+                                                 info["gender"], frame, kind))
+        if not show:
+            return []
+        my_kind = 1 if p.get("state") == 1 else 0
+        tex = sv.sprites.get((p.get("gender", 0) & 1, my_kind))
+        mask = [tex["frames"][sinnoh_view.frame_index(p.get("facing", 1), k, p.get("running") and not my_kind)]
+                for k in range(4)] if tex and me else []
+        return sv.draw(self.game_surf, cam, show, me, mask)
 
     def menu_mask(self, arr):
         """8x8-cell mask (18x20) of screen areas covered by a menu/text box, or None if nothing is.
@@ -1806,10 +1911,10 @@ class App(ChallengeMixin, TradeMixin):
     def render(self):
         self.click_targets = []
         if self.ds:
-            # both DS screens (top above the touch screen); friends in Sinnoh are drawn by the Platinum renderer
+            # both DS screens (top above the touch screen); friends in Sinnoh are drawn on the top screen
             self.game_surf.blit(pygame.image.frombuffer(self.nds.screen_rgb(), (self.view_w, self.view_h), "RGB"),
                                 (0, 0))
-            tags = []
+            tags = self._draw_friends_ds()
         else:
             arr = self.pyboy.screen.ndarray
             self.compose_world(arr)

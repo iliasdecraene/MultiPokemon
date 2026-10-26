@@ -162,22 +162,25 @@ class Gen4PC:
         slots = layout(boxes, self.unplaced)
         self.pm.m.write(addr, b"".join(rec for box in slots for rec in box))
 
-    def remove_party_slot(self, slot: int):
+    def remove_party_slot(self, slot: int) -> bool:
         """Party_RemovePokemonBySlotIndex: shift the rest up, clear the last slot (Pokemon_Init), count - 1.
-        Never removes the last party Pokémon."""
+        Never removes the last party Pokémon; refuses (False) while a record is mid-update (bad checksum)."""
         body = self.pm.save_body()
         if not body:
-            return
+            return False
         m = self.pm.m
         party = body + PAGE_PARTY
         n = m.r32(party + 4)
         if not 0 <= slot < n <= 6 or n <= 1:
-            return
+            return False
         recs = [m.read(party + 8 + i * PARTY_MON_SIZE, PARTY_MON_SIZE) for i in range(n)]
+        if not all(pk4.valid(r) for r in recs):         # the game is working on a record right now: not now
+            return False
         del recs[slot]
         recs.append(pk4.EMPTY_PARTY)
         m.write(party + 8, b"".join(recs))
         m.write(party + 4, struct.pack("<I", n - 1))
+        return True
 
     # --- records <-> entries --------------------------------------------------------------------------------
     def record_for(self, entry: dict) -> bytes:

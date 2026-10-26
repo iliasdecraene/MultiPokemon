@@ -10,7 +10,7 @@
 Run: python dev/e2e/pt_pctest.py   (needs dev/states/{platinum.nds,pt_pc.dsst,yellow.gb,pokecenter_pc.state})
 Screenshots are written to the temp folder printed at the end.
 """
-import os, sys, time, subprocess, tempfile, pathlib, atexit, struct
+import os, sys, time, subprocess, tempfile, pathlib, atexit
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.abspath(os.path.join(_HERE, "..", ".."))
 STATES = os.environ.get("YL_STATES", os.path.join(_REPO, "dev", "states"))
@@ -139,7 +139,13 @@ def shot(a, name):
 
 
 def party_species(a):
-    return [species(r[:136]) for r in a.game.party_raw()]
+    """Party species once the game isn't in the middle of updating a record (it decrypts them in place)."""
+    for _ in range(120):
+        recs = a.game.party_checked()
+        if recs is not None:
+            return [species(r[:136]) for r in recs]
+        steps(a, 1)
+    return None
 
 
 # 1. Yellow ---------------------------------------------------------------------------------------------------
@@ -147,6 +153,8 @@ Y = start("yellow", "pokecenter_pc.state")
 steps(Y, 300, lambda: Y.net.status == "online")
 check("Yellow online with the PC database on", Y.full and Y.pc_codec is not None and Y.net.status == "online")
 pa.open_pc(Y.pyboy)
+Y_OT = Y.game.party()[1].ot_str()
+Y_LEVEL = Y.game.party()[1].level
 check("Yellow: deposit PIDGEY", pa.deposit(Y.pyboy, 1))
 pa.close_pc(Y.pyboy)
 check("Yellow: autosave commits", Y.autosave(force=True) and store_nicks(Y, True) == ["PIDGEY"])
@@ -177,10 +185,12 @@ check("open hook started a PC session", P.pcsync.session_open and P._pt_pc == "o
 view = box_view(P)
 check("Platinum box 1 shows PIDGEY (converted) + ?EGG", view == [(16, "PIDGEY"), (132, "?EGG")], view)
 s1 = shot(P, "pt_1_box_converted_pidgey.png")
+press(P, "right", 40)
+s2 = shot(P, "pt_2_box_standin_egg.png")
+press(P, "left", 60)
 press(P, "a", 40)                       # PIDGEY: WITHDRAW
 press(P, "a", 100)
 press(P, "right", 40)
-s2 = shot(P, "pt_2_box_standin_egg.png")
 press(P, "a", 40)                       # ?EGG: WITHDRAW
 press(P, "a", 100)
 check("the game let both into the party", party_species(P) == [387, 387, 16, 132], party_species(P))
@@ -192,10 +202,11 @@ check("?EGG back in the database (same entry), PIDGEY out", store_nicks(P) == ["
       P.pcsync.working["boxes"][0][0]["id"] == "cegg" and P.pcsync.pending, store_nicks(P))
 check("player told the stand-in stays", any("Egg" in t[0] and "can't leave" in t[0] for t in P.toasts),
       [t[0] for t in P.toasts])
-pid_party = P.game.party_raw()[2]
-pk = pk4.PK4(pk4.decrypt(pid_party))
-check("PIDGEY in the Platinum party: real Gen-4 mon (Lv, OT, stats)", pk.species == 16 and pk.ot_name == "ASH"
-      and pk.level(P.pc_codec.rom) >= 2 and pk.stats[0] > 0, (pk.ot_name, pk.stats))
+party_species(P)
+pk = pk4.PK4(pk4.decrypt(P.game.party_checked()[2]))
+check("PIDGEY in the Platinum party: real Gen-4 mon (level, Yellow OT, stats)", pk.species == 16
+      and pk.ot_name == Y_OT and pk.level(P.pc_codec.rom) == Y_LEVEL and pk.stats[0] > 0,
+      (pk.ot_name, pk.level(P.pc_codec.rom), pk.stats))
 
 # 3. deposit PIDGEY -> box 1, TURTWIG -> box 16 -------------------------------------------------------------------
 check("DEPOSIT opens the box UI", pt_open(P, "deposit"))
@@ -222,10 +233,11 @@ pid = next(e for e in P.pcsync.working["boxes"][0] if e["nick"] == "PIDGEY")
 check("PIDGEY is now a Platinum entry (gen4 = the game's bytes)", pid["origin"] == "platinum" and pid["gen4"]
       and not pid["gen1"] and pid["dex"] == 16)
 check("player told about the box-16 fold", any("boxes 1-14" in t[0] for t in P.toasts), [t[0] for t in P.toasts])
-check("not committed until the autosave", P.pcsync.pending and store_nicks(P, True) == ["EGG"])
 n = len(P.saved_revs)
-check("autosave (overworld, idle) commits", P.game.is_safe() and P.autosave() and not P.pcsync.pending
-      and sorted(store_nicks(P, True)) == ["AAAAAAAAAA", "EGG", "PIDGEY"])
+if P.pcsync.pending:                    # (the app's own 30-second autosave may already have done it)
+    check("not committed until the autosave", "AAAAAAAAAA" not in store_nicks(P, True), store_nicks(P, True))
+    check("autosave (overworld, idle) commits", P.game.is_safe() and P.autosave() and not P.pcsync.pending)
+check("committed", sorted(store_nicks(P, True)) == ["AAAAAAAAAA", "EGG", "PIDGEY"])
 steps(P, 300, lambda: len(P.saved_revs) > n)
 check("server stored the Platinum changes", len(P.saved_revs) > n)
 
@@ -244,8 +256,8 @@ box = [n for _, n in pa.box(Y2.pyboy)]
 check("Yellow box: ?EGG, PIDGEY (converted back), ?AAAAAAAAA (the Turtwig)", box == ["?EGG", "PIDGEY", "?AAAAAAAAA"],
       box)
 rec = Y2.pc_codec.read_boxes()[Y2.pc_codec.current_box()]
-check("Yellow PIDGEY is a real Gen-1 Pidgey with its OT", Y2.rom.dex_no(rec[1][0]) == 16
-      and text.decode(rec[1][33:44]) == "ASH", rec[1].hex())
+check("Yellow PIDGEY is a real Gen-1 Pidgey with its OT and level", Y2.rom.dex_no(rec[1][0]) == 16
+      and text.decode(rec[1][33:44]) == Y_OT and rec[1][3] == Y_LEVEL, rec[1].hex())
 pa.close_pc(Y2.pyboy)
 check("Yellow: database unchanged by a look-only visit", sorted(store_nicks(Y2)) == ["AAAAAAAAAA", "EGG", "PIDGEY"])
 Y2.shutdown()

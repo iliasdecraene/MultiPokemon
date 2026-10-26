@@ -90,3 +90,30 @@
   Depositing heals PP (box bytes != party bytes[:136]). With NO save the main menu auto-starts NEW GAME, so
   fast_continue returns "no save" at the intro without pressing anything. Correction: the "AAAAAAAAAA" nickname is only
   in pt_pc/pt_pc_open (pt_starter's TURTWIG is un-nicknamed). Text speed is FAST (RAM option write) from pt_starter on.
+- 2026-10-26 pc agent: DONE Platinum PC <-> PC database. New: client/yellowlink/platinum_pc.py (Gen4PC: same interface as
+  Gen1PC/Gen2PC + remove_party_slot; pure fold()/layout() for the 18x30 <-> 14x20 mapping), client/tests/test_platinum_pc.py,
+  dev/e2e/pt_pctest.py (ALL PASS), dev/e2e/pt_trade_e2e.py (Yellow PyBoy + Platinum DeSmuME in one process, ALL PASS).
+  Edited: pcdb.py (current_rep() helper = SPEC rule; Gen1PC.record_for converts gen4 via pk4.to_gen1; PCSync._prime gives
+  the codec the last view's records), crystal.py (Gen2PC.record_for only: gen4 via pk4.to_gen2), trades.py (pc_dex_name:
+  falls back to the Platinum ROM's names, dex 1-493), app.py PC parts (plat_data property, _start_pt_pc/_pt_pc_hook/
+  _pt_pc_poll/_pt_fix_party/_pt_pc_report, codec.plat_rom for Yellow/Crystal; one line in step: self._pt_pc_poll(ticks)).
+  Facts (verified on the real game):
+  * WRITE POINT = exec hook HOOK_PC_OPEN 0x0203D754: after picking DEPOSIT/WITHDRAW/MOVE, before the box app exists.
+    BoxAppMan_Init reads PCBoxes from save RAM, so what we write there is what the UI shows (screenshots in the e2e).
+    Close = poll pc_open() every host frame ("opening" -> "open" -> closed; 10 s timeout if the UI never comes up).
+  * Mapping: store box i -> Platinum box i slots 1-20, everything else emptied. Reading folds holes, slots past the
+    20th mon and boxes 15-18 into free store space. Store full -> new mons stay in the game (boxes 15-18) + red toast;
+    slots with a bad checksum are never harvested or erased. PCSync's diff is byte-based, so no pcdb diff changes.
+  * IMPORTANT for anyone reading the PARTY (party snapshots, publish): a DS frame can end in the middle of game logic,
+    and Platinum decrypts party records IN PLACE while working on them -> at the PC menus I saw slot 2 read as garbage
+    (bad checksum) on some frames and fine on the next. Always use PlatinumMemory.party_checked() (it retries/None).
+    Stand-ins withdrawn into the party are therefore removed once party_checked() is stable (usually next frame).
+  * record_for order everywhere: origin's representation, then the asking game's own, then gen1/gen2/gen4.
+  COORDINATOR: please commit (no commit attribution lines): client/yellowlink/{platinum_pc,pcdb,crystal,trades,app}.py,
+  client/tests/test_platinum_pc.py, dev/e2e/{pt_pctest,pt_trade_e2e}.py, dev/platinum/STATUS.md. SPEC.md section 5 "Sync
+  rules" could gain: "Platinum: write on HOOK_PC_OPEN (FieldSystem_OpenPokemonStorage), close polled (box app overlay 19)".
+  FOR THE CORE AGENT: dev/e2e/platinum_boot.py now FAILs "in-game save written to the server folder" / "written save =
+  the game's battery" - also with my PC code disabled, so not from this change (real adapter instead of the stand-in?).
+  The trade window is cramped in the Platinum window (texts overlap the Clear/Confirm row; see
+  /tmp/yl_pttrade_cbp4a0yl/2_platinum_trade_window.png). challenge.dex_name / panels roster names could use
+  App.pc_dex_name (trades.py) to name Gen-4 species.
