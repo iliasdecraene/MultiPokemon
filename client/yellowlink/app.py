@@ -2231,7 +2231,7 @@ def selftest_ds(argv) -> int:
         pygame.display.set_mode((64, 64))
         audio = AudioOut(50)
         lines.append(f"pygame {pygame.version.ver} SDL {'.'.join(map(str, pygame.get_sdl_version()))}, "
-                     f"our audio {'device' if audio.device else ('mixer' if audio.ok else 'off')}")
+                     f"our audio {'mixer' if audio.ok else 'off'}")
         if rom == "make":
             rom = nds_core.make_test_rom(os.path.join(os.path.dirname(os.path.abspath(out)), "yltest.nds"))
         lines.append(nds_core.selftest(rom))
