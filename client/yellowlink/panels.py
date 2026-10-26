@@ -5,7 +5,8 @@ import math
 
 import pygame
 
-from . import library
+from . import badge_art, library
+from .badges import REGION_NAMES, REGIONS, entry_is_shiny
 from .challenge import CHALLENGE_GAMES
 from .ui import ACCENT, BAD, DIM, GOOD, PANEL, PANEL_HI, TEXT, box, text, wrap
 
@@ -70,7 +71,32 @@ def _panel_frame(surf, app, f, game_w, game_h, title, offset):
     return r
 
 
+def _badge_summary(app, uid) -> dict:
+    fn = getattr(app, "badge_summary", None)
+    return fn(uid) if fn else {}
+
+
+def draw_player_badges(surf, f, app, uid, area, offset):
+    """A player's badges: 'Kanto (4 sockets)  Johto (...)  Sinnoh (...)', wrapping onto more lines when narrow.
+    Returns the y below."""
+    summ = _badge_summary(app, uid)
+    rad = 9 if area.w < 420 else 10
+    x, y = area.x, area.y
+    line_h = 2 * rad + 6
+    for region in REGIONS:
+        label = REGION_NAMES[region]
+        w = f.small.size(label)[0] + 6 + badge_art.row_width(rad, 4)
+        if x > area.x and x + w > area.right:
+            x, y = area.x, y + line_h
+        text(surf, f.small, label, (x, y + rad - 7), DIM)
+        badge_art.draw_row(surf, app, f, x + f.small.size(label)[0] + 6, y, region, summ.get(region) or {},
+                           offset, r=rad, gap=4, uid=uid)
+        x += w + 16
+    return y + line_h
+
+
 def draw_multiplayer(surf, f, app, game_w, game_h, offset):
+    app.badge_tip = None
     r = _panel_frame(surf, app, f, game_w, game_h, "Multiplayer", offset)
     others = [e for e in app.sorted_roster() if e.get("uid") != app.cfg["uid"]]
     narrow = r.w < NARROW_W
@@ -163,6 +189,8 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
                 button(surf, app, f, pygame.Rect(bx + 4 * (bw + 8), y, bw + 14, 34), chal[0], chal[1],
                        offset=offset)
                 y += 44
+            y = draw_player_badges(surf, f, app, uid, pygame.Rect(row.x + 12, y, row.w - 24, 0), offset) + 6
+    badge_art.draw_tip(surf, f, getattr(app, "badge_tip", None), r)
     foot = "Trade/Gift: Pokémon from your PC, any game  ·  Practice: their team vs the AI"
     if f.small.size(foot)[0] > r.w - 36:
         foot = "Trade/Gift: Pokémon from your PC, any game"
@@ -246,7 +274,9 @@ def _region_game(app, region_id, installed_here):
 
 
 def draw_regions(surf, f, app, game_w, game_h, offset):
+    app.badge_tip = None
     r = _panel_frame(surf, app, f, game_w, game_h, "Regions", offset)
+    mine = _badge_summary(app, app.cfg["uid"])
     narrow = r.w < NARROW_W
     y = r.y + 56
     intro = "Each region is its own game and keeps its own progress."
@@ -262,9 +292,14 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
         if card.bottom > r.bottom - 60:
             break
         box(surf, card, PANEL_HI if here else PANEL, ACCENT if here else PANEL_HI, 8)
-        text(surf, f.title, region_name, (card.x + 14, card.y + 8), ACCENT if here else TEXT)
+        nr = text(surf, f.title, region_name, (card.x + 14, card.y + 8), ACCENT if here else TEXT)
         br = pygame.Rect(card.right - 110, card.y + 12, 96, 36) if narrow else \
             pygame.Rect(card.right - 140, card.y + 12, 126, 36)
+        # badge sockets right of the region's name (hover: what it is and how to earn it)
+        bx = nr.right + 12
+        rad = next((rr for rr in (11, 10, 9, 8) if bx + badge_art.row_width(rr, 5) <= br.x - 8), 8)
+        badge_art.draw_row(surf, app, f, bx, nr.centery - rad, region_id, mine.get(region_id) or {}, offset,
+                           r=rad, gap=5, uid=app.cfg["uid"])
         if not have:
             names = [library.GAMES_BY_ID[g].title for g in game_ids]
             text(surf, f.small, fit(f.small, "Add your " + " / ".join(names) + " game file to unlock this region",
@@ -305,6 +340,7 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
     button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 48, 200, 36), "Add a game file...", app.add_rom_dialog,
            offset=offset)
     text(surf, f.small, ".gb, .gbc or .nds", (r.x + 230, r.bottom - 40), DIM)
+    badge_art.draw_tip(surf, f, getattr(app, "badge_tip", None), r)
 
 
 
@@ -674,6 +710,31 @@ def draw_soullink(surf, f, app, game_w, game_h, offset):
 
 
 # --- trades / gifts (PC database) --------------------------------------------------------------------------
+def is_shiny_entry(app, e) -> bool:
+    """Shiny mark for a PC entry (Yellow: Gen-2 shiny DVs count, SPEC.md section 9); cached per entry id + data."""
+    cache = getattr(app, "_shiny_marks", None)
+    if cache is None:
+        cache = app._shiny_marks = {}
+    key = (e.get("id"), e.get("origin"), e.get("gen1"), e.get("gen2"), e.get("gen4"))
+    if key not in cache:
+        if len(cache) > 2000:
+            cache.clear()
+        cache[key] = entry_is_shiny(e)
+    return cache[key]
+
+
+def mon_label(surf, f, app, e, pos, color, width, prefix="", suffix=""):
+    """A PC entry's name line, cut to width, with a small drawn sparkle after it when it's shiny."""
+    shiny = is_shiny_entry(app, e)
+    label = fit(f.small, prefix + app.entry_label(e) + suffix, width - (16 if shiny else 0))
+    rect = text(surf, f.small, label, pos, color)
+    if shiny:
+        dark_bg = sum(color) < 200                  # picked row: dark text on yellow -> a purple mark
+        badge_art.mini_sparkle(surf, (rect.right + 8, rect.centery), 5,
+                               (120, 60, 170) if dark_bg else (255, 220, 90))
+    return rect
+
+
 def draw_trade(surf, f, app, game_w, game_h, offset):
     t = app.trade
     if t is None:
@@ -727,7 +788,7 @@ def draw_trade(surf, f, app, game_w, game_h, offset):
             if picked:
                 pygame.draw.lines(surf, fg, False, [(check.x + 3, check.y + 8), (check.x + 7, check.y + 12),
                                                     (check.x + 13, check.y + 3)], 2)
-            text(surf, f.small, app.entry_label(e), (rr.x + 30, rr.y + 2), fg)
+            mon_label(surf, f, app, e, (rr.x + 30, rr.y + 2), fg, rr.w - 36)
             note = app.entry_note(e)
             sub = f"Box {bi + 1}" + (f" · from {e.get('origin', '').title()}" if e.get("origin") not in
                                      (None, "", app.game_id) else "")
@@ -764,7 +825,7 @@ def draw_trade(surf, f, app, game_w, game_h, offset):
     for e in shown[:max_rows]:
         card = pygame.Rect(right.x, y, right.w, 40)
         box(surf, card, PANEL_HI, PANEL_HI, 6)
-        text(surf, f.small, app.entry_label(e), (card.x + 8, card.y + 3), TEXT)
+        mon_label(surf, f, app, e, (card.x + 8, card.y + 3), TEXT, card.w - 16)
         note = app.entry_note(e)
         origin = e.get("origin")
         sub = note[0] if note else (f"OT {e.get('ot', '?')}" + (f" · from {origin.title()}" if origin else ""))
@@ -821,7 +882,7 @@ def _trade_rows(surf, f, app, t, area, offset, row_h=34):
         if picked:
             pygame.draw.lines(surf, fg, False, [(check.x + 3, check.y + 8), (check.x + 7, check.y + 12),
                                                 (check.x + 13, check.y + 3)], 2)
-        text(surf, f.small, fit(f.small, app.entry_label(e), rr.w - 36), (rr.x + 30, rr.y + 2), fg)
+        mon_label(surf, f, app, e, (rr.x + 30, rr.y + 2), fg, rr.w - 36)
         note = app.entry_note(e)
         sub = f"Box {bi + 1}" + (f" · from {e.get('origin', '').title()}" if e.get("origin") not in
                                  (None, "", app.game_id) else "")
@@ -892,13 +953,13 @@ def _draw_trade_narrow(surf, f, app, t, r, offset, title):
             break
         if compact:
             note = app.entry_note(e)
-            text(surf, f.small, fit(f.small, "· " + app.entry_label(e) + (f" ({note[0]})" if note else ""), w),
-                 (x, y), note[1] if note else TEXT)
+            mon_label(surf, f, app, e, (x, y), note[1] if note else TEXT, w, prefix="· ",
+                      suffix=f" ({note[0]})" if note else "")
             y += 18
             continue
         card = pygame.Rect(x, y, w, 38)
         box(surf, card, PANEL_HI, PANEL_HI, 6)
-        text(surf, f.small, fit(f.small, app.entry_label(e), w - 16), (card.x + 8, card.y + 3), TEXT)
+        mon_label(surf, f, app, e, (card.x + 8, card.y + 3), TEXT, w - 16)
         note = app.entry_note(e)
         origin = e.get("origin")
         sub = note[0] if note else (f"OT {e.get('ot', '?')}" + (f" · from {origin.title()}" if origin else ""))

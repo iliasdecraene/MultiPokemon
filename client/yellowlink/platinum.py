@@ -1136,3 +1136,58 @@ def fast_continue(core, on_progress=None, max_frames: int = 7200) -> str:
         if on_progress and f % 120 == 0:
             on_progress()
     return "timeout"
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Badges (0.7.5; badges.py). Pokedex = save page POKEDEX (body + 0x1328, from the save page table; pret
+# include/pokedex.h: u32 magic 0xBEEFCAFE, u32 caughtPokemon[16], u32 seenPokemon[16], ...; bit species-1,
+# src/pokedex.c ReadBit_2Forms). Checked on the ROM by dev/badges/verify.py.
+# ---------------------------------------------------------------------------------------------------------
+PAGE_POKEDEX = 0x1328
+POKEDEX_MAGIC = 0xBEEFCAFE
+POKEDEX_CAUGHT = 0x04             # caughtPokemon: 64 bytes, bit (species - 1), LSB first
+POKEDEX_SEEN = 0x44
+
+
+def pokedex_caught_bits(pm: PlatinumMemory):
+    """The 64-byte caught bitfield, or None when the Pokédex page isn't there (no save loaded / wrong magic)."""
+    body = pm.save_body()
+    if not body or pm.m.r32(body + PAGE_POKEDEX) != POKEDEX_MAGIC:
+        return None
+    return pm.m.read(body + PAGE_POKEDEX + POKEDEX_CAUGHT, 64)
+
+
+def champion(pm: PlatinumMemory) -> bool:
+    """Entered the Hall of Fame in this save: entered_hall_of_fame() (FLAG_GAME_COMPLETED, isMainStoryCleared or the
+    HoF record count - all set by ClearGame) or standing in the Hall of Fame room (map 187) now."""
+    return pm.entered_hall_of_fame() or pm.in_hall_of_fame()
+
+
+def owner(pm: PlatinumMemory) -> dict:
+    return {"ot": pm.player_name(), "tid": pm.trainer_id(), "sid": pm.secret_id()}
+
+
+def progress(pm: PlatinumMemory):
+    """Badge progress of this Platinum save (badges.py): champion, Sinnoh dex caught (the 210) and the player's own
+    shiny catches (origin Platinum, own OT name + TID + SID) in the party, all 18 x 30 box slots and the Day Care,
+    keyed like the PC database (pk4.mon_key). None while not in game, while the party is mid-update
+    (party_checked()) or without a Pokédex page. Box / Day Care slots the game is decrypting right now are read the
+    way the game will write them back (platinum_pc.normalise); one that can't be read is skipped this time (shiny
+    keys are remembered once seen, so a skipped read never loses anything)."""
+    from . import badges
+    from .platinum_pc import Gen4PC, normalise
+    if not pm.in_game():
+        return None
+    party = pm.party_checked()
+    bits = pokedex_caught_bits(pm)
+    if party is None or bits is None:
+        return None
+    me = owner(pm)
+    recs = []
+    for raw in list(party) + [r for box in Gen4PC(pm, None).read_slots() for r in box]:
+        kind, rec = normalise(raw[:BOX_MON_SIZE])     # a party record starts with its box record
+        if kind == "mon":
+            recs.append(rec)
+    recs += pm.daycare_records() or []
+    keys = [badges.gen4_shiny_key(r, me) for r in recs]
+    return badges.progress_dict("sinnoh", champion(pm), bits, [k for k in keys if k], me)

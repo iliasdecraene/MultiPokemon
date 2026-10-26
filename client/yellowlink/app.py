@@ -21,6 +21,8 @@ from .game import GameMemory
 from . import crystal
 from .challenge import ChallengeMixin
 from .trades import TradeMixin
+from .badgesync import BadgeMixin
+from . import badge_art
 from .net import NetClient
 
 try:                                   # Pokémon Platinum adapter (dev/platinum/BRIEF.md); optional while it's built
@@ -53,6 +55,7 @@ PAD_BUTTONS = {0: "a", 1: "b", 6: "select", 7: "start", 4: "select", 9: "start"}
 DS_KEYMAP = {**KEYMAP, pygame.K_d: "x", pygame.K_c: "y", pygame.K_q: "l", pygame.K_w: "r"}
 DS_PAD_BUTTONS = {**PAD_BUTTONS, 2: "x", 3: "y", 4: "l", 5: "r"}
 DS_FAST_TICKS = 4           # DS frames per host frame while fast-forward is on
+SHINY_TAG_X, SHINY_TAG_Y = 124, 57  # Game Boy pixels: the "Shiny!" tag, centred under the wild enemy's picture
 DS_SAVE_POLL = 180          # frames (~3 s) between battery save checks (Platinum)
 
 
@@ -138,7 +141,7 @@ class GhostBattle:
     result: int | None = None
 
 
-class App(ChallengeMixin, TradeMixin):
+class App(ChallengeMixin, TradeMixin, BadgeMixin):
     def __init__(self, cfg: Config, diag: Diagnostics | None = None):
         self.cfg = cfg
         self.diag = diag
@@ -149,6 +152,7 @@ class App(ChallengeMixin, TradeMixin):
             cfg.save()
         self.init_challenges()
         self.init_trades()
+        self.init_badges()
         # in a challenge: that run's own game + separate save (Config paths follow active_challenge)
         self.game_id = cfg.challenge["game"] if cfg.challenge else (self.lib.current or "yellow")
         self.save_tag = f"challenge-{cfg.challenge['id']}" if cfg.challenge else self.game_id
@@ -673,6 +677,7 @@ class App(ChallengeMixin, TradeMixin):
                 self.friends[p["uid"]] = Friend(p["uid"], p["name"], p.get("state"))
                 self._snap(self.friends[p["uid"]])
         self.roster = msg.get("roster", [])
+        self.badges_on_welcome(msg)
 
     def on_player_join(self, msg):
         p = msg["player"]
@@ -720,6 +725,7 @@ class App(ChallengeMixin, TradeMixin):
 
     def on_roster(self, msg):
         self.roster = msg.get("roster", [])
+        self.badges_on_roster()
 
     def on_error(self, msg):
         self.toast(msg.get("message", "error"), color=ui.BAD)
@@ -1342,6 +1348,8 @@ class App(ChallengeMixin, TradeMixin):
 
     def select_player(self, uid):
         self.panel_sel = None if self.panel_sel == uid else uid
+        if self.panel_sel:
+            self.request_badges(uid)          # earn dates for the badge hover text
 
     def action_battle(self, e):
         if self.chal:
@@ -2087,6 +2095,10 @@ class App(ChallengeMixin, TradeMixin):
                 ui.name_tag(self.screen, self.fonts.tag, name, cx * self.scale,
                             self.game_y + top * self.scale - 2)
         sub = self.screen.subsurface((0, self.game_y, self.game_w, self.game_h))
+        if self.wild_shiny and not self.ds:
+            # Yellow wild battle: this one would be shiny in Gen 2 (counts as shiny in YellowLink) - next to the enemy
+            badge_art.draw_shiny_indicator(sub, self.fonts, int((self.off_x + SHINY_TAG_X) * self.scale),
+                                           int((self.off_y + SHINY_TAG_Y) * self.scale), self.scale)
         if self.mode == "panel" and self.panel == "multiplayer":
             panels.draw_multiplayer(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
         elif self.mode == "panel" and self.panel == "settings":
@@ -2218,6 +2230,7 @@ class App(ChallengeMixin, TradeMixin):
             self.update_live()
         self.chal_step()
         self.trades_step()
+        self.badges_step()
         if self.update_dl and self.update_dl.status != "downloading" and not getattr(self.update_dl, "announced", False):
             self.update_dl.announced = True
             if self.update_dl.status == "ready":

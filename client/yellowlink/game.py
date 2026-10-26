@@ -1069,3 +1069,58 @@ def install_exp_share(pyboy, enabled):
     Yellow ROM (the code bytes are checked first; RuntimeError otherwise)."""
     from .expshare_gb import YellowExpShare
     return YellowExpShare(pyboy, enabled)
+
+
+# --- Badges (0.7.5; badges.py) -----------------------------------------------------------------------------------
+# pret/pokeyellow symbols, checked on the ROM by dev/badges/verify.py (SPEC.md section 3, "Badges").
+ENEMY_MON_DVS = 0xCFF0                # wEnemyMonDVs (2 bytes): LoadEnemyMonData writes random DVs for a wild mon
+TRANSFORMED_ENEMY_ORIG_DVS = 0xCCEB   # wTransformedEnemyMonOriginalDVs: the wild mon's own DVs once it used Transform
+ENEMY_BATTLE_STATUS3 = 0xD068         # wEnemyBattleStatus3: bit 3 TRANSFORMED
+TRANSFORMED_BIT = 3
+
+
+def champion(gm: "GameMemory") -> bool:
+    """Entered the Hall of Fame in this save: wNumHoFTeams > 0 (AnimateHallOfFame increments it, saved with the
+    game), or standing in the HALL_OF_FAME room right now (only reachable after beating the Champion)."""
+    return gm.hall_of_fame_count() > 0 or gm.in_hall_of_fame()
+
+
+def owner(gm: "GameMemory") -> dict:
+    """The player's catches are the ones with this OT name + OT ID."""
+    return {"ot": gm.player_name(), "tid": (gm.m[PLAYER_ID] << 8) | gm.m[PLAYER_ID + 1]}
+
+
+def progress(gm: "GameMemory"):
+    """Badge progress of this Yellow save (badges.py): champion, Kanto dex owned (#1-150) and the player's own
+    shiny catches (Gen-2 DV rule) in the party, all 12 boxes and the Day Care, keyed like the PC database
+    (mon_key). None while not in game or while the party is half-written."""
+    from . import badges
+    from .pcdb import Gen1PC, G1_STRUCT, G1_NAME
+    if not gm.in_game():
+        return None
+    party = gm.party_checked()
+    if party is None:
+        return None
+    me = owner(gm)
+    keys = [badges.gen1_shiny_key(m.data, m.ot, me) for m in party]
+    pc = Gen1PC(gm.m, gm.rom)
+    recs = [r for box in pc.read_boxes() for r in box] + gm.daycare_records()
+    keys += [badges.gen1_shiny_key(r[:G1_STRUCT], r[G1_STRUCT:G1_STRUCT + G1_NAME], me) for r in recs]
+    return badges.progress_dict("kanto", champion(gm), gm.read(DEX_OWNED, 19), [k for k in keys if k], me)
+
+
+def wild_is_shiny(gm: "GameMemory"):
+    """In a catchable wild battle (wIsInBattle 1, normal or Safari - not the Old Man / Oak's Pikachu / ghost
+    battles): would the enemy be shiny in Gen 2? None outside such a battle. Reads wEnemyMonDVs, or
+    wTransformedEnemyMonOriginalDVs once the wild mon has used Transform (Transform copies the target's DVs;
+    catching it restores the original ones - pret LoadEnemyMonData). LoadEnemyMonData runs right after
+    InitWildBattle sets wIsInBattle, so the very first battle frame can still show the previous DVs."""
+    from .badges import gen1_is_shiny
+    info = gm.battle_info()
+    if info is None or info["kind"] != "wild":
+        return None
+    if gm.m[ENEMY_BATTLE_STATUS3] & (1 << TRANSFORMED_BIT):
+        dvs = gm.read(TRANSFORMED_ENEMY_ORIG_DVS, 2)
+    else:
+        dvs = gm.read(ENEMY_MON_DVS, 2)
+    return gen1_is_shiny(dvs)

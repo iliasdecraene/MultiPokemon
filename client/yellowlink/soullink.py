@@ -527,6 +527,11 @@ class Referee:
             keys.add(m.key)
         return keys
 
+    def _run_champion(self) -> bool:
+        """The view's badge helper (same proofs as the main-game Champion badge), if it has one."""
+        fn = getattr(self.view, "run_champion", None)
+        return bool(fn()) if fn is not None else False
+
     def _light_check(self):
         party = self.view.party()
         if party is None:
@@ -542,9 +547,10 @@ class Referee:
                 if enc.get("status") == "open":       # the game was closed/reloaded mid-battle
                     self.send({"t": "enc", "area": area, "dex": enc.get("dex", 0), "status": "failed",
                                "auto": True})
-        if self.view.hof() and not sl.mine()["hof"]:
-            self.send({"t": "hof"})
-            self.notify("Hall of Fame! When your partner gets here too, the Soul Link is complete.", "good")
+        if not sl.mine()["hof"] and (self.view.hof() or self._run_champion()):
+            self.send({"t": "hof"})          # the server also awards the Soul Link badge on it (SPEC.md section 9)
+            self.notify("Hall of Fame! Soul Link badge earned. When your partner gets here too, the run is "
+                        "complete.", "good")
         badges = self.view.badges()
         if badges != self.last_badges:
             self.last_badges = badges

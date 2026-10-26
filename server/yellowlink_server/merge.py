@@ -2,7 +2,7 @@
 
     python -m yellowlink_server.merge <from-data-dir> <into-data-dir> [--dry-run]
 
-Copies players (players.json), PC backups (pc/<uid>.json), Soul Link records (challenges.json) and reports from
+Copies players (players.json), PC backups (pc/<uid>.json), Soul Link records (challenges.json), badges and reports from
 FROM into INTO. Nothing in INTO is overwritten: a player id or challenge id that exists in both is kept as it is in
 INTO and reported. Player ids never repeat across servers (every server gets its own id per player), so in practice
 nothing collides. INTO is backed up first (<into>.before-merge-<time>). Both servers must be STOPPED.
@@ -52,7 +52,7 @@ def merge(src: str, dst: str, dry: bool = False, backup: bool = True) -> dict:
         raise SystemExit(f"{src} still has a trade being finished ({journal}). Start that server once, stop it "
                          "again, then run the merge.")
     report = {"players_added": [], "players_kept": [], "pc_added": 0, "pc_kept": [], "challenges_added": 0,
-              "challenges_kept": [], "reports_added": 0, "same_names": [], "backup": None}
+              "challenges_kept": [], "reports_added": 0, "badges_added": 0, "same_names": [], "backup": None}
     if backup and not dry and os.path.isdir(dst):
         bak = f"{dst}.before-merge-{time.strftime('%Y%m%d-%H%M%S')}"
         shutil.copytree(dst, bak)
@@ -110,6 +110,18 @@ def merge(src: str, dst: str, dry: bool = False, backup: bool = True) -> dict:
     if s_recs:
         _write(os.path.join(dst, "challenges.json"), {"version": 1, "challenges": d_recs}, dry)
 
+    # badges (SPEC.md section 9): per player id, like players
+    sb = _load(os.path.join(src, "badges.json"), {})
+    db = _load(os.path.join(dst, "badges.json"), {})
+    s_b = sb.get("players", {}) if isinstance(sb, dict) else {}
+    d_b = db.get("players", {}) if isinstance(db, dict) else {}
+    for uid, b in s_b.items():
+        if isinstance(b, dict) and uid not in d_b:
+            d_b[uid] = b
+            report["badges_added"] += 1
+    if s_b:
+        _write(os.path.join(dst, "badges.json"), {"version": 1, "players": d_b}, dry)
+
     # problem reports (F3)
     srep = os.path.join(src, "reports")
     if os.path.isdir(srep):
@@ -135,6 +147,7 @@ def main(argv=None) -> int:
           f"players added: {len(r['players_added'])} {r['players_added']}\n"
           f"PC backups added: {r['pc_added']}\n"
           f"Soul Link records added: {r['challenges_added']}\n"
+          f"badges added: {r['badges_added']} players\n"
           f"reports added: {r['reports_added']}")
     if r["players_kept"] or r["pc_kept"] or r["challenges_kept"]:
         print(f"already there, kept as they were: players {r['players_kept']}, PC {r['pc_kept']}, "

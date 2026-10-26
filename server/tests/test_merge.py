@@ -136,3 +136,15 @@ async def test_old_client_only_gets_the_update_notice(moved_server):
     await c.expect_none("chat")
     assert not moved_server.clients                     # not a real session: no roster, no PC, no trades
     await c.close()
+
+
+def test_merge_copies_badges(two_servers):
+    src, dst = two_servers
+    write(os.path.join(src, "badges.json"), {"version": 1, "players": {
+        "u-bea": {"kanto": {"champion": 1.7e9}}, "u-both": {"johto": {"dex": 1.7e9}}}})
+    write(os.path.join(dst, "badges.json"), {"version": 1, "players": {"u-both": {"kanto": {"champion": 1.8e9}}}})
+    r = merge(src, dst)
+    got = read(os.path.join(dst, "badges.json"))["players"]
+    assert got["u-bea"] == {"kanto": {"champion": 1.7e9}}
+    assert got["u-both"] == {"kanto": {"champion": 1.8e9}}           # existing entry untouched
+    assert r["badges_added"] == 1

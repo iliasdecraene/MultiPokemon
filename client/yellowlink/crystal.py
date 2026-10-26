@@ -1713,3 +1713,33 @@ AREA_NAMES = {
     'whirl_islands': 'Whirl Islands',
 }
 # --- end of generated Soul Link areas ---
+
+
+# --- Badges (0.7.5; badges.py) -----------------------------------------------------------------------------------
+def champion(cm: "CrystalMemory") -> bool:
+    """Entered the (Johto) Hall of Fame in this save: the saved proofs of entered_hall_of_fame()
+    (EVENT_BEAT_ELITE_FOUR, wStatusFlags bit 6, wHallOfFameCount) or standing in the HALL_OF_FAME room now."""
+    return cm.entered_hall_of_fame() or cm.in_hall_of_fame()
+
+
+def owner(cm: "CrystalMemory") -> dict:
+    return {"ot": cm.player_name(), "tid": cm.player_id()}
+
+
+def progress(cm: "CrystalMemory"):
+    """Badge progress of this Crystal save (badges.py): champion, Johto dex caught (#1-251 minus Mew and Celebi)
+    and the player's own shiny catches (own OT name + ID, Crystal caught data) in the party, the 14 boxes (only the
+    current one before the first save) and the Day Care, keyed like the PC database (mon_key). None while not in
+    game or while the party is half-written."""
+    from . import badges
+    if not cm.in_game():
+        return None
+    party = cm.party_checked()
+    if party is None:
+        return None
+    me = owner(cm)
+    keys = [badges.gen2_shiny_key(m.data, m.ot, me, m.egg) for m in party]
+    recs = [r for box in Gen2PC(cm.m, cm.rom).read_boxes() for r in box] + cm.daycare_records()
+    keys += [badges.gen2_shiny_key(r[:BOX_MON_SIZE], r[BOX_MON_SIZE:BOX_MON_SIZE + NAME_SIZE], me,
+                                   len(r) > REC_SIZE and bool(r[REC_SIZE])) for r in recs]
+    return badges.progress_dict("johto", champion(cm), cm.read(DEX_CAUGHT, 32), [k for k in keys if k], me)

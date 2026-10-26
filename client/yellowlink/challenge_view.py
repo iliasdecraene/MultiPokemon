@@ -81,6 +81,17 @@ class ChallengeView:
             return g.entered_hall_of_fame() or g.in_hall_of_fame()
         return g.hall_of_fame_count() > 0 or g.in_hall_of_fame()
 
+    def run_champion(self) -> bool:
+        """Badges (0.7.5): this run's player entered the Hall of Fame in the run's save - the adapter's champion()
+        (game.champion / crystal.champion / platinum.champion: the same saved proofs as the main-game Champion
+        badge, plus standing in the Hall of Fame room). The app awards the Soul Link badge on it."""
+        fn = getattr(self.G, "champion", None)
+        try:
+            return bool(fn(self.g)) if fn is not None else self.hof()
+        except Exception:  # noqa: BLE001 - never break the game loop over a read
+            log.exception("reading the Hall of Fame state failed")
+            return False
+
     def hold(self) -> bool:
         """Party partly hidden by the game (Crystal's Bug-Catching Contest). Platinum has nothing like it."""
         return self.gen2 and self.g.in_bug_contest()

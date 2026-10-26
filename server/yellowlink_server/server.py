@@ -23,6 +23,7 @@ from . import PROTOCOL_VERSION
 from .config import Config
 from . import pcstore
 from .challenges import ChallengeError, ChallengeHub
+from . import badges as badgemod
 from .store import PlayerStore
 
 log = logging.getLogger("yellowlink.server")
@@ -48,6 +49,7 @@ CLOSE_REPLACED = 4002
 CLOSE_BAD_HELLO = 4003
 CLOSE_MOVED = 4005          # this server was merged into another one (Config.moved_to); see SPEC.md section 8
 MOVE_SUPPORTED = (0, 7, 1)  # clients from this version on follow a "moved" message by themselves
+FEATURES = ("badges",)      # optional message groups this server knows (welcome.features; SPEC.md section 9)
 
 
 def _version_tuple(v: str) -> tuple:
@@ -245,6 +247,8 @@ class YellowLinkServer:
         self.trade_outcomes: dict[str, str] = {}
         self.battles: dict[str, Battle] = {}
         self.challenges = ChallengeHub(self, config.data_dir, debounce=store_debounce)
+        self.badges = badgemod.BadgeStore(config.data_dir, debounce=store_debounce)
+        self.badges.backfill(self.challenges.records.values())      # runs completed before badges existed
         self._server = None
 
     # ------------------------------------------------------------ lifecycle
@@ -268,6 +272,7 @@ class YellowLinkServer:
             if t.timer:
                 t.timer.cancel()
         await self.challenges.flush()
+        await self.badges.flush()
         await self.store.flush()
 
     # -------------------------------------------------------------- sending
@@ -327,6 +332,7 @@ class YellowLinkServer:
                 "levels": levels,
                 "species": species,
                 "last_seen": int(time.time()) if online else int(p.get("last_seen", 0)),
+                "badges": self.badges.summary(uid),
             })
         entries.sort(key=lambda e: (not e["online"], e["name"].lower()))
         return entries
@@ -440,6 +446,7 @@ class YellowLinkServer:
             "download_url": self.config.download_url,
             "motd": self.config.motd,
             "server_name": self.config.name,
+            "features": list(FEATURES),
         })
         await self.send(client, {"type": "challenge_list", "challenges": self.challenges.mine(uid)})
         for c in others:
@@ -587,6 +594,38 @@ class YellowLinkServer:
             return
         await self.send(client, {"type": "party_data", "uid": uid, "name": p["name"],
                                  "trainer": p["trainer"], "mons": p["party"]})
+
+    # ---------------------------------------------------------------- badges (SPEC.md section 9)
+    async def on_badges(self, client: Client, msg: dict) -> None:
+        try:
+            report = badgemod.validate_report(msg.get("earned"))
+        except badgemod.BadgeError as exc:
+            raise Invalid(str(exc)) from None
+        before = self.badges.summary(client.uid)
+        news = self.badges.merge_report(client.uid, report)
+        if self.badges.summary(client.uid) != before:
+            await self.broadcast_roster()
+        for region, what, tier in news:
+            await self.system(badgemod.news_text(client.name, region, what, tier))
+
+    async def on_get_badges(self, client: Client, msg: dict) -> None:
+        uid = msg.get("uid")
+        if not isinstance(uid, str) or len(uid) > 64:
+            raise Invalid("uid must be a player id")
+        p = self.store.get(uid)
+        await self.send(client, {"type": "badges_data", "uid": uid, "name": p["name"] if p else "?",
+                                 "badges": self.badges.view(uid) if p else {}})
+
+    async def award_soullink(self, rec: dict, uid: str, ts: float) -> None:
+        """A run's player entered the Hall of Fame (ledger `hof`): their Soul Link badge for that region."""
+        if rec.get("kind") != "soul_link":
+            return
+        region = badgemod.REGION_OF_GAME.get(rec.get("game"))
+        tier = badgemod.run_tier(rec)
+        if region and self.badges.award_soullink(uid, region, tier, ts):
+            name = self.clients[uid].name if uid in self.clients else (self.store.get(uid) or {}).get("name", "?")
+            await self.broadcast_roster()
+            await self.system(f"{name} earned the {tier} Soul Link badge of {badgemod.REGION_NAMES[region]}!")
 
     async def on_bug_report(self, client: Client, msg: dict) -> None:
         text = msg.get("text")
@@ -1216,6 +1255,8 @@ class YellowLinkServer:
 
     _handlers = {
         "library": on_library,
+        "badges": on_badges,
+        "get_badges": on_get_badges,
         "challenge_request": _chal("on_request"),
         "challenge_respond": _chal("on_respond"),
         "challenge_join": _chal("on_join"),

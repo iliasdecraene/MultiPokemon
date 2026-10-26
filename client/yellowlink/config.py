@@ -266,6 +266,12 @@ class Config(dict):
         return self.data_dir / "pc" / f"{self.active_server.get('save_uid') or self['uid']}.json"
 
     @property
+    def badges_path(self) -> Path:
+        """The badge book (SPEC.md section 9): next to the save and named like the PC store, so servers sharing a
+        save share its badges."""
+        return self.data_dir / "badges" / f"{self.active_server.get('save_uid') or self['uid']}.json"
+
+    @property
     def pc_keys(self) -> tuple:
         """(this server's key, the store's home server key) for PCSync (per-server sync state)."""
         return self.server_id, self.save_folder(self.active_server)

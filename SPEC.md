@@ -90,11 +90,13 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `trade_status` | `trade_id` | outcome of a trade we lost track of (after a reconnect) |
 | `bug_report` | `text` (<=60 KB), `reason` | saved to `<data_dir>/reports/`; answered with `report_saved`. Can also be sent on a report-only connection: `hello` with `"mode": "report"` (not logged in, not shown to others), then one `bug_report`. |
 | `ping` | `t` | server answers `pong` with same `t` |
+| `badges` | `earned` {region: {`champion`, `dex`, `shinies`}} | main-game badges (0.7.5, section 9); only if `welcome.features` has `badges` |
+| `get_badges` | `uid` | full badge view of one player (section 9) |
 
 ### Server -> Client
 | type | fields |
 |---|---|
-| `welcome` | `you` uid, `players` list[PlayerInfo], `roster` list[RosterEntry], `latest_client` str, `download_url` str, `motd` str, `server_name` str (may be empty; env `YL_SERVER_NAME`) |
+| `welcome` | `you` uid, `players` list[PlayerInfo], `roster` list[RosterEntry], `latest_client` str, `download_url` str, `motd` str, `server_name` str (may be empty; env `YL_SERVER_NAME`), `features` list[str] (0.7.5: `["badges"]`; missing = older server) |
 | `player_join` | `player` PlayerInfo |
 | `player_leave` | `uid` |
 | `state` | `uid` + all state fields (relayed to everyone else) |
@@ -114,9 +116,12 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `report_saved` | `file` |
 | `error` | `message` |
 | `pong` | `t` |
+| `badges_data` | `uid`, `name`, `badges` {region: BadgeView} (section 9; unknown player: `badges` {} ) |
 
 PlayerInfo: `{uid, name, state: <last state obj or null>, has_sprite: bool}`
-RosterEntry: `{uid, name, trainer, online: bool, party_size: int, levels: [int], species: [int], last_seen: unix_ts}`
+RosterEntry: `{uid, name, trainer, online: bool, party_size: int, levels: [int], species: [int], last_seen: unix_ts,
+badges: {region: {champion: bool, dex: bool, shiny: int, soullink: "gold"|"silver"|null}}}` (`badges` 0.7.5: only
+regions with something earned; `{}` = none yet)
 
 ### Trade state machine (server) — protocol 2
 `requested` --accept--> `open` (offers/re-offers; any new offer clears confirmations) --both confirmed--> **applied**:
@@ -597,3 +602,58 @@ game files (ROMs) and settings are shared.
   outdated server copy (lost upload confirmation, another server sharing the save) can't duplicate a Pokémon. On
   close the client waits up to 3 s for the last upload's confirmation. Changing the save of the server you're on is
   applied after the game closed (`App.pending_share` in `_main`).
+
+## 9. Badges — added in 0.7.5
+
+Per region (`kanto` = Yellow, `johto` = Crystal, `sinnoh` = Platinum), shown as a row of sockets in the Regions panel
+(your own) and in the Multiplayer panel (a friend's, when you click them). Badge art is drawn by our code
+(`client/yellowlink/badge_art.py`), never taken from the games.
+
+| badge | earned when (main game only, never inside a Soul Link run) |
+|---|---|
+| Champion | entered the Hall of Fame in that region's game |
+| Pokédex | caught (owned flag) the regional dex: Kanto 150 (all but Mew), Johto 249 (all 251 but Mew + Celebi), Sinnoh 210 |
+| Shiny hunter | caught >= 1 shiny in that game; tiers 1/10/25/50/100 by count of distinct own shiny catches (OT + TID, origin that game), remembered for good once seen (party, boxes, Day Care). Yellow: a mon whose DVs would be shiny in Gen 2 (Def/Spd/Spc 10, Atk 2,3,6,7,10,11,14,15) |
+| Soul Link | entered the Hall of Fame in a Soul Link run of that region's game: **gold** = run rule `exp_share` off (or a run from before the rule), **silver** = on. Gold outranks silver |
+
+Badges are never taken away (a new game, trading a shiny away, releasing it: all kept). Retroactive: a save that
+already has them earns them on first detection.
+
+### Client (detection + local book)
+Detection is per game (`badges.py` rules + the adapters' `progress(mem)`; badges-game's part). Every ~10 s at a safe
+moment in the main game (`is_safe()`, not in a run, trade or battle) the app calls `self.G.progress(self.game)`,
+merges it into its **badge book** (`badgesync.BadgeBook.apply`: never removes) and on anything new shows a toast
+("Badge earned: Kanto Champion!") and reports the book. The book lives next to the save, in the save's folder, named
+like the PC store: `<data_dir>/badges/<save_uid or uid>.json` = `{"version": 1, "earned": {region: {"champion": ts, "dex": ts, "shinies": [key, ...]}},
+"soullink": {server_id: {region: "gold"|"silver"}}}` (`soullink` = what each server last said, for display while
+offline). A save shared by several servers (section 8) shares the book, so every server it is played on gets the
+same main-game badges (reported on connect).
+
+### Protocol
+The server lists `"badges"` in `welcome.features`; clients only send `badges` / `get_badges` to such servers (an
+older server would answer an unknown type with an error shown in red). Old clients send nothing = no badges.
+
+| dir | type | fields |
+|---|---|---|
+| C→S | `badges` | `earned` = `{region: {"champion": ts\|null, "dex": ts\|null, "shinies": [key, ...]}}` — the whole main-game book. Sent after `welcome` and whenever something new was earned |
+| C→S | `get_badges` | `uid` |
+| S→C | `badges_data` | `uid`, `name`, `badges` = `{region: BadgeView}` |
+
+BadgeView = `{"champion": ts|null, "dex": ts|null, "shiny": int, "soullink": "gold"|"silver"|null,
+"soullink_ts": ts|null}`; the roster entry carries the compact form (bools + count + soullink, see RosterEntry).
+
+Server validation of `badges` (error otherwise): `earned` an object with at most the three regions (unknown keys =
+error); per region an object; `champion`/`dex` null/absent, `true` (= now) or a unix time 1e9 <= ts <= now + 1 day;
+`shinies` a list of at most 1000 distinct strings matching `[A-Za-z0-9_:-]{1,40}`; other fields (e.g. `soullink`)
+ignored — Soul Link badges only come from the run ledger.
+
+Server storage: `<data_dir>/badges.json` = `{"version": 1, "players": {uid: {region: {"champion": ts, "dex": ts,
+"shinies": [key...], "soullink": "gold"|"silver", "soullink_ts": ts}}}}` (atomic write, debounced). Merging a
+report: union of shiny keys (capped at 1000 per region: the count saturates there), earliest timestamp kept,
+nothing ever removed (only a future admin tool may). When something new arrives the roster is re-sent and a system
+message tells everyone ("Ilias earned the Kanto Champion badge!", "... reached Shiny hunter 10 in Kanto!").
+
+Soul Link: when the ledger gets a `hof` event of player p (section 7), the server awards p the Soul Link badge of
+the run's region (gold/silver by the run's `exp_share` rule), saves it, re-sends the roster and tells everyone. At
+startup it also awards it for every `hof` already in `challenges.json` (runs completed before 0.7.5). The client
+toasts it when its own roster entry shows a new or better Soul Link badge. `merge.py` (section 8) copies badges.json entries like players.

@@ -520,6 +520,9 @@ class ChallengeHub:
             await self.send(uid, out)
         if ev["t"] == "hof":
             rec["progress"].setdefault(client.uid, {"badges": 0})["hof"] = True
+            award = getattr(self.server, "award_soullink", None)
+            if award is not None:
+                await award(rec, client.uid, ev["ts"])         # Soul Link badge (SPEC.md section 9)
             if all(rec["progress"].get(u, {}).get("hof") for u in rec["players"]):
                 rec["status"], rec["ended"], rec["reason"] = "completed", time.time(), "both entered the Hall of Fame"
                 log.info("challenge %s completed", rec["id"])
