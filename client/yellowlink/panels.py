@@ -662,6 +662,9 @@ def draw_soullink(surf, f, app, game_w, game_h, offset):
                      offset)
     y = r.y + 54
     sl = app.sl
+    if getattr(app, "evo_pick", False):
+        _draw_tradeevo_picker(surf, f, app, r, y, offset, narrow)
+        return
     # columns: area / you / partner (the DS window and small Game Boy windows are narrower)
     if narrow:
         cw = (r.w - 36) // 3
@@ -698,7 +701,7 @@ def draw_soullink(surf, f, app, game_w, game_h, offset):
                 return "in battle...", ACCENT
             return "-", DIM
 
-        bottom = r.bottom - (110 if narrow else 70)
+        bottom = r.bottom - (110 if narrow else 106)
         for area, ka, kb, sa, sb, da, db in rows:
             if y > bottom:
                 text(surf, f.small, "...", (r.x + 18, y), DIM)
@@ -715,14 +718,62 @@ def draw_soullink(surf, f, app, game_w, game_h, offset):
             text(surf, f.small, s1, (cx[1], y), c1)
             text(surf, f.small, s2, (cx[2], y), c2)
             y += 20
-    button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 50, 210, 36), "Pause & go back",
-           lambda: app.leave_to_main("paused"), offset=offset, primary=True)
+    evo_ok = hasattr(app, "tradeevo_blocker")
     if narrow:
+        bw = (r.w - 36 - 8) // 2
+        button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 50, bw, 36), "Pause & go back",
+               lambda: app.leave_to_main("paused"), offset=offset, primary=True)
+        if evo_ok:
+            button(surf, app, f, pygame.Rect(r.x + 26 + bw, r.bottom - 50, bw, 36), "Trade evolution",
+                   lambda: setattr(app, "evo_pick", True), offset=offset)
         text_wrapped(surf, f.small, "Your run is saved. Continue it together any time from Multiplayer > "
                      "Challenges.", (r.x + 18, r.bottom - 92), r.w - 36, DIM, 18)
         return
-    text(surf, f.small, "Your run is saved. Continue it together any time", (r.x + 240, r.bottom - 48), DIM)
-    text(surf, f.small, "from Multiplayer > Challenges.", (r.x + 240, r.bottom - 30), DIM)
+    button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 50, 210, 36), "Pause & go back",
+           lambda: app.leave_to_main("paused"), offset=offset, primary=True)
+    if evo_ok:
+        button(surf, app, f, pygame.Rect(r.x + 240, r.bottom - 50, 190, 36), "Trade evolution",
+               lambda: setattr(app, "evo_pick", True), offset=offset)
+    text(surf, f.small, fit(f.small, "Your run is saved. Continue it together any time from Multiplayer > "
+                                     "Challenges.", r.w - 36), (r.x + 18, r.bottom - 80), DIM)
+
+
+def _draw_tradeevo_picker(surf, f, app, r, y, offset, narrow):
+    """Soul Link panel, "Trade evolution": the party mons that evolve by trade (SPEC.md section 7)."""
+    _, partner = app.chal_partner()
+    w = r.w - 36
+    y = text_wrapped(surf, f.small, f"Trade and trade back with {partner}: your Pokémon goes over and comes straight "
+                     f"back, evolved. It stays yours and keeps its Soul Link.", (r.x + 18, y), w, DIM, 18) + 8
+    blocker = app.tradeevo_blocker()
+    if blocker:
+        y = text_wrapped(surf, f.small, blocker, (r.x + 18, y), w, BAD, 18) + 6
+    opts = app.tradeevo_options()
+    if opts is None:
+        text(surf, f.body, "Reading your party...", (r.x + 18, y), DIM)
+    elif not opts:
+        y = text_wrapped(surf, f.body, "No Pokémon in your party evolves by trade.", (r.x + 18, y), w, TEXT) + 4
+        hint = ("Kadabra, Machoke, Graveler and Haunter do." if not app.gen2 and not getattr(app, "ds", False) else
+                "Kadabra, Machoke, Graveler, Haunter do - and some others holding the right item "
+                "(Onix + Metal Coat...).")
+        text_wrapped(surf, f.small, hint, (r.x + 18, y), w, DIM, 18)
+    else:
+        bw = 110
+        row_h = 44 if narrow else 40
+        for o in opts:
+            if y > r.bottom - 100:
+                text(surf, f.small, "...", (r.x + 18, y), DIM)
+                break
+            label = f"{o.label()} -> {o.into_name}"
+            text(surf, f.body, fit(f.body, label, w - bw - 10), (r.x + 18, y), TEXT if o.ok else DIM)
+            note = (f"uses up its {o.item}" if o.item else "") if o.ok else o.why
+            if note:
+                text(surf, f.small, fit(f.small, note, w - bw - 10), (r.x + 18, y + 20), DIM if o.ok else BAD)
+            button(surf, app, f, pygame.Rect(r.right - 18 - bw, y - 2, bw, 34), "Evolve",
+                   lambda o=o: app.request_tradeevo(o), enabled=o.ok and not blocker, offset=offset,
+                   tip=(blocker or (f"{o.label()} {o.why}." if o.why else "")))
+            y += row_h
+    button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 50, 120, 36), "Back",
+           lambda: setattr(app, "evo_pick", False), offset=offset)
 
 
 # --- trades / gifts (PC database) --------------------------------------------------------------------------

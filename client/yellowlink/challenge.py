@@ -17,6 +17,7 @@ KIND_NAMES = {"soul_link": "Soul Link"}
 FINISHED = ("completed", "failed", "abandoned")
 CHALLENGE_GAMES = ("yellow", "crystal", "platinum")     # order of the buttons in the new-challenge form
 CHALLENGE_RULES = ("exp_share",)        # optional run rules this client applies (`library.challenge_rules`)
+CHALLENGE_CAPS = ("trade_evo",)         # ...and what else it can do in a run (same list; SPEC.md section 7)
 LEGACY_GAMES = ("yellow", "crystal")    # every challenge client (0.6.0+) plays these; others need `challenge_games`
 # What the referee needs from a game adapter's memory class (crystal.py / platinum.py "Soul Link" sections)
 REFEREE_HELPERS = ("battle_info", "battle_party_slot", "has_poke_balls", "current_box_records", "move_party_to_box",
@@ -82,7 +83,8 @@ class ChallengeMixin:
         # of them this client can run a challenge in (0.7.x clients list Platinum in `games` but have no Platinum
         # Soul Link, so the server only allows Platinum for clients that send it - SPEC.md section 7)
         self.net.send({"type": "library", "games": sorted(g for g in self.lib.games if self._game_supported(g)),
-                       "challenge_games": self.challenge_games(), "challenge_rules": list(CHALLENGE_RULES)})
+                       "challenge_games": self.challenge_games(),
+                       "challenge_rules": list(CHALLENGE_RULES) + list(CHALLENGE_CAPS)})
         if self.chal:
             if self.chal_wait == "offline":
                 self.chal_wait = "load"           # back online: wait until the server says both are in
@@ -188,6 +190,8 @@ class ChallengeMixin:
         for ev in self.chal_outbox:
             sl.local(ev)
         self.sl = sl
+        if hasattr(self, "tradeevo_reset"):
+            self.tradeevo_reset()                      # resend a trade evolution's `done` the server may not have
         if self.referee:
             self.referee.sl = sl
         elif self.full and hasattr(self.game, "battle_info"):
@@ -253,6 +257,8 @@ class ChallengeMixin:
             self.toast(f"{partner} missed their encounter in {area}.", 5, ui.BAD)
         elif ev.get("t") == "hof":
             self.toast(f"{partner} entered the Hall of Fame!", 6, ui.GOOD)
+        elif ev.get("t") == "evo" and hasattr(self, "tradeevo_event"):
+            self.tradeevo_event(ev, partner)
 
     # --- referee callbacks ---------------------------------------------------------------------------------
     def _chal_send(self, ev):
@@ -305,6 +311,8 @@ class ChallengeMixin:
                 self.referee.step()
             except Exception:  # noqa: BLE001 - never stop the game over a rules bug
                 log.exception("soul link referee failed")
+        if self.chal and hasattr(self, "tradeevo_step"):
+            self.tradeevo_step()
 
     def _chal_pc_poll(self):
         """Platinum has no PC hook in a challenge (the PC database is off there): the box UI running = PC open."""

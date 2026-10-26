@@ -96,7 +96,7 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 ### Server -> Client
 | type | fields |
 |---|---|
-| `welcome` | `you` uid, `players` list[PlayerInfo], `roster` list[RosterEntry], `latest_client` str, `download_url` str, `motd` str, `server_name` str (may be empty; env `YL_SERVER_NAME`), `features` list[str] (0.7.5: `["badges"]`; missing = older server) |
+| `welcome` | `you` uid, `players` list[PlayerInfo], `roster` list[RosterEntry], `latest_client` str, `download_url` str, `motd` str, `server_name` str (may be empty; env `YL_SERVER_NAME`), `features` list[str] (0.7.5: `["badges"]`, 0.7.6: + `"trade_evo"` (section 7); missing = older server) |
 | `player_join` | `player` PlayerInfo |
 | `player_leave` | `uid` |
 | `state` | `uid` + all state fields (relayed to everyone else) |
@@ -496,8 +496,8 @@ battery, `resume.state` = a DeSmuME savestate. While playing a challenge,
 `cfg["active_challenge"] = {"id", "game"}`; `Config.game_id/save_path/resume_path` point at the challenge.
 The main game's library, saves, PC database and party snapshot are untouched. On a fresh start of the app
 (e.g. after a crash) `active_challenge` is cleared, so the player always starts in their main game.
-Inside a challenge: no PC-database sync, no trades, no live/practice battles, no party publishing, and only
-players in the same challenge are drawn.
+Inside a challenge: no PC-database sync, no trades (only trade evolutions with the partner, see "Trade evolutions
+in a run"), no live/practice battles, no party publishing, and only players in the same challenge are drawn.
 
 ### Record (server, `data/challenges.json`)
 ```
@@ -512,7 +512,7 @@ Summaries (`ledger` omitted, plus `"online": [uid...]` = players currently in th
 ### Messages
 | client → server | fields | notes |
 |---|---|---|
-| `library` | `games` list[str], `challenge_games` list[str] (optional), `challenge_rules` list[str] (optional) | games the player has installed with the verified ROM (sent on connect); shown in roster as `games`. `challenge_games` (clients 0.7.4+) = the games this client can run a challenge in; `challenge_rules` (clients 0.7.4+) = optional run rules it knows, today `["exp_share"]`. Both shown in the roster under the same names (null = offline or older client) |
+| `library` | `games` list[str], `challenge_games` list[str] (optional), `challenge_rules` list[str] (optional) | games the player has installed with the verified ROM (sent on connect); shown in roster as `games`. `challenge_games` (clients 0.7.4+) = the games this client can run a challenge in; `challenge_rules` (clients 0.7.4+) = optional run rules it knows, today `["exp_share"]`, plus (clients 0.7.6+) `trade_evo` = it can do Soul Link trade evolutions (below; not a rule, always allowed). Both shown in the roster under the same names (null = offline or older client) |
 | `challenge_request` | `to`, `kind`, `game`, `rules` — or `to`, `challenge_id` to continue | target must be online and free |
 | `challenge_respond` | `request_id`, `accept` bool | |
 | `challenge_join` | `challenge_id` | sent after loading into the challenge game (and after every reconnect while in it) |
@@ -562,12 +562,58 @@ gets `challenge_partner_left`. A player who loads in but whose partner doesn't j
 | `balls` | | player has Poké Balls for the first time: the Nuzlocke rules (faint = dead, blackout = fail, first encounters) apply from here; gifts (starters) count before it |
 | `hof` | | player entered the Hall of Fame |
 | `blackout` | | whole party fainted → challenge failed |
+| `evo` | `key`, `dex`, `into`, `nick`, `item` (optional), `evo` | trade evolution with the partner (0.7.6, below): player `p`'s mon `key` evolved from `dex` into `into` (national dex); `item` = name of the held item used up. Written **by the server only** (a client can't post it as a `challenge_event`). Display only: the key, the link, deaths and the dupes clause don't change |
 
 Server reacts to `hof` (both players → status completed) and `blackout` (status failed). An `enc` left "open" when a
 player reconnects or reloads is treated as **failed** (no rerolling by closing the game mid-battle). Rule
 derivation (in `soullink.py`): two caught encounters in the same area = a linked pair; a caught mon whose partner's
 encounter in that area failed is **unlinked** (must stay boxed); `dead` on either side kills both; `loc` to box
 on one side boxes the partner.
+
+### Trade evolutions in a run — added in 0.7.6
+Trades stay off inside a run (no swaps between the two players, nothing to or from the main game), but trade
+evolutions are **always allowed** (Ilias's decision; not a run rule): a "trade and trade back" with the run partner.
+The player picks one of their **party** Pokémon that would evolve by trade (Soul Link panel → "Trade evolution");
+the partner gets a prompt "Help Ilias evolve Kadabra? [Yes/No]"; on yes the mon "goes over and comes straight back"
+and evolves in its owner's game. Nothing of it ever reaches the partner's game.
+
+Which mons (client, `tradeevo.py`; the same evolution code as normal trades):
+- Yellow: Kadabra, Machoke, Graveler, Haunter (`game.TRADE_EVOLUTIONS` / `game.evolve_for_trade`).
+- Crystal: those four + Poliwhirl/Slowpoke holding a King's Rock, Onix/Scyther + Metal Coat, Seadra + Dragon Scale,
+  Porygon + Up-Grade (`crystal.TRADE_EVOLUTIONS` / `crystal.evolve_for_trade`). Everstone blocks it; eggs never.
+- Platinum: every trade evolution in the player's ROM (`ndsrom.PlatinumData.trade_evolutions()`: the Crystal ones
+  plus Porygon2 + Dubious Disc, Rhydon + Protector, Electabuzz + Electirizer, Magmar + Magmarizer, Dusclops + Reaper
+  Cloth, Clamperl + Deep Sea Tooth/Scale). Everstone blocks it; eggs never.
+- A mon that needs an item but doesn't hold it, holds an Everstone, or is dead in the run is listed but can't be
+  picked. The held item is used up like in the games.
+
+The evolved mon stays the owner's own: same OT name/ID (no traded exp boost, no disobedience), same PID/DVs, so the
+same **Soul Link key** (Yellow OT ID + DVs + catch-rate byte, Crystal OT ID + DVs + caught data, Platinum PID + TID +
+SID - none of them change), so its link, death/box tracking, the dupes clause (evolution families) and badge keys
+(family root) are untouched. Nickname kept unless it is the species name (then the new species' name, like the
+games). Stats are recalculated at the same level; current HP keeps its damage (Gen 1/2: new max - (old max - HP);
+Platinum: HP + (new max - old max); a fainted mon stays at 0). The Pokédex gets the new species (caught + seen).
+No evolution scene and no new moves at evolution (like normal YellowLink trades): it happens instantly with a toast
+on both sides.
+
+Flow (one trade evolution per run at a time; the server forwards and gates, the requester's client does the RAM
+write when its game is safe, `is_safe()`; Platinum also needs the party to read identically on an earlier frame,
+`observe_stable()`):
+
+| dir | type | fields | notes |
+|---|---|---|---|
+| C→S | `challenge_evo_request` | `challenge_id`, `evo_id` (client-made, 1-16 letters/digits), `key`, `dex`, `into`, `nick` (≤ 12 chars), `item` (name or null) | malformed fields, an unknown run or a (`dex`, `into`) that isn't a trade evolution: error (red). A well-formed request that can't happen right now is answered with `challenge_evo_end` (`ok` false) to the sender only: "the run is over", "not both in the run" (the session isn't ready, or a player is reconnecting), "X needs a newer YellowLink (press U to update)" (the partner's client doesn't list `trade_evo`), "busy" (another trade evolution is open in this run - e.g. both asked at once: the first one wins, the other player then gets the question) |
+| S→C | `challenge_evo_request` | `challenge_id`, `evo_id`, `from`, `name`, `key`, `dex`, `into`, `nick`, `item` | to the partner; expires after 60 s (`challenge_evo_end` "no answer" to both) |
+| C→S | `challenge_evo_respond` | `challenge_id`, `evo_id`, `accept` | by the partner. Unknown/finished `evo_id`: ignored. Accept needs both still in the run (else end "not both in the run") |
+| S→C | `challenge_evo_go` | `challenge_id`, `evo_id` | to the requester: evolve it now (it waits for a safe moment, at most 30 s) |
+| C→S | `challenge_evo_done` | `challenge_id`, `evo_id`, `ok` bool, `why` (optional, ≤ 30) | by the requester: `ok` = written to the game (send right after the write). `ok: false` before `go` = cancel; after `go` = couldn't (mon moved, not safe...). An unknown `evo_id` is answered with `challenge_evo_end` (`ok` false, "expired") to the sender only, so a resent `done` stops |
+| S→C | `challenge_evo_end` | `challenge_id`, `evo_id`, `ok`, `reason` | to both: over. On `ok` the server first appends the ledger event `evo` (echoed to both as a normal `challenge_event`); reasons: "declined", "no answer", "cancelled", "not both in the run", "session over", "timed out", or the requester's `why` (plus the refusals above, to the requester only) |
+
+Server timers: an unanswered request ends after 60 s; after `go`, if no `done` arrives within 180 s the evolution
+ends "timed out". When the run's session ends (leave, disconnect past the grace time, completed, failed) every open
+trade evolution of it ends "session over". A requester who reconnects resends a `done` it couldn't send.
+Clients 0.7.6+ only offer the button when the server lists `trade_evo` in `welcome.features` and the partner's
+roster entry lists `trade_evo` in `challenge_rules`; older clients never see any of these messages.
 
 ### Game helpers used by the referee (verified on the real ROMs)
 `GameMemory` / `CrystalMemory`: `battle_info()`, `battle_party_slot()`, `has_poke_balls()`, `in_hall_of_fame()`,

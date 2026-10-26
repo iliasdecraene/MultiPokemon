@@ -16,6 +16,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
+from .pcstore import G4_TRADE_EVOS
+
 log = logging.getLogger("yellowlink.challenges")
 
 KINDS = {"soul_link": "Soul Link"}
@@ -35,7 +37,13 @@ LEDGER_MAX = 5000
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 AREA_RE = re.compile(r"^[A-Za-z0-9_*-]{1,40}$")   # "*" marks a shiny-clause bonus catch ("ROUTE_1*1")
 CID_RE = re.compile(r"^[A-Za-z0-9]{1,16}$")
-EVENT_TYPES = {"enc", "dead", "loc", "swap", "hof", "blackout", "balls"}
+EVENT_TYPES = {"enc", "dead", "loc", "swap", "hof", "blackout", "balls"}     # what clients may post ("evo": server)
+# Trade evolutions in a run (SPEC.md section 7, 0.7.6): (national dex, evolution) pairs of every game we support -
+# Platinum's list is a superset of Yellow's and Crystal's.
+TRADE_EVO_PAIRS = {(dex, into) for dex, evos in G4_TRADE_EVOS.items() for into, *_ in evos}
+TRADE_EVO_CAP = "trade_evo"  # in `library.challenge_rules`: the client can do (and help with) trade evolutions
+EVO_ASK_TIMEOUT = 60.0       # the partner must answer within this
+EVO_GO_TIMEOUT = 180.0       # after "go" the requester's `done` must arrive within this
 ENC_STATUS = {"open", "caught", "failed", "skipped"}
 
 
@@ -147,6 +155,37 @@ class Session:
     ready: bool = False
 
 
+@dataclass(eq=False)
+class Evo:
+    """One trade evolution in progress (at most one per run)."""
+    id: str
+    challenge_id: str
+    frm: str
+    to: str
+    key: str
+    dex: int
+    into: int
+    nick: str
+    item: str | None
+    state: str = "asked"            # asked -> go -> (done: removed)
+    timer: asyncio.Task | None = None
+
+
+def _evo_text(v, what, maxlen):
+    """A short display string (nickname / item name): printable, at most maxlen characters."""
+    if v is None:
+        return None
+    if not isinstance(v, str) or len(v) > maxlen or not v.isprintable():
+        raise ChallengeError(f"{what} is invalid")
+    return v
+
+
+def _dex(v, what):
+    if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= MAX_DEX:
+        raise ChallengeError(f"{what} is invalid")
+    return v
+
+
 class ChallengeHub:
     def __init__(self, server, data_dir: str, debounce: float = 1.0):
         self.server = server
@@ -156,6 +195,7 @@ class ChallengeHub:
         self.records: dict[str, dict] = {}
         self.requests: dict[str, Request] = {}
         self.sessions: dict[str, Session] = {}
+        self.evos: dict[str, Evo] = {}                # challenge id -> its open trade evolution
         self._save_task = None
         self._load()
 
@@ -231,6 +271,9 @@ class ChallengeHub:
         for r in self.requests.values():
             if r.timer:
                 r.timer.cancel()
+        for e in self.evos.values():
+            if e.timer:
+                e.timer.cancel()
         try:
             self.save_now()
         except Exception:
@@ -432,6 +475,9 @@ class ChallengeHub:
         if s is None:
             return
         self._cancel_timers(s)
+        evo = self.evos.get(rec["id"])
+        if evo is not None:
+            await self._end_evo(evo, False, "session over")
         for uid in rec["players"]:
             c = self.client(uid)
             if c and c.challenge_id == rec["id"]:
@@ -509,15 +555,7 @@ class ChallengeHub:
             if dup is not None:                       # a resend after a connection blip: echo the original again
                 await self.server.send(client, {"type": "challenge_event", "challenge_id": rec["id"], "event": dup})
                 return
-        if len(rec["ledger"]) >= LEDGER_MAX:
-            raise ChallengeError("challenge log is full")
-        ev = {"seq": len(rec["ledger"]) + 1, "p": client.uid, "ts": round(time.time(), 1), **ev}
-        rec["ledger"].append(ev)
-        rec["updated"] = time.time()
-        self.schedule_save()
-        out = {"type": "challenge_event", "challenge_id": rec["id"], "event": ev}
-        for uid in rec["players"]:
-            await self.send(uid, out)
+        ev = await self._append(rec, client.uid, ev)
         if ev["t"] == "hof":
             rec["progress"].setdefault(client.uid, {"badges": 0})["hof"] = True
             award = getattr(self.server, "award_soullink", None)
@@ -539,6 +577,19 @@ class ChallengeHub:
             await self.update_both(rec)
             await self.end_session(rec, None, "failed", notify=False)
 
+    async def _append(self, rec, uid, ev) -> dict:
+        """Add one event to the run's ledger (server fields seq/p/ts) and echo it to both players."""
+        if len(rec["ledger"]) >= LEDGER_MAX:
+            raise ChallengeError("challenge log is full")
+        ev = {"seq": len(rec["ledger"]) + 1, "p": uid, "ts": round(time.time(), 1), **ev}
+        rec["ledger"].append(ev)
+        rec["updated"] = time.time()
+        self.schedule_save()
+        out = {"type": "challenge_event", "challenge_id": rec["id"], "event": ev}
+        for p in rec["players"]:
+            await self.send(p, out)
+        return ev
+
     async def on_progress(self, client, msg):
         rec = self._get(msg, client.uid)
         badges = msg.get("badges")
@@ -557,3 +608,109 @@ class ChallengeHub:
         await self.update_both(rec)
         if rec["id"] in self.sessions:
             await self.end_session(rec, client.uid, "abandoned")
+
+    # ------------------------------------------------------------------ trade evolutions (SPEC.md section 7)
+    def _both_in(self, rec) -> bool:
+        s = self.sessions.get(rec["id"])
+        return bool(s and s.ready and not s.lost and s.present >= set(rec["players"]))
+
+    def _evo_of(self, msg, uid):
+        """The open trade evolution a respond/done message is about, or None (stale: ignore)."""
+        cid, eid = msg.get("challenge_id"), msg.get("evo_id")
+        evo = self.evos.get(cid) if isinstance(cid, str) else None
+        if evo is None or evo.id != eid or uid not in (evo.frm, evo.to):
+            return None
+        return evo
+
+    async def on_evo_request(self, client, msg):
+        rec = self._get(msg, client.uid)
+        eid = _str(msg.get("evo_id"), "evo_id", 16, CID_RE)
+        key = _str(msg.get("key"), "key")
+        dex, into = _dex(msg.get("dex"), "dex"), _dex(msg.get("into"), "into")
+        if (dex, into) not in TRADE_EVO_PAIRS:
+            raise ChallengeError("that Pokémon doesn't evolve by trade")
+        nick = _evo_text(msg.get("nick", ""), "nick", 12) or ""
+        item = _evo_text(msg.get("item"), "item", 20) or None
+        # A well-formed request that can't happen right now ends the requester's wait (no red error)
+        partner = self.client(self.other(rec, client.uid))
+        if rec["status"] != "active":
+            refuse = "the run is over"
+        elif not self._both_in(rec) or partner is None:
+            refuse = "not both in the run"
+        elif TRADE_EVO_CAP not in (partner.challenge_rules or []):
+            refuse = f"{partner.name} needs a newer YellowLink (press U to update)"
+        elif rec["id"] in self.evos:
+            refuse = "busy"
+        else:
+            refuse = None
+        if refuse:
+            await self.server.send(client, {"type": "challenge_evo_end", "challenge_id": rec["id"], "evo_id": eid,
+                                            "ok": False, "reason": refuse})
+            return
+        evo = Evo(eid, rec["id"], client.uid, partner.uid, key, dex, into, nick, item)
+        self.evos[rec["id"]] = evo
+        evo.timer = asyncio.get_running_loop().create_task(self._evo_timeout(evo, EVO_ASK_TIMEOUT, "no answer"))
+        log.info("challenge %s: %s asks %s to trade-evolve #%d -> #%d", rec["id"], client.name, partner.name,
+                 dex, into)
+        await self.server.send(partner, {"type": "challenge_evo_request", "challenge_id": rec["id"],
+                                         "evo_id": eid, "from": client.uid, "name": client.name, "key": key,
+                                         "dex": dex, "into": into, "nick": nick, "item": item})
+
+    async def _evo_timeout(self, evo, secs, reason):
+        await asyncio.sleep(secs)
+        if self.evos.get(evo.challenge_id) is evo:
+            evo.timer = None                          # (this task: don't cancel ourselves in _end_evo)
+            await self._end_evo(evo, False, reason)
+
+    async def _end_evo(self, evo, ok, reason):
+        if self.evos.get(evo.challenge_id) is evo:
+            del self.evos[evo.challenge_id]
+        if evo.timer:
+            evo.timer.cancel()
+            evo.timer = None
+        log.info("challenge %s: trade evolution %s ended (%s)", evo.challenge_id, evo.id, reason)
+        out = {"type": "challenge_evo_end", "challenge_id": evo.challenge_id, "evo_id": evo.id, "ok": ok,
+               "reason": reason}
+        for uid in (evo.frm, evo.to):
+            await self.send(uid, out)
+
+    async def on_evo_respond(self, client, msg):
+        evo = self._evo_of(msg, client.uid)
+        if evo is None or evo.to != client.uid or evo.state != "asked":
+            return                                    # expired / not ours / already answered: ignore quietly
+        rec = self.records.get(evo.challenge_id)
+        if not msg.get("accept"):
+            await self._end_evo(evo, False, "declined")
+            return
+        if rec is None or rec["status"] != "active" or not self._both_in(rec):
+            await self._end_evo(evo, False, "not both in the run")
+            return
+        evo.state = "go"
+        if evo.timer:
+            evo.timer.cancel()
+        evo.timer = asyncio.get_running_loop().create_task(self._evo_timeout(evo, EVO_GO_TIMEOUT, "timed out"))
+        await self.send(evo.frm, {"type": "challenge_evo_go", "challenge_id": evo.challenge_id, "evo_id": evo.id})
+
+    async def on_evo_done(self, client, msg):
+        evo = self._evo_of(msg, client.uid)
+        if evo is None or evo.frm != client.uid:
+            # already over (timed out, server restarted...): tell the sender so it stops resending
+            cid, eid = msg.get("challenge_id"), msg.get("evo_id")
+            if isinstance(cid, str) and isinstance(eid, str) and len(eid) <= 16:
+                await self.server.send(client, {"type": "challenge_evo_end", "challenge_id": cid[:40],
+                                                "evo_id": eid, "ok": False, "reason": "expired"})
+            return
+        if not msg.get("ok"):
+            why = msg.get("why")
+            why = why[:30] if isinstance(why, str) and why.isprintable() and why else "cancelled"
+            await self._end_evo(evo, False, why)
+            return
+        if evo.state != "go":
+            raise ChallengeError("wait for your partner's answer first")
+        rec = self.records.get(evo.challenge_id)
+        if rec is not None:
+            ev = {"t": "evo", "key": evo.key, "dex": evo.dex, "into": evo.into, "nick": evo.nick, "evo": evo.id}
+            if evo.item:
+                ev["item"] = evo.item
+            await self._append(rec, client.uid, ev)
+        await self._end_evo(evo, True, "evolved")

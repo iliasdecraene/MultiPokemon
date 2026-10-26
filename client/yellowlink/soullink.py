@@ -98,7 +98,8 @@ class SoulLink:
     def state(self) -> dict:
         if self._cache is not None:
             return self._cache
-        st = {uid: {"enc": {}, "keys": {}, "dead": {}, "loc": {}, "balls": False, "hof": False, "blackout": False}
+        st = {uid: {"enc": {}, "keys": {}, "dead": {}, "loc": {}, "evo": {}, "balls": False, "hof": False,
+                    "blackout": False}
               for uid in (self.me, self.partner)}
         order = 0
         for ev in self.ledger + self.pending:
@@ -124,6 +125,11 @@ class SoulLink:
                     enc = dict(s["enc"].get(area, {}))
                     enc["key"] = ev["new"]
                     s["enc"][area] = enc
+            elif t == "evo":
+                # trade evolution with the partner (SPEC.md section 7): same key, link, deaths, dupes family -
+                # only what the pairs list shows changes
+                if ev.get("key") and ev.get("into"):
+                    s["evo"][ev["key"]] = ev["into"]
             elif t in ("balls", "hof", "blackout"):
                 s[t] = True
         self._cache = st
@@ -201,13 +207,14 @@ class SoulLink:
         return out
 
     def pairs(self) -> list:
-        """[(area, my_key, their_key, my_status)] for display."""
+        """[(area, my_key, their_key, my_status, their_status, my_dex, their_dex)] for display; the dex is the
+        species now (after a trade evolution, `evo` events)."""
         mine, theirs = self.mine(), self.theirs()
         rows = []
         for area in sorted(set(mine["enc"]) | set(theirs["enc"])):
             a, b = mine["enc"].get(area, {}), theirs["enc"].get(area, {})
             rows.append((area, a.get("key"), b.get("key"), a.get("status"), b.get("status"),
-                         a.get("dex"), b.get("dex")))
+                         mine["evo"].get(a.get("key"), a.get("dex")), theirs["evo"].get(b.get("key"), b.get("dex"))))
         return rows
 
     def counts(self) -> dict:

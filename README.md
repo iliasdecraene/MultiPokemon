@@ -20,6 +20,10 @@ Everyone plays their **own** game with their own save and story. On top of that:
   its partner) goes to the PC for good, boxing one boxes its partner, and a blackout ends the run. The run only plays
   while you're both in it; pause any time and **Continue** together later. Finish it (both reach the Hall of Fame) to
   earn the badge. A Platinum Soul Link needs both of you on the latest YellowLink (press **U** to update).
+  **Trade evolutions** are always allowed in a run: open **Soul Link** → *Trade evolution*, pick a Pokémon that
+  evolves by trade (Kadabra, Machoke, Graveler, Haunter - in Crystal and Platinum also the ones holding their item,
+  like Onix with a Metal Coat; an Everstone stops it) and your partner gets a "help evolve it?" question. It goes over
+  and comes straight back evolved: still yours, still linked to its partner.
 - **Exp Share All** (Settings, top right of the sidebar - on by default): like the newer games, Pokémon that battle get
   full experience and the rest of your party gets half, in Yellow, Crystal and Platinum. Levels, new moves and
   evolutions happen the normal way. Turn it off for the original rules. In a Soul Link the run decides: whoever

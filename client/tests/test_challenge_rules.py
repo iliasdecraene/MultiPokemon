@@ -53,7 +53,7 @@ OLD = {"uid": "you", "name": "Alex", "games": ["yellow"], "challenge_games": ["y
 def test_library_advertises_the_rule():
     app = FakeApp()
     app.chal_on_connected()
-    assert app.net.sent[-1]["challenge_rules"] == ["exp_share"]
+    assert app.net.sent[-1]["challenge_rules"] == ["exp_share", "trade_evo"]      # + the trade evolution capability (0.7.6)
 
 
 def test_form_default_is_my_setting_and_needs_partner_support():

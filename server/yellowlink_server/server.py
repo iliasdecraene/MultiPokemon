@@ -49,7 +49,8 @@ CLOSE_REPLACED = 4002
 CLOSE_BAD_HELLO = 4003
 CLOSE_MOVED = 4005          # this server was merged into another one (Config.moved_to); see SPEC.md section 8
 MOVE_SUPPORTED = (0, 7, 1)  # clients from this version on follow a "moved" message by themselves
-FEATURES = ("badges",)      # optional message groups this server knows (welcome.features; SPEC.md section 9)
+FEATURES = ("badges", "trade_evo")   # optional message groups this server knows (welcome.features; SPEC.md
+                                    # section 9 badges, section 7 trade evolutions in a run)
 
 
 def _version_tuple(v: str) -> tuple:
@@ -1267,6 +1268,9 @@ class YellowLinkServer:
         "challenge_event": _chal("on_event"),
         "challenge_progress": _chal("on_progress"),
         "challenge_abandon": _chal("on_abandon"),
+        "challenge_evo_request": _chal("on_evo_request"),
+        "challenge_evo_respond": _chal("on_evo_respond"),
+        "challenge_evo_done": _chal("on_evo_done"),
         "pc_get": on_pc_get,
         "pc_put": on_pc_put,
         "hello": on_hello,

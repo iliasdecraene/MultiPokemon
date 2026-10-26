@@ -20,6 +20,7 @@ from .diag import Diagnostics, send_report_sync, show_report_window
 from .game import GameMemory
 from . import crystal
 from .challenge import ChallengeMixin
+from .tradeevo import TradeEvoMixin
 from .trades import TradeMixin
 from .badgesync import BadgeMixin
 from . import badge_art
@@ -143,7 +144,7 @@ class GhostBattle:
     result: int | None = None
 
 
-class App(ChallengeMixin, TradeMixin, BadgeMixin):
+class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
     def __init__(self, cfg: Config, diag: Diagnostics | None = None):
         self.cfg = cfg
         self.diag = diag
@@ -155,6 +156,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin):
         self.init_challenges()
         self.init_trades()
         self.init_badges()
+        self.init_tradeevo()
         # in a challenge: that run's own game + separate save (Config paths follow active_challenge)
         self.game_id = cfg.challenge["game"] if cfg.challenge else (self.lib.current or "yellow")
         self.save_tag = f"challenge-{cfg.challenge['id']}" if cfg.challenge else self.game_id
@@ -679,6 +681,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin):
                 self.friends[p["uid"]] = Friend(p["uid"], p["name"], p.get("state"))
                 self._snap(self.friends[p["uid"]])
         self.roster = msg.get("roster", [])
+        self.server_features = set(msg.get("features") or [])
         self.badges_on_welcome(msg)
 
     def on_player_join(self, msg):
@@ -749,6 +752,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin):
 
     def _maybe_show_prompt(self):
         if self.prompt and self.mode == "play" and self.prompt["shown"] is None:
+            if self.prompt["kind"] == "tradeevo" and not self.evo_prompt_ready():
+                return                     # the partner's question waits for a quiet moment (not mid-battle)
             self.prompt["shown"] = time.time()
             self.mode = "prompt"
             self.release_all()
@@ -1362,6 +1367,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin):
 
     def close_panel(self):
         self.panel = None
+        self.evo_pick = False
         if self.mode == "panel":
             self.mode = "play"
 
@@ -1725,6 +1731,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin):
             return
         if p["kind"] == "challenge":
             self.respond_challenge(accept)
+        elif p["kind"] == "tradeevo":
+            self.respond_tradeevo(accept)
         elif p["kind"] == "battle":
             self.net.send({"type": "battle_respond", "battle_id": p["id"], "accept": accept})
         else:
@@ -1806,6 +1814,10 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin):
         if self.mode == "chal_popup":
             if k in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE, pygame.K_SPACE):
                 self.chal_close_popup()
+            return
+        if self.mode == "evo_wait":
+            if k == pygame.K_ESCAPE:
+                self.cancel_tradeevo()
             return
         if self.mode == "prompt":
             p = self.prompt
@@ -2162,6 +2174,24 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin):
                               lambda: self.respond_challenge(True), offset=off, primary=True)
                 panels.button(sub, self, self.fonts, pygame.Rect(r.right - 128, r.bottom - 52, 110, 36), "Decline",
                               lambda: self.respond_challenge(False), offset=off)
+            elif self.prompt["kind"] == "tradeevo":
+                p = self.prompt
+                name = self.dex_name(p.get("dex", 0))
+                nick = p.get("nick") or ""
+                mon = name if not nick or nick.upper() == name.upper() else f"{nick} ({name})"
+                width = min(self.game_w - 40, 520) - 36
+                lines = list(ui.wrap(self.fonts.body, f"Help {p['name']} evolve {mon}?", width))
+                dim = f"Trade and trade back: it becomes {self.dex_name(p.get('into', 0))}." + (
+                    f" Its {p['item']} is used up." if p.get("item") else "") + " Nothing changes in your game."
+                lines += [(ln, ui.DIM) for ln in ui.wrap(self.fonts.body, dim, width)]
+                lines += [(f"({left}s)", ui.DIM), ""]
+                r = ui.modal(sub, self.fonts, self.game_w, self.game_h, "Trade evolution", lines,
+                             "[Y] yes    [N] no")
+                off = (0, self.game_y)
+                panels.button(sub, self, self.fonts, pygame.Rect(r.right - 250, r.bottom - 52, 110, 36), "Yes",
+                              lambda: self._answer_prompt(True), offset=off, primary=True)
+                panels.button(sub, self, self.fonts, pygame.Rect(r.right - 128, r.bottom - 52, 110, 36), "No",
+                              lambda: self._answer_prompt(False), offset=off)
             elif self.prompt["kind"] == "battle":
                 ui.modal(sub, self.fonts, self.game_w, self.game_h, "Battle challenge!",
                          [f"{self.prompt['name']} challenges you to a live battle!",
@@ -2181,6 +2211,17 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin):
                               lambda: self._answer_prompt(True), offset=off, primary=True)
                 panels.button(sub, self, self.fonts, pygame.Rect(r.right - 128, r.bottom - 52, 110, 36), "Decline",
                               lambda: self._answer_prompt(False), offset=off)
+        elif self.mode == "evo_wait" and self.evo_out:
+            o = self.evo_out
+            _, partner = self.chal_partner()
+            asking = o["state"] == "asking"
+            r = ui.modal(sub, self.fonts, self.game_w, self.game_h, "Trade evolution",
+                         [f"{o['opt'].label()} -> {o['opt'].into_name}",
+                          (f"Waiting for {partner} to say yes..." if asking else "Evolving...", ui.DIM), ""],
+                         "[Esc] cancel" if asking else "")
+            if asking:
+                panels.button(sub, self, self.fonts, pygame.Rect(r.right - 128, r.bottom - 52, 110, 36), "Cancel",
+                              self.cancel_tradeevo, offset=(0, self.game_y))
         elif self.mode == "battle_confirm" and self.battle_offer:
             o = self.battle_offer
             lines = [f"{self.rom.species_name(m.species)}  Lv {m.level}" for m in o["mons"]]
@@ -2218,7 +2259,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin):
             panels.button(sub, self, self.fonts, pygame.Rect(self.game_w // 2 - 65, band.y + 84, 130, 34),
                           "Go back", lambda: self.leave_to_main("paused"), offset=(0, self.game_y))
         ui.draw_toasts(sub, self.fonts, self.toasts, self.game_w,
-                       bottom=self.mode in ("panel", "chal_popup", "prompt", "battle_confirm"))
+                       bottom=self.mode in ("panel", "chal_popup", "prompt", "battle_confirm", "evo_wait"))
         if self.fast:
             ui.text(sub, self.fonts.body, ">> fast (Space)", (self.game_w - 10, 10), ui.ACCENT, anchor="topright")
         ui.draw_sidebar(self.screen, self.fonts, self, self.game_w, self.screen.get_height())

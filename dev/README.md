@@ -41,6 +41,7 @@ Expected output: see the `print` lines; screenshots go to a temp dir printed at 
 - `badges_flow.py` — badges (SPEC.md section 9): main-game badges by RAM edits seen by a friend, gold/silver Soul Link badges from runs, the Yellow "Shiny!" tag; screenshots of the Regions/Multiplayer panels (3x, 4x, DS 1.5x layout).
 - `challenge_flow.py` — challenges with two clients: invite, fresh separate save, pause/partner-left pop-up, continue, closing the game, abandon.
 - `soullink_yellow.py` / `soullink_crystal.py` — Soul Link referee in the real games with two clients (catches, links, faints, PC rule, blackout).
+- `soullink_tradeevo.py [yellow|crystal|platinum]` — trade evolutions with the Soul Link partner (SPEC.md section 7) on all three ROMs: Kadabra -> Alakazam, Onix + Metal Coat -> Steelix, Everstone blocks; the evolved mon stays linked and a later faint kills both.
 - `soullink_mem_yellow.py` and `../crystal/soullink_verify.py` — verify the game-memory helpers the referee uses.
 - `pctrade_e2e.py` — PC trades + gifts between a Yellow and a Crystal player (real PC menus, server swap, no re-import).
 - `expshare_gb.py` — Exp Share All on the real Yellow and Crystal ROMs: wild / two participants / trainer x1.5 / level-up,

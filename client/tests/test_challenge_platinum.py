@@ -297,7 +297,8 @@ def test_shared_games_needs_partner_challenge_games_for_platinum(plat_helpers):
     assert app.shared_games("unk") == ["yellow", "crystal"]          # as before for Yellow/Crystal, never Platinum
     app.chal_on_connected()
     assert app.net.sent[-1] == {"type": "library", "games": ["crystal", "platinum", "yellow"],
-                                "challenge_games": ["yellow", "crystal", "platinum"], "challenge_rules": ["exp_share"]}
+                                "challenge_games": ["yellow", "crystal", "platinum"],
+                                "challenge_rules": ["exp_share", "trade_evo"]}
 
 
 def test_platinum_needs_the_referee_helpers(monkeypatch):
