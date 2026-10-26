@@ -258,15 +258,25 @@ def wait_menu(maxf=2400):
     return False
 
 
-def run_battle(max_iter=400, label="b"):
+BUSY = []                          # (exp task step, handle.busy()) samples of the last battle
+
+
+def run_battle(max_iter=400, label="b", on_step=None):
     """Mash A through a battle (FIGHT, move 1; A also answers the move-learn prompts: forget the first move),
-    then through the evolution scene etc. until the field is back."""
+    then through the evolution scene etc. until the field is back. on_step(step) sees each new exp-task step."""
     i, seen = 0, set()
+    del BUSY[:]
+    last = None
     for i in range(max_iter):
         if not pm.in_battle():
             break
         press("a", 24)
         step = handle.trace[-1] if handle.trace else None
+        if step and step != last:
+            last = step
+            BUSY.append((step, handle.busy()))
+            if on_step:
+                on_step(step)
         if step and step[1] in (7, 11, 17, 21) and step not in seen:      # level-up text/stats, move prompts
             seen.add(step)
             shot(f"{label}_slot{step[0]}_seq{step[1]}")
@@ -276,6 +286,7 @@ def run_battle(max_iter=400, label="b"):
         if pm.is_safe():
             break
         press("a", 24)
+    BUSY.append((None, handle.busy()))
     return i
 
 
@@ -345,7 +356,7 @@ def expected(party, awards, on, trainer):
     return out
 
 
-def play(start, on, party_fn, label, battle=None, plan=None):
+def play(start, on, party_fn, label, battle=None, plan=None, on_step=None):
     """From `start` (field): write the party, start a battle (wild by default), win it by mashing A (after
     running `plan` at the first command menu), back to the field. Returns before/after parties + hook records."""
     restore(start)
@@ -362,7 +373,7 @@ def play(start, on, party_fn, label, battle=None, plan=None):
         if not wait_menu():
             raise RuntimeError("no battle menu")
         plan()
-    run_battle(label=label)
+    run_battle(label=label, on_step=on_step)
     after = read_party()
     return {"before": before, "after": after, "awards": list(handle.awards), "given": list(handle.given),
             "trace": list(handle.trace)}
@@ -414,12 +425,14 @@ if __name__ == "__main__":
 
     # A: lead alone vs two benched (one learns a move, one evolves) + fainted + egg
     off = play(FIX, False, party_A, "A_off")
+    busy_off = list(BUSY)
     on = play(FIX, True, party_A, "A_on")
     for r, lab in ((off, "A off"), (on, "A on")):
         check(f"{lab}: one award, wild, participants = lead only", len(r["awards"]) == 1
               and r["awards"][0]["participants"] == 1 and not r["awards"][0]["trainer"], str(r["awards"]))
         check_E(r, lab)
-    E = on["awards"][0]["exp"]
+    busy_on = list(BUSY)
+    E = E_A = on["awards"][0]["exp"]
     d_off, d_on = deltas(off), deltas(on)
     print(f"   A: E = {E}; OFF gains {d_off}; ON gains {d_on}")
     check("A OFF = Platinum's own: lead E, everybody else 0", d_off == [E, 0, 0, 0, 0], str(d_off))
@@ -446,6 +459,10 @@ if __name__ == "__main__":
     check("A OFF: nothing levels or evolves on the bench",
           [m.species for m in off["after"]] == [m.species for m in off["before"]]
           and off["after"][1].party_level == 12, "")
+
+    check("A: handle.busy() is True during the ON award's task steps, False after the battle and with OFF",
+          sum(b for _, b in busy_on) >= 3 and not busy_on[-1][1]
+          and not any(b for _, b in busy_off), f"on {busy_on} off {busy_off}")
 
     # B: two participants (switch once)
     off = play(FIX, False, party_B, "B_off", plan=switch_to_slot1)
@@ -489,8 +506,24 @@ if __name__ == "__main__":
           d_on[0] == E and d_on[1] == E // 2 and d_on[3] == E // 2, str(d_on))
     check("E ON: Lucky Egg on the bench: floor(floor(E/2) * 1.5)", d_on[2] == (E // 2) * 150 // 100, str(d_on))
 
+    # F: remove() while the benched TURTWIG (slot 1, not a participant) is in its move-learn prompt
+    removed_at = []
+
+    def remove_at_prompt(step):
+        if not removed_at and step[0] == 1 and 16 <= step[1] <= 23:
+            removed_at.append((step, handle.busy()))
+            handle.remove()
+    r = play(FIX, True, party_A, "F_remove", on_step=remove_at_prompt)
+    print(f"   F: removed at task step {removed_at}; gains {deltas(r)}")
+    b1 = r["after"][1]
+    check("F: removed mid-award while busy() was True", removed_at and removed_at[0][1], str(removed_at))
+    check("F: the task stayed on slot 1: its prompt finished (RAZOR LEAF learnt, Lv 13); the rest of the award"
+          " went back to Platinum's rule (STARLY 0, no evolution); lead E",
+          b1.moves == [RAZOR_LEAF, WITHDRAW, ABSORB, BITE] and b1.party_level == 13
+          and deltas(r)[:3] == [E_A, E_A // 2, 0] and r["after"][2].species == STARLY, f"{deltas(r)} {b1.moves}")
+    check("F: after the removal busy() is False", not handle.busy())
+
     # handle.remove(): back to the original game
-    handle.remove()
     r = play(FIX, True, party_A, "removed")
     check("after handle.remove(): Platinum's own numbers again (bench 0) and no hook records",
           deltas(r)[1:3] == [0, 0] and deltas(r)[0] > 0 and not r["awards"], str(deltas(r)))

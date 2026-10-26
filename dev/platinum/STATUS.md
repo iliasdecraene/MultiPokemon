@@ -229,3 +229,8 @@
   remove(); ALL PASS, ~4 min), dev/e2e/with_expshare.py runs verify.py (83/83) and platinum_boot.py (ALL PASS) with
   the hooks installed. Fixture is built at run time from pt_pc (Route 202, VAR_ROUTE_202_STATE=1, battle style SET,
   party written to save RAM) - no new files in dev/states.
+- 2026-10-26 gb-exp agent (review follow-up): YellowExpShare/CrystalExpShare.busy() -> True from the decide hook to the
+  award's end (phase != 0); clears itself when no battle runs (Yellow wIsInBattle D056 == 0, Crystal wBattleMode
+  1:D22D == 0) and on remove(). 5 new unit tests (incl. battle ended without the end hook, remove() mid-award); real
+  ROM: busy() True during the "gained" texts, False back in the overworld, never with the rule off (both games).
+  dev/e2e/expshare_gb.py ALL PASS (59), client suite 383 pass. Not committed.

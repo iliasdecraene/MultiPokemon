@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from yellowlink import pk4  # noqa: E402
+from yellowlink import platinum as P  # noqa: E402
 from yellowlink import platinum_exp as X  # noqa: E402
 
 EXP_SHARE, LUCKY_EGG = 216, 231
@@ -76,6 +77,7 @@ def test_mon_eligible():
 
 # --- the hooks on a fake DS ----------------------------------------------------------------------------------
 CTX, SYS, PARTY, TASK = 0x02300000, 0x02310000, 0x02320000, 0x02330000
+SAVE, APP, FS, PROCS, CHILD = 0x02340000, 0x02341000, 0x02342000, 0x02343000, 0x02344000
 
 
 class FakeLib:
@@ -111,6 +113,20 @@ class FakeCore:
             for addr, code in X._CODE.items():
                 self.write(addr, code)
         self.w32(TASK + X.TD_CTX, CTX)
+        self.switched = []                # (slot at START, slot the task moved to later) - must stay empty
+        # the field system with a battle child app (what PlatinumMemory.child_overlay() follows)
+        self.w32(P.SAVE_DATA_PTR, SAVE)
+        self.w32(P.APP_CUR, APP)
+        self.w32(APP + 4, P.FIELD_APP_MAIN)
+        self.w32(APP + 0x1C, FS)
+        self.w32(P.FIELD_SYSTEM_PTR, FS)
+        self.w32(FS + P.FS_SAVE_DATA, SAVE)
+        self.w32(FS + P.FS_PROCESS_MANAGER, PROCS)
+        self.w32(PROCS + 4, CHILD)
+        self.set_child_overlay(P.OVERLAY_BATTLE)
+
+    def set_child_overlay(self, ov):
+        self.w32(CHILD + 0x0C, ov)
 
     # sparse byte memory
     def read(self, a, n):
@@ -148,8 +164,11 @@ class FakeCore:
         return X.mon_eligible(self.mons[s]) or (pk4.PK4(pk4.decrypt(self.mons[s])).is_egg
                                                and pk4.PK4(pk4.decrypt(self.mons[s])).hp > 0)
 
-    def award(self, exp, participants, fainted=1, after_first=None):
-        """BtlCmd_CalcExpGain + BattleScript_GetExpTask; returns slot -> exp the game gives."""
+    def award(self, exp, participants, fainted=1, after_first=None, during=None):
+        """BtlCmd_CalcExpGain + BattleScript_GetExpTask, frame by frame; returns slot -> exp the game gives.
+        after_first(): called once the first slot is done; during(slot, frame): called in the frames while a slot
+        is processed (seqNum past START, e.g. at a move-learn prompt), where the game re-finds its slot from
+        the mask every frame (pret: the slot loop at the top of BattleScript_GetExpTask)."""
         idx = (fainted >> 1) & 1
         mask_addr = CTX + X.CTX_EXP_MASK + 4 * idx
         self.w32(CTX + X.CTX_FAINTED_MON, fainted)
@@ -160,19 +179,24 @@ class FakeCore:
         self._call(X.HOOK_CALC, r0=exp, r5=CTX, r7=SYS, r1=holders)
         self.w32(CTX + X.CTX_GAINED_EXP, g)
         self.w32(CTX + X.CTX_SHARED_EXP, sh)
+        self.w32(CTX + X.CTX_TASK_DATA, TASK)                             # BtlCmd_StartGetExpTask
         trainer = bool(self.r32(SYS + X.BS_BATTLE_TYPE) & X.BATTLE_TYPE_TRAINER)
+
+        def find(start):
+            mask = self.r32(mask_addr)
+            return next((s for s in range(start, len(self.mons)) if self.items[s] == EXP_SHARE or mask >> s & 1),
+                        None)
         out = {}
         start = 0
         while True:
             self.w32(TASK + X.TD_SEQ, X.SEQ_GET_EXP_START)
             self.w32(TASK + X.TD_PARTY_SLOT, start)
             self._call(X.HOOK_TASK, r0=0, r1=TASK)
-            mask = self.r32(mask_addr)
-            slot = next((s for s in range(start, len(self.mons))
-                         if self.items[s] == EXP_SHARE or mask >> s & 1), None)
+            slot = find(start)
             if slot is None:
                 break
             p = pk4.PK4(pk4.decrypt(self.mons[slot]))
+            mask = self.r32(mask_addr)
             total = 0
             if p.hp:                                        # (level 100 not modelled)
                 if mask >> slot & 1:
@@ -182,14 +206,24 @@ class FakeCore:
                 total = X.apply_modifiers(total, lucky_egg=self.items[slot] == LUCKY_EGG, trainer=trainer)
             if total:
                 out[slot] = total
-            self.w32(mask_addr, self.r32(mask_addr) & ~(1 << slot))      # SEQ_GET_EXP_CHECK_DONE
-            for _ in range(3):                                           # other states: hook must not act
-                self.w32(TASK + X.TD_SEQ, 7)
+            for f in range(3):                              # e.g. the level-up / move-learn states
+                self.w32(TASK + X.TD_SEQ, 20)
                 self._call(X.HOOK_TASK, r0=0, r1=TASK)
+                if during:
+                    during(slot, f)
+                now = find(start)
+                if now != slot:
+                    self.switched.append((slot, now))
+            done = find(start)                              # SEQ_GET_EXP_CHECK_DONE
+            if done is not None:
+                self.w32(mask_addr, self.r32(mask_addr) & ~(1 << done))
             start = slot + 1
+            self.w32(TASK + X.TD_PARTY_SLOT, start)                      # ... and seqNum = START again
+            self.w32(TASK + X.TD_SEQ, X.SEQ_GET_EXP_START)
             if after_first:
                 after_first()
                 after_first = None
+        self.w32(CTX + X.CTX_TASK_DATA, 0)                                # SEQ_GET_EXP_DONE: task freed
         assert self.r32(mask_addr) == 0                                  # consumed, like the original
         return out
 
@@ -284,6 +318,86 @@ def test_remove_in_the_middle_of_an_award_gives_the_rest_back_to_the_game():
     core = FakeCore(party5())
     h = X.install_exp_share(core, lambda: True)
     assert core.award(24, 0b11, after_first=h.remove) == {0: 24, 1: 12}     # slot 1: the game's own E/2
+
+
+def test_remove_while_a_benched_mon_is_mid_slot_keeps_that_slot():
+    # slot 1 (benched, not a participant) is at "Make it forget another move?" when the rule is removed:
+    # the task must stay on slot 1 (its bit kept), the rest goes back to the game's rule (slot 2: nothing)
+    core = FakeCore(party5())
+    h = X.install_exp_share(core, lambda: True)
+    calls = []
+
+    def during(slot, frame):
+        if slot == 1 and frame == 0:
+            assert h.busy()
+            calls.append(slot)
+            h.remove()
+    assert core.award(24, 0b1, during=during) == {0: 24, 1: 12}
+    assert calls == [1] and core.switched == []
+    assert not h.busy() and h.pending is None
+
+
+def test_remove_mid_slot_of_a_participant():
+    core = FakeCore(party5())
+    h = X.install_exp_share(core, lambda: True)
+    assert core.award(24, 0b11, during=lambda slot, f: slot == 0 and f == 1 and h.remove()) == {0: 24, 1: 12}
+    assert core.switched == []
+
+
+def test_busy_only_while_the_award_task_is_alive():
+    core = FakeCore(party5())
+    h = X.install_exp_share(core, lambda: True)
+    assert not h.busy()
+    seen = []
+    core.award(24, 0b1, during=lambda slot, f: seen.append(h.busy()))
+    assert seen and all(seen)
+    assert not h.busy()                              # award finished
+    off = FakeCore(party5())
+    h2 = X.install_exp_share(off, lambda: False)
+    seen = []
+    off.award(24, 0b1, during=lambda slot, f: seen.append(h2.busy()))
+    assert seen and not any(seen)                   # rule off: nothing of ours in progress
+
+
+def _start_award_and_stop(core):
+    """CalcExpGain ran (pending set), then the battle vanished before the task finished."""
+    core.w32(CTX + X.CTX_FAINTED_MON, 1)
+    core.w32(CTX + X.CTX_EXP_MASK, 0b1)
+    core._call(X.HOOK_CALC, r0=24, r5=CTX, r7=SYS, r1=0)
+    core.w32(CTX + X.CTX_TASK_DATA, TASK)
+
+
+@pytest.mark.parametrize("gone", ["battle_ended", "task_freed", "heap_reused", "overlay_unloaded"])
+def test_stale_pending_is_dropped_without_writing(gone):
+    core = FakeCore(party5())
+    h = X.install_exp_share(core, lambda: True)
+    _start_award_and_stop(core)
+    assert h.pending is not None and h.busy()
+    if gone == "battle_ended":
+        core.set_child_overlay(P.OVERLAY_PC_BOXES)
+    elif gone == "task_freed":
+        core.w32(CTX + X.CTX_TASK_DATA, 0)
+    elif gone == "heap_reused":
+        core.w32(TASK + X.TD_CTX, 0x0228AAAA)
+    else:
+        core.write(X.HOOK_TASK, b"\0" * 12)
+    before = dict(core.mem)
+    if gone in ("battle_ended", "overlay_unloaded"):
+        h.remove()                                   # remove() with a stale pending: no write at all
+        assert core.mem == before and h.pending is None
+    else:
+        assert not h.busy() and h.pending is None    # busy() drops it
+        h.remove()
+        assert core.mem == before
+
+
+def test_task_hook_ignores_r1_when_not_the_battle_code():
+    core = FakeCore(party5())
+    h = X.install_exp_share(core, lambda: True)
+    h.trace = []
+    core.write(X.HOOK_TASK, b"\0" * 12)
+    core._call(X.HOOK_TASK, r0=0, r1=0xDEADBEEF)     # would raise / read junk if dereferenced
+    assert h.trace == []
 
 
 def test_code_signatures_are_thumb_from_the_rom():

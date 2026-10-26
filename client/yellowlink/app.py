@@ -476,6 +476,11 @@ class App(ChallengeMixin, TradeMixin):
             return False
         if self.battle or self.live:
             return False
+        if self._exp_award_busy():
+            # the game is in the middle of handing out experience (hook state lives in Python): resuming from
+            # here would give wrong amounts - keep the last snapshot, the game resumes from before this battle
+            log.info("no snapshot: experience is being handed out right now")
+            return False
         if self.pcsync.session_open:
             # never snapshot inside Bill's PC: the store's view of the game would no longer match on resume
             return False
@@ -2286,8 +2291,20 @@ class App(ChallengeMixin, TradeMixin):
     # Exp Share All (Settings) ----------------------------------------------------------------------------
     def exp_share_on(self) -> bool:
         """Asked by the game hooks at every experience award: the modern Exp. Share rule applies now?
-        Never in live or practice battles with friends (those give no lasting experience anyway)."""
-        return bool(self.cfg.get("exp_share_all", True)) and not self.battle and not self.live
+        Never in live or practice battles with friends (those give no lasting experience anyway). A practice
+        offer that's still waiting doesn't count (the player may be in a normal battle meanwhile)."""
+        practice = self.battle is not None and getattr(self.battle, "phase", "") != "waiting"
+        return bool(self.cfg.get("exp_share_all", True)) and not practice and not self.live
+
+    def _exp_award_busy(self) -> bool:
+        h = self.exp_share
+        if h is None or not hasattr(h, "busy"):
+            return False
+        try:
+            return bool(h.busy())
+        except Exception:  # noqa: BLE001 - unsure: don't snapshot (the older snapshot is always consistent)
+            log.exception("Exp Share busy() failed")
+            return True
 
     def _install_exp_share(self):
         """Every adapter can offer install_exp_share(emulator, enabled) (Platinum: platinum_exp). Only on the
@@ -2316,21 +2333,24 @@ class App(ChallengeMixin, TradeMixin):
         if message:
             self.toast(message, 3, ui.GOOD if value else ui.DIM)
 
-    def shutdown(self):
+    def _remove_exp_share(self):
         if self.exp_share is not None:
             try:
                 self.exp_share.remove()
             except Exception:  # noqa: BLE001
                 log.exception("removing the Exp Share All hooks failed")
             self.exp_share = None
+
+    def shutdown(self):
         try:
             if self.battle:
                 self._restore_battle()
             if self.live:
                 self.net.send({"type": "battle_leave", "battle_id": self.live.battle_id})
                 self._end_live("", ui.DIM)
-            self.autosave(force=True)
+            self.autosave(force=True)            # skipped while experience is being handed out
             self.flush_sram(force=True)
+            self._remove_exp_share()                # after the snapshot (removing mid-award changes game RAM)
             if self.ds:
                 self.nds.close()          # also blanks DeSmuME's shared battery file (see nds_core)
             else:
@@ -2344,6 +2364,7 @@ class App(ChallengeMixin, TradeMixin):
                     write_atomic(self.rtc_path, rtc.getvalue())
         except Exception:  # noqa: BLE001
             log.exception("shutdown save failed")
+            self._remove_exp_share()
             if self.nds is not None and not self.nds.closed:
                 try:
                     self.nds.close(blank_battery=False)

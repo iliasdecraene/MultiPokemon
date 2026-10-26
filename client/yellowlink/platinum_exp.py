@@ -44,6 +44,7 @@ import logging
 import struct
 
 from . import pk4
+from .platinum import OVERLAY_BATTLE, PlatinumMemory, _ptr
 
 log = logging.getLogger("yellowlink.platinum_exp")
 
@@ -155,6 +156,7 @@ class ExpShareAll:
         self.core = core
         self.enabled = enabled
         self.regs = _Regs(core)
+        self._pm = PlatinumMemory(core)
         self.pending = None          # (ctx, mask index, participant mask M, E) for the award in progress
         self._orig = None            # the game's own (gainedExp, sharedExp) of that award
         self.awards = []             # dicts, newest last (max 32)
@@ -173,6 +175,8 @@ class ExpShareAll:
         self._installed.append(addr)
 
     def remove(self):
+        """Uninstall. Called in the middle of an award (see busy()), the rest of that award is handed back to the
+        game's own rule; the slot the task is working on (e.g. at a move-learn prompt) is left alone."""
         for addr in self._installed:
             try:
                 if hasattr(self.core, "hook_deregister"):
@@ -186,16 +190,56 @@ class ExpShareAll:
         if pend is not None:
             self._undo(pend)
 
+    def busy(self) -> bool:
+        """True while an award we changed is really in progress (its GetExp task is alive in the loaded battle):
+        a savestate taken now would resume mid-award without our per-slot steering. A `pending` left over from a
+        battle that is gone (soft reset, state load) is dropped here."""
+        pend = self.pending
+        if pend is None:
+            return False
+        if self._task_of(pend[0]) is None:
+            self.pending = None
+            return False
+        return True
+
+    def _task_of(self, ctx):
+        """The live BattleScriptTaskData of BattleContext ctx, or None (battle overlay not loaded, no exp task,
+        or the task belongs to another context)."""
+        m = self.core
+        try:
+            if not (self._code_ok(HOOK_CALC) and self._code_ok(HOOK_TASK)):
+                return None
+            if self._pm.child_overlay() != OVERLAY_BATTLE or not _ptr(ctx):
+                return None
+            td = m.r32(ctx + CTX_TASK_DATA)
+            if not _ptr(td) or m.r32(td + TD_CTX) != ctx:
+                return None
+            return td
+        except Exception:  # noqa: BLE001
+            return None
+
     def _undo(self, pend):
-        """Removed in the middle of an award: give the rest of it back to the game's own rule (mask = the real
-        participants still to do, the game's own gainedExp / sharedExp)."""
+        """Give the rest of an award back to the game's own rule: mask = the real participants still to do plus
+        the slot the task is processing right now, the game's own gainedExp / sharedExp. Only if that award's
+        task is really alive - a stale context (battle gone, heap freed) is never written to."""
         ctx, idx, parts, _exp = pend
+        td = self._task_of(ctx)
+        if td is None:
+            return
+        m = self.core
         try:
             mask_addr = ctx + CTX_EXP_MASK + 4 * idx
-            self.core.w32(mask_addr, self.core.r32(mask_addr) & parts)
+            mask = m.r32(mask_addr)
+            keep = parts
+            if m.r32(td + TD_SEQ) != SEQ_GET_EXP_START:      # a slot is being processed: its bit must stay
+                start = m.r32(td + TD_PARTY_SLOT)
+                cur = next((s for s in range(start, 6) if mask >> s & 1), None)
+                if cur is not None:
+                    keep |= 1 << cur
+            m.w32(mask_addr, mask & keep)
             if self._orig is not None:
-                self.core.w32(ctx + CTX_GAINED_EXP, self._orig[0])
-                self.core.w32(ctx + CTX_SHARED_EXP, self._orig[1])
+                m.w32(ctx + CTX_GAINED_EXP, self._orig[0])
+                m.w32(ctx + CTX_SHARED_EXP, self._orig[1])
         except Exception:  # noqa: BLE001
             log.exception("exp share: undo failed")
 
@@ -215,14 +259,14 @@ class ExpShareAll:
         r = self.regs
         exp, ctx, bsys = r["r0"] & 0xFFFF, r["r5"], r["r7"]
         m = self.core
-        if m.r32(bsys + BS_CTX) != ctx:
+        if not (_ptr(ctx) and _ptr(bsys)) or m.r32(bsys + BS_CTX) != ctx:
             log.warning("exp share: unexpected registers at CalcExpGain (ctx %08X sys %08X)", ctx, bsys)
             return
         idx = (m.r32(ctx + CTX_FAINTED_MON) >> 1) & 1
         mask_addr = ctx + CTX_EXP_MASK + 4 * idx
         parts = m.r32(mask_addr)
         party = m.r32(bsys + BS_PARTIES)
-        count = min(m.r32(party + 4), 6)
+        count = min(m.r32(party + 4), 6) if _ptr(party) else 0
         elig = 0
         for s in range(count):
             if mon_eligible(m.read(party + 8 + PARTY_MON * s, PARTY_MON)):
@@ -244,16 +288,20 @@ class ExpShareAll:
         pend = self.pending
         if pend is None and self.trace is None:
             return
+        if not self._code_ok(HOOK_TASK):  # another overlay's code at this address: r1 means nothing
+            return
         m = self.core
         data = self.regs["r1"]
-        if self.trace is not None and self._code_ok(HOOK_TASK):
+        if not _ptr(data):
+            return
+        if self.trace is not None:
             step = (m.r32(data + TD_PARTY_SLOT), m.r32(data + TD_SEQ))
             if not self.trace or self.trace[-1] != step:
                 self.trace.append(step)
         if pend is None:
             return
         ctx, idx, parts, exp = pend
-        if m.r32(data + TD_CTX) != ctx or not self._code_ok(HOOK_TASK):
+        if m.r32(data + TD_CTX) != ctx:
             return
         if m.r32(data + TD_SEQ) != SEQ_GET_EXP_START:
             return

@@ -26,6 +26,8 @@ second set of mons (Yellow: the whole party; Crystal: the holders). PyBoy exec h
   4. "amount"  right after the last 1.5x boost of the computed experience (hQuotient+2/+3, 16 bit): in the second
                pass, halve it.
   5. "done"    at the end of the award loop: forget the per-award state.
+  busy() is True from 1. to the end of the award (that state is Python-only: no save state / resume snapshot while
+  busy); it clears itself once no battle is running (wIsInBattle / wBattleMode 0) and on remove().
 Everything else -- adding the exp, the cap at level 100, "gained N EXP. Points!", "grew to level N!", stats + HP,
 the stats box, level-up moves (and the forget-a-move prompt), evolution after the battle (wCanEvolveFlags /
 wEvolvableFlags), Pikachu's happiness -- is the game's own code. Nothing writes exp or levels directly.
@@ -132,6 +134,17 @@ class _ExpShareHooks:
             self.remove()
             raise
 
+    def busy(self) -> bool:
+        """True while an award steered by the rule is in progress (from the decide hook to the end of the award).
+        The state lives only here, not in the game's RAM, so a save state taken now would resume without it: the app
+        must not snapshot while busy. Can't get stuck: outside a battle it is cleared and False."""
+        if self.phase and not self._in_battle():
+            self.phase = 0
+        return self.phase != 0
+
+    def _in_battle(self) -> bool:
+        raise NotImplementedError
+
     def remove(self):
         for bank, addr in self._registered:
             try:
@@ -198,6 +211,10 @@ class YellowExpShare(_ExpShareHooks):
         "done": (0x15, 0x545F),
     }
     SIGNATURES = {"decide": 0xF5, "second": 0xC8, "gain_entry": 0xFA, "divide": 0xFA, "amount": 0x23, "done": 0x21}
+    IS_IN_BATTLE = 0xD056                # wIsInBattle
+
+    def _in_battle(self):
+        return self.m[self.IS_IN_BATTLE] != 0
 
     # phases: 1 participants' pass, 2 second pass requested, 3 second pass running
     def on_decide(self):
@@ -268,6 +285,10 @@ class CrystalExpShare(_ExpShareHooks):
         "done": (0x0F, 0x70D1),
     }
     SIGNATURES = {"decide": 0x28, "second": 0xC8, "divide": 0xFA, "amount": 0xF0, "done": 0xC3}
+    BATTLE_MODE = 0xD22D                 # wBattleMode (WRAM bank 1)
+
+    def _in_battle(self):
+        return self.m[1, self.BATTLE_MODE] != 0
 
     # phases: 1 participants' pass, 2 second pass (decided -> done)
     def on_decide(self):

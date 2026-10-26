@@ -302,7 +302,7 @@ class Crystal:
 
 
 # =================================================================================================================
-def finish(D, maxpress=400):
+def finish(D, maxpress=400, h=None, busy=None):
     """Through the award texts, level-ups, move learning (YES to delete, forget the first move), evolution and the
     end-of-battle texts (NO to nicknames) back to the idle overworld. Returns the distinct screens seen."""
     seen, learning = [], False
@@ -313,6 +313,8 @@ def finish(D, maxpress=400):
             if D.idle():
                 break
         s = D.screen()
+        if h is not None:
+            busy.append((h.busy(), "gained" in s))
         if s != last:
             seen.append(s)
             last = s
@@ -361,10 +363,11 @@ def play(G, case, mode, party_fn, switch=None, bag=None):
         eggs = D.eggs()
         before = D.party()
         D.attack()
-        seen = finish(D)
+        busy = []
+        seen = finish(D, h=h, busy=busy)
         after = D.party()
         return dict(before=before, after=after, enemy=en, seen=seen, wram=D.wram(), awards=h.awards if h else None,
-                    eggs=eggs, idle=D.idle(), hook=h)
+                    eggs=eggs, idle=D.idle(), hook=h, busy=busy, busy_end=h.busy() if h else None)
     finally:
         D.stop()
 
@@ -462,6 +465,10 @@ def run_game(G):
     check(f"{G.name} wild ON: the fainted mon gets 0 exp and 0 stat exp", res["on"]["before"][3] == res["on"]["after"][3])
     if G is Crystal:
         check("Crystal wild ON: the egg is unchanged", res["on"]["before"][5] == res["on"]["after"][5])
+    bon, boff = res["on"]["busy"], res["off"]["busy"]
+    check(f"{G.name} wild: busy() True while the 'gained' texts show (on), False back in the overworld; never (off)",
+          any(b and g for b, g in bon) and res["on"]["busy_end"] is False
+          and not any(b for b, _ in boff), (sum(b for b, _ in bon), len(bon)))
     check(f"{G.name} wild ON: the plain 'gained N EXP. Points!' text (no 'with EXP.ALL')",
           text_seen(res["on"]["seen"], "gained") and not text_seen(res["on"]["seen"], "EXP.ALL"))
 

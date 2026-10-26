@@ -144,6 +144,7 @@ def yellow(enabled=True, link=False, party_hp=(20, 15, 10, 0, 7), participants=0
     pb = FakePyBoy(Y)
     m = pb.memory
     m[Y.LINK_STATE] = 4 if link else 0
+    m[Y.IS_IN_BATTLE] = 1
     m[Y.PARTY_GAIN_EXP_FLAGS] = participants
     m[Y.PARTY_COUNT] = len(party_hp)
     for i, hp in enumerate(party_hp):
@@ -264,6 +265,7 @@ def crystal_emu(enabled=True, link=False, tower=False, species=(155, 16, 161, 16
     pb = FakePyBoy(C, strict=True)
     m = pb.memory
     m[C.LINK_MODE] = 1 if link else 0
+    m[1, C.BATTLE_MODE] = 1
     m[C.IN_BATTLE_TOWER_BATTLE] = 1 if tower else 0
     m[C.PARTICIPANTS] = participants
     m[1, C.PARTY_COUNT] = len(species)
@@ -324,3 +326,89 @@ def test_crystal_install_checks_signatures():
     with pytest.raises(RuntimeError):
         crystal.install_exp_share(pb, lambda: True)
     assert pb.hooks == {}
+
+
+# --- busy(): no resume snapshot while an award runs (its state lives only in Python) ---------------------------------
+def test_yellow_busy_through_a_full_award():
+    pb, m, h, _ = yellow()
+    assert not h.busy()
+    pb.run(Y, "decide")
+    assert h.busy()
+    ret_target(pb)
+    pb.run(Y, "divide")
+    pb.run(Y, "done")                                           # end of the participants' pass: award goes on
+    assert h.busy()
+    pb.register_file.F = Z
+    pb.run(Y, "second")
+    assert h.busy()
+    m[Y.BOOST_EXP_BY_EXP_ALL] = 1
+    pb.run(Y, "gain_entry")
+    pb.run(Y, "amount")
+    assert h.busy()
+    pb.run(Y, "done")
+    assert not h.busy()
+
+
+def test_yellow_busy_ends_when_nobody_sat_out():
+    pb, m, h, _ = yellow(party_hp=(20, 0))
+    pb.run(Y, "decide")
+    pb.run(Y, "done")
+    assert h.busy()
+    pb.run(Y, "second")
+    assert not h.busy()
+
+
+def test_busy_false_when_off_or_link():
+    for kw in ({"enabled": False}, {"link": True}):
+        pb, m, h, _ = yellow(**kw)
+        pb.run(Y, "decide")
+        assert not h.busy()
+    for kw in ({"enabled": False}, {"link": True}, {"tower": True}):
+        pb, m, h, _ = crystal_emu(**kw)
+        pb.run(C, "decide")
+        assert not h.busy()
+
+
+def test_busy_cannot_get_stuck():
+    # battle over without the end hook (e.g. a save state loaded mid-award, then the battle finished)
+    pb, m, h, _ = yellow()
+    pb.run(Y, "decide")
+    pb.register_file.F = Z
+    pb.run(Y, "second")
+    pb.run(Y, "gain_entry")
+    assert h.busy()
+    m[Y.IS_IN_BATTLE] = 0
+    assert not h.busy() and h.phase == 0
+    ret_target(pb)
+    before = snapshot(pb)
+    for name in ("divide", "amount", "gain_entry"):              # stale hooks do nothing afterwards
+        pb.run(Y, name)
+    assert snapshot(pb) == before
+    # remove() mid-award
+    pb, m, h, _ = yellow()
+    pb.run(Y, "decide")
+    h.remove()
+    assert not h.busy()
+    # Crystal: wBattleMode 0
+    pb, m, h, _ = crystal_emu()
+    pb.run(C, "decide")
+    assert h.busy()
+    m[1, C.BATTLE_MODE] = 0
+    assert not h.busy()
+
+
+def test_crystal_busy_through_a_full_award():
+    pb, m, h, _ = crystal_emu()
+    pb.run(C, "decide")
+    pb.run(C, "done")
+    assert h.busy()
+    pb.register_file.F = Z
+    pb.run(C, "second")
+    assert h.busy()
+    pb.run(C, "done")
+    assert not h.busy()
+    pb.run(C, "decide")
+    pb.register_file.F = Z
+    m[1, C.PARTY_COUNT] = 1                                     # nobody to share with
+    pb.run(C, "second")
+    assert not h.busy()
