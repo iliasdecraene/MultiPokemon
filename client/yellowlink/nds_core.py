@@ -56,6 +56,11 @@ class DSUnavailable(RuntimeError):
 
 _EMU = None          # the one DeSmuME of this process
 _ACTIVE = None       # the NDSCore currently using it
+# Exec hooks: py-desmume's register_exec keeps every callback it was ever given in a list (never freed), and a
+# callback that closes over an App would keep that whole App alive after travel. So each address gets ONE
+# module-level trampoline (created once, given straight to libdesmume) that calls whatever handler is current.
+_HOOK_FN = {}        # addr -> current handler (no-arg callable) or absent
+_HOOK_CFUNC = {}     # addr -> the ctypes trampoline handed to libdesmume (kept alive here, never re-created)
 
 
 def _install_pil_standin():
@@ -91,13 +96,13 @@ def get_emulator():
     """The process-wide DeSmuME (created on first use). Raises RuntimeError if it can't start."""
     global _EMU
     if _EMU is None:
-        _install_pil_standin()
-        from desmume.emulator import DeSmuME
-        dl = _library_path()
-        log.info("starting DeSmuME (%s)", dl or "py-desmume default library")
         try:
+            _install_pil_standin()
+            from desmume.emulator import DeSmuME
+            dl = _library_path()
+            log.info("starting DeSmuME (%s)", dl or "py-desmume default library")
             _EMU = DeSmuME(dl) if dl else DeSmuME()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - missing/broken package or DLL, no video driver...
             raise DSUnavailable(f"the DS emulator could not start: {e}") from e
         atexit.register(_forget)
     return _EMU
@@ -171,11 +176,26 @@ def battery_file_candidates(rom_path: str) -> list:
 
 class NDSCore:
     def __init__(self, rom_path: str, save_path=None, volume: int = 60):
+        """Open the ROM and load OUR save. Any failure raises DSUnavailable (the app then goes back to a Game Boy
+        game instead of crashing on every start)."""
         global _ACTIVE
         if _ACTIVE is not None and _ACTIVE is not self:
             _ACTIVE.close()
+        self.closed = False
+        self.tmp = None
+        self.rom_path = rom_path
+        self._hooks = {}
         self.emu = get_emulator()
+        try:
+            self._setup(rom_path, save_path, volume)
+        except Exception as e:  # noqa: BLE001
+            self._abandon()
+            if isinstance(e, DSUnavailable):
+                raise
+            raise DSUnavailable(f"the DS emulator could not load the game: {e}") from e
         _ACTIVE = self
+
+    def _setup(self, rom_path, save_path, volume):
         lib = self.emu.lib
         self._lib = lib
         self._rd8 = lib.desmume_memory_read_byte
@@ -185,12 +205,9 @@ class NDSCore:
         self._wr16 = lib.desmume_memory_write_short
         self._wr32 = lib.desmume_memory_write_long
         self._keys = 0
-        self._hooks = {}
         self._shot_buf = None
         self._volume = -1
         self.frame_count = 0
-        self.closed = False
-        self.rom_path = rom_path
         self.tmp = _staging_dir()
         if getattr(sys, "frozen", False):
             # Windows (verified in the release smoke test): DeSmuME keeps <exe folder>/<rom>.dsv open until the
@@ -204,14 +221,26 @@ class NDSCore:
         try:
             self.emu.open(_short_path(os.path.abspath(rom_path)))
         except Exception as e:
-            _ACTIVE = None
-            shutil.rmtree(self.tmp, ignore_errors=True)
             raise DSUnavailable(f"the DS emulator could not open the game file: {e}") from e
         lib.desmume_input_keypad_update(0)
         lib.desmume_input_release_touch()
         self.set_volume(volume)
         # Never use DeSmuME's shared .dsv: load our own save (or a blank one) into it right away.
         self.loaded_save = self.import_save(save_path)
+
+    def _abandon(self):
+        """Construction failed: leave the shared emulator idle and silent, nothing pointing at us."""
+        global _ACTIVE
+        self.closed = True
+        try:
+            self.emu.pause()
+            self.emu.close()
+        except Exception:  # noqa: BLE001
+            pass
+        if self.tmp:
+            shutil.rmtree(self.tmp, ignore_errors=True)
+        if _ACTIVE is self:
+            _ACTIVE = None
 
     # --- time + input ------------------------------------------------------------------------------------------
     def tick(self, count: int = 1, render: bool = True) -> bool:
@@ -389,18 +418,20 @@ class NDSCore:
 
     # --- exec hooks --------------------------------------------------------------------------------------------
     def hook_register(self, addr: int, fn):
-        """fn() runs (on the emulation thread, inside tick) when the ARM9 executes addr. Exceptions are logged."""
-        def cb(_address, _size):
-            try:
-                fn()
-            except Exception:  # noqa: BLE001 - never break the emulator from a hook
-                log.exception("DS hook at %08X failed", addr)
-        self._hooks[addr] = cb
-        self.emu.memory.register_exec(addr, cb)
+        """fn() runs (on the emulation thread, inside tick) when the ARM9 executes addr. Exceptions are logged.
+        Only this core holds fn; close() drops it (see _HOOK_FN: nothing global keeps an old App alive)."""
+        self._hooks[addr] = fn
+        _HOOK_FN[addr] = fn
+        cfunc = _HOOK_CFUNC.get(addr)
+        if cfunc is None:
+            from desmume.emulator import MEMORY_CB_FN
+            cfunc = _HOOK_CFUNC[addr] = MEMORY_CB_FN(lambda _a, _s, addr=addr: _run_hook(addr))
+        self._lib.desmume_memory_register_exec(addr, 2, cfunc)
 
     def hook_deregister(self, addr: int):
         if self._hooks.pop(addr, None) is not None:
-            self.emu.memory.register_exec(addr, None)
+            _HOOK_FN.pop(addr, None)
+            self._lib.desmume_memory_register_exec(addr, 2, None)
 
     # --- lifetime ----------------------------------------------------------------------------------------------
     def close(self, blank_battery: bool = True):
@@ -432,6 +463,16 @@ class NDSCore:
         shutil.rmtree(self.tmp, ignore_errors=True)
         if _ACTIVE is self:
             _ACTIVE = None
+
+
+def _run_hook(addr):
+    fn = _HOOK_FN.get(addr)
+    if fn is None:
+        return
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 - never break the emulator from a hook
+        log.exception("DS hook at %08X failed", addr)
 
 
 def make_test_rom(path):

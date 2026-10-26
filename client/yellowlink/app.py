@@ -252,7 +252,16 @@ class App(ChallengeMixin, TradeMixin):
             except pygame.error:
                 pass
 
-        self._start_emulator()
+        try:
+            self._start_emulator()
+        except BaseException as e:
+            # don't leave our sound device (or the shared DS emulator) open behind an App that never ran
+            self.audio.close()
+            if self.nds is not None:
+                self.nds.close(blank_battery=False)
+            if self.ds and isinstance(e, Exception) and not isinstance(e, nds_core.DSUnavailable):
+                raise nds_core.DSUnavailable(f"Pokémon Platinum could not start: {e}") from e
+            raise
         self.net = NetClient(cfg["server_url"], {
             "name": cfg["name"], "uid": cfg["uid"], "key": cfg.get("room_key", ""), "version": __version__})
         self.net.start()
@@ -2218,6 +2227,29 @@ def main(argv=None):
         diag.clean_exit()
 
 
+def _ds_fallback(cfg, diag, err) -> bool:
+    """Platinum can't run on this PC: play a Game Boy game instead (the reason is shown in the game). With no
+    Game Boy game added, explain it in a window and open the settings to pick another game file.
+    Returns False when the player closes that without choosing one (the app then exits - no crash loop)."""
+    lib = library.Library(cfg, app_dir())
+    other = next((g for g in lib.games if library.GAMES_BY_ID[g].platform != "nds"), None)
+    if other is not None:
+        lib.set_current(other)
+        cfg["_ds_error"] = str(err)
+        return True
+    text = diag.report_text(f"Pokémon Platinum could not start: {err}") if diag else str(err)
+    show_report_window(
+        text, "YellowLink – Pokémon Platinum couldn't start",
+        f"Pokémon Platinum couldn't start on this PC ({err}). Please send this to the host. Meanwhile you can "
+        "play Pokémon Yellow or Crystal: choose that game file in the next window.",
+        (lambda: send_report_sync(cfg, text, "DS start failed")) if cfg.is_complete() else None,
+        diag.dir if diag else None)
+    from .setup_dialog import run_setup
+    chosen = run_setup(cfg, first_run=False)
+    current = library.Library(cfg, app_dir()).current
+    return bool(chosen and current and library.GAMES_BY_ID[current].platform != "nds")
+
+
 def _main(argv, cfg, diag):
     # Always start in the main game (crashed or closed inside a challenge), and before the settings window: an
     # imported save must never land in a challenge's save folder.
@@ -2234,12 +2266,8 @@ def _main(argv, cfg, diag):
         except nds_core.DSUnavailable as e:
             # never get stuck crashing on start: go back to a Game Boy game and say why
             log.exception("DS game could not start")
-            lib = library.Library(cfg, app_dir())
-            other = next((g for g in lib.games if library.GAMES_BY_ID[g].platform != "nds"), None)
-            if other is None:
-                raise
-            lib.set_current(other)
-            cfg["_ds_error"] = str(e)
+            if not _ds_fallback(cfg, diag, e):
+                return
             continue
         app.run()
         if app.switch_to:                                 # another server: its own saves, PC and challenges

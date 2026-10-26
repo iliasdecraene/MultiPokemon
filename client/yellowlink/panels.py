@@ -476,13 +476,21 @@ def _draw_challenge_form(surf, f, app, r, y, offset):
              "Same area = partners. Faint, and your partner's goes too. Missed = no partner.",
              "PC rule: box one, the partner follows. Blackout = run over for both.",
              "Win: both of you reach the Hall of Fame."]
-    for line in rules:
-        if narrow:
-            y = text_wrapped(surf, f.small, "· " + line, (r.x + 18, y), r.w - 36, DIM, 18) + 1
-        else:
+    if narrow:
+        # wrapped rules as far as they fit; Invite / Cancel always at the bottom of the panel
+        lines = [ln for rule in rules for ln in wrap(f.small, "· " + rule, r.w - 36)]
+        room = max(0, (r.bottom - 56 - y) // 18)
+        if len(lines) > room:
+            lines = lines[:max(0, room - 1)] + (["..."] if room else [])
+        for ln in lines:
+            text(surf, f.small, ln, (r.x + 18, y), DIM)
+            y += 18
+        y = r.bottom - 48
+    else:
+        for line in rules:
             text(surf, f.small, "· " + line, (r.x + 18, y), DIM)
             y += 19
-    y += 10
+        y += 10
     button(surf, app, f, pygame.Rect(r.x + 18, y, 200, 36), f"Invite {form['name']}", app.send_challenge,
            enabled=bool(form.get("game")), offset=offset, primary=True)
     button(surf, app, f, pygame.Rect(r.x + 230, y, 110, 36), "Cancel",
@@ -717,7 +725,10 @@ def _draw_trade_narrow(surf, f, app, t, r, offset, title):
         hint = "click to pick (several OK)"
         if f.body.size("Your PC")[0] + 12 + f.small.size(hint)[0] < w - 70:
             text(surf, f.small, hint, (x + f.body.size("Your PC")[0] + 12, y + 4), DIM)
-        list_h = max(34, (bottom_top - (y + 28) - 40) * 55 // 100)
+        avail = bottom_top - (y + 26) - 34 - 6          # minus the Select box / Clear row
+        shown_n = len(t.my_entries if (t.gift and t.giving) else t.their_entries)
+        offers_need = 32 + 42 * min(2, max(1, shown_n)) + (20 if not t.gift and t.my_entries else 0) + 18
+        list_h = max(68, min(avail * 55 // 100, avail - offers_need))
         list_h -= list_h % 34
         area = pygame.Rect(x, y + 26, w, list_h)
         rows, per = _trade_rows(surf, f, app, t, area, offset)
@@ -749,11 +760,19 @@ def _draw_trade_narrow(surf, f, app, t, r, offset, title):
     if not shown:
         text(surf, f.small, empty, (x, y), DIM)
         y += 22
+    compact = limit - y < 42 * min(2, len(shown))         # short window: one line per Pokémon
     for n, e in enumerate(shown):
-        if y + 40 > limit:
-            text(surf, f.small, f"... and {len(shown) - n} more", (x, y), DIM)
+        need = 18 if compact else 40
+        if y + need > limit - (18 if n < len(shown) - 1 else 0):     # keep room for the "... more" line
+            text(surf, f.small, f"... and {len(shown) - n} more", (x, min(y, limit - 16)), DIM)
             y += 18
             break
+        if compact:
+            note = app.entry_note(e)
+            text(surf, f.small, fit(f.small, "· " + app.entry_label(e) + (f" ({note[0]})" if note else ""), w),
+                 (x, y), note[1] if note else TEXT)
+            y += 18
+            continue
         card = pygame.Rect(x, y, w, 38)
         box(surf, card, PANEL_HI, PANEL_HI, 6)
         text(surf, f.small, fit(f.small, app.entry_label(e), w - 16), (card.x + 8, card.y + 3), TEXT)

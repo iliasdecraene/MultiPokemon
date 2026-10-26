@@ -268,6 +268,7 @@ class PCSync:
         self.locks = {}                        # trade_id -> [entry ids] offered in a trade with unknown outcome
         self.deferred = None                   # a server copy to merge once nothing is pending
         self.uploading = None
+        self.refused = None                    # (mons, free space) when a game couldn't be linked (store full)
         self.load()
         self.working = copy.deepcopy(self.committed)
         self.last_view = copy.deepcopy(self.last_view_committed)
@@ -473,12 +474,16 @@ class PCSync:
         if hasattr(codec, "known"):
             codec.known = {_unb64(rb) for box in self.last_view.get(game_id) or [] for _eid, rb in box}
 
-    def open_session(self, game_id: str, codec, trust_game: bool) -> list:
-        """Reconcile + compute the view to write. Returns boxes of records for codec.write_boxes()."""
+    def open_session(self, game_id: str, codec, trust_game: bool) -> list | None:
+        """Reconcile + compute the view to write. Returns boxes of records for codec.write_boxes(), or None if the
+        game can't be linked yet (its boxes hold more than the store has room for; `refused` says how many):
+        then nothing may be written to the game and no session is open."""
         self._prime(game_id, codec)
         game_boxes = codec.read_boxes()
+        self.refused = None
         if game_id not in self.working["linked"]:
-            self._import(game_id, codec, game_boxes)
+            if not self._import(game_id, codec, game_boxes):
+                return None                                    # store too full to link: don't touch the game
         elif trust_game and game_id in self.last_view:
             self._apply_diff(game_id, codec, game_boxes)       # anything that changed since we last looked
         incoming = self.working.get("incoming") or []
@@ -508,22 +513,32 @@ class PCSync:
         self.session_open = False
         return report
 
-    def _import(self, game_id, codec, game_boxes):
+    def _import(self, game_id, codec, game_boxes) -> bool:
+        """First contact: the game's boxes join the store. Nothing may be lost from the game: if the store has no
+        room for everything, codecs with `unplaced` (Platinum: more slots than the store) keep the rest in the game;
+        other games aren't linked (False, `refused` = (Pokémon to import, free space)) and their boxes stay as
+        they are until there's room."""
+        recs = [(i, rec) for i, box in enumerate(game_boxes) for rec in box if not codec.is_standin(rec)]
+        free = sum(MONS_PER_BOX - len(b) for b in self.working["boxes"])
+        keep_in_game = hasattr(codec, "unplaced")
+        if len(recs) > free and not keep_in_game:
+            self.refused = (len(recs), free)
+            log.warning("PC store has room for %d; %s has %d mons: not linking it yet", free, game_id, len(recs))
+            return False
         added = 0
-        for i, box in enumerate(game_boxes):
-            for rec in box:
-                if codec.is_standin(rec):
-                    continue
-                target = i if len(self.working["boxes"][i]) < MONS_PER_BOX else next(
-                    (k for k, b in enumerate(self.working["boxes"]) if len(b) < MONS_PER_BOX), None)
-                if target is None:
-                    log.warning("PC store full; could not import a mon from %s", game_id)
-                    continue
-                self.working["boxes"][target].append(codec.entry_from_record(rec, origin=game_id))
-                added += 1
+        for i, rec in recs:
+            target = i if len(self.working["boxes"][i]) < MONS_PER_BOX else next(
+                (k for k, b in enumerate(self.working["boxes"]) if len(b) < MONS_PER_BOX), None)
+            if target is None:                      # only for keep_in_game codecs (checked above)
+                codec.unplaced.append(rec)
+                continue
+            self.working["boxes"][target].append(codec.entry_from_record(rec, origin=game_id))
+            added += 1
         self.working["linked"].append(game_id)
         self.pending = True
-        log.info("linked %s to the PC store: imported %d mons", game_id, added)
+        log.info("linked %s to the PC store: imported %d mons, %d left in the game", game_id, added,
+                 len(recs) - added)
+        return True
 
     def _apply_diff(self, game_id, codec, game_boxes, party_records=None) -> dict:
         """Map the game's boxes back onto store entries using the last view.
@@ -531,8 +546,8 @@ class PCSync:
         Identical bytes => same entry (possibly moved). New bytes => new entry (deposit).
         Missing entries => removed (withdraw/release), except stand-ins, which are always kept.
         """
-        report = {"added": 0, "removed": 0, "standins_returned": [], "standin_party_slots": [],
-                  "locked_returned": [], "traded_returned": []}
+        report = {"added": 0, "removed": 0, "changed": 0, "standins_returned": [], "standin_party_slots": [],
+                  "party_removals": {}, "items_back": [], "locked_returned": [], "traded_returned": []}
         before = self.last_view.get(game_id)
         if before is None:
             return report
@@ -544,6 +559,9 @@ class PCSync:
                 pool.setdefault(_unb64(rb), []).append((bi, eid))
         new_boxes = [list() for _ in range(STORE_BOXES)]
         used = set()
+        locked = self.locked_ids()
+        edits = getattr(codec, "edits_in_box", False)   # the game's box UI can change a stored mon in place
+        changed_recs = []                               # (box, index in new_boxes[box], record) to resolve below
         for bi, box in enumerate(game_boxes):
             for rec in box:
                 cands = pool.get(bytes(rec), [])
@@ -556,11 +574,16 @@ class PCSync:
                 elif pick and pick[1] in gone:
                     used.add(pick[1])
                     continue                        # traded away while this game still showed it: drop
+                elif edits:
+                    new_boxes[bi].append(None)      # placeholder: an edited known mon, or a deposit
+                    changed_recs.append((bi, len(new_boxes[bi]) - 1, bytes(rec)))
                 elif codec.is_standin(rec):
                     continue                        # an unknown stand-in copy: never create entries from it
                 else:
                     new_boxes[bi].append(codec.entry_from_record(rec, origin=game_id))
                     report["added"] += 1
+        if changed_recs:
+            self._match_edits(game_id, codec, before, changed_recs, new_boxes, used, entries, gone, locked, report)
         # Entries this game never saw (added from another game since) stay in their box, after the ones it knows.
         seen = {eid for box in before for eid, _ in box}
         for bi, box in enumerate(self.working["boxes"][:len(game_boxes)]):
@@ -568,15 +591,14 @@ class PCSync:
                 if e["id"] not in seen:
                     new_boxes[bi].append(e)
         # entries that disappeared from this game's view
-        locked = self.locked_ids()
-        not_ours = set()                            # keys of mons that must not stay in the party
+        not_ours = []                               # records of mons that must not stay in the party
         for bi, box in enumerate(before):
             for eid, rb in box:
                 if eid in used:
                     continue
                 if eid not in entries:
                     if eid in gone:                 # traded away while the PC was open, then withdrawn
-                        not_ours.add(_key(codec, _unb64(rb)))
+                        not_ours.append(_unb64(rb))
                         report["traded_returned"].append(eid)
                     continue
                 if codec.is_standin(_unb64(rb)):
@@ -584,14 +606,23 @@ class PCSync:
                     report["standins_returned"].append(entries[eid].get("nick", "?"))
                 elif eid in locked:                 # offered in a trade we don't know the outcome of yet
                     new_boxes[bi].append(entries[eid])
-                    not_ours.add(_key(codec, _unb64(rb)))
+                    not_ours.append(_unb64(rb))
                     report["locked_returned"].append(entries[eid].get("nick", "?"))
                 else:
                     report["removed"] += 1
-        # stand-ins / locked / traded-away mons that were withdrawn must be removed from the party by the caller
+        # stand-ins / locked / traded-away mons that were withdrawn must be removed from the party by the caller.
+        # Each locked/traded mon takes out at most one party mon: the one with its key that is closest to it
+        # byte-wise (keys of converted mons can collide; a real party mon must never be taken).
         if party_records:
-            report["standin_party_slots"] = [i for i, r in enumerate(party_records)
-                                             if codec.is_standin(r) or (not_ours and _key(codec, r) in not_ours)]
+            removals = {i: None for i, r in enumerate(party_records) if codec.is_standin(r)}
+            for old in not_ours:
+                k = _key(codec, old)
+                cands = [i for i, r in enumerate(party_records)
+                         if i not in removals and k is not None and _key(codec, r) == k]
+                if cands:
+                    removals[min(cands, key=lambda i: _distance(codec, old, party_records[i]))] = old
+            report["standin_party_slots"] = sorted(removals)
+            report["party_removals"] = removals
         # boxes beyond what this game shows are untouched
         for bi in range(len(game_boxes), STORE_BOXES):
             new_boxes[bi] = self.working["boxes"][bi]
@@ -610,6 +641,46 @@ class PCSync:
         if changed or report["added"] or report["removed"]:
             self.pending = True
         return report
+
+    @staticmethod
+    def _match_edits(game_id, codec, before, changed_recs, new_boxes, used, entries, gone, locked, report):
+        """Records whose bytes match nothing in the last view (codecs with `edits_in_box`): a known mon the box
+        UI changed in place (Platinum: MARK, give/take an item) has the same key as an entry that disappeared;
+        the closest such entry (byte-wise) is that mon. Otherwise it's a deposit (new entry).
+          * normal entry -> codec.updated_entry (keeps the id; locks/trades still refer to it)
+          * stand-in, locked (in a trade) or traded away -> the stored mon stays as it was (the game's copy is
+            rewritten at the next open); an item given to it goes back to the player (`items_back`)."""
+        vanished = [(bi, eid, _unb64(rb)) for bi, box in enumerate(before) for eid, rb in box if eid not in used]
+        for bi, pos, rec in changed_recs:
+            k = _key(codec, rec)
+            cands = [c for c in vanished if c[1] not in used and k is not None and _key(codec, c[2]) == k]
+            pick = min(cands, key=lambda c: (_distance(codec, c[2], rec), c[0] != bi)) if cands else None
+            entry = None
+            if pick is not None:
+                _bi, eid, old = pick
+                used.add(eid)
+                if eid in entries and not codec.is_standin(old) and eid not in locked:
+                    entry = codec.updated_entry(entries[eid], rec, origin=game_id)
+                    if entry != entries[eid]:
+                        report["changed"] += 1
+                else:
+                    if eid in entries:
+                        entry = entries[eid]
+                    report["items_back"].extend(codec.items_added(old, rec))
+            elif not codec.is_standin(rec):
+                entry = codec.entry_from_record(rec, origin=game_id)
+                report["added"] += 1
+            new_boxes[bi][pos] = entry
+        for box in new_boxes:
+            box[:] = [e for e in box if e is not None]
+
+
+def _distance(codec, a: bytes, b: bytes) -> int:
+    """How different two records are (for telling apart mons with the same key)."""
+    fn = getattr(codec, "distance", None)
+    if fn is not None:
+        return fn(a, b)
+    return sum(x != y for x, y in zip(a, b)) + abs(len(a) - len(b))
 
 
 def gen2_to_gen1(rec2: bytes, rom) -> bytes | None:

@@ -72,6 +72,11 @@ THEIRS = [entry(10, "PIKACHU", 25, 30, "yellow"), entry(11, "Sparky the Mouse", 
 
 
 def shoot(a, tag):
+    a.net.stop()                                   # fixed connection state (screens comparable between runs)
+    th = getattr(a.net, "_thread", None)
+    if th is not None:
+        th.join(timeout=3)
+    a.net.status, a.net.status_detail = "offline", "no server"
     a.roster = [dict(e) for e in ROSTER]
     a.roster[0]["uid"] = a.cfg["uid"]
     shots = []
@@ -127,6 +132,10 @@ def start(game, state, **settings):
 Y = start("yellow", os.path.join(STATES, "room.state"), scale=4)
 shoot(Y, "yellow")
 Y.shutdown()
+Y = start("yellow", os.path.join(STATES, "room.state"), scale=3)     # 480x432: compact layout (< 600 px panels)
+shoot(Y, "yellow3")
+Y.shutdown()
+cfg["scale"] = 4
 for scale in (2, 1.5):
     P = start("platinum", os.path.join(STATES, "pt_room.dsst"), ds_scale=scale)
     shoot(P, f"platinum{scale}")
