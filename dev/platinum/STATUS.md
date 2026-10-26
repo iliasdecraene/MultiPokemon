@@ -68,3 +68,4 @@
   didn't work there (still open?) -> selftest now reports why. Also: DS view scale is now in 0.5 steps (1.5x fits
   1366x768 laptops / 125 % Windows scaling; ds_scale in config, F5/F6 +-0.5). COORDINATOR: please commit+push
   (nds_core.py, release.yml, ui.py, app.py, dev/e2e/platinum_boot.py) so I can read the selftest once more.
+- coordinator: pushed 5b5f1b4 for the core agent's selftest.
