@@ -781,28 +781,40 @@ update" instead of empty sockets. A badge book that isn't valid JSON of the righ
 ## 10. Complete Sinnoh — our own version of Platinum (added in 0.7.7, client only; no protocol change)
 
 Ilias's rule: normal Platinum stays normal Platinum (story, trainers, difficulty, trade evolutions), but every
-Pokémon family except the mythicals can be found in Sinnoh, and the Mystery-Gift-only events are on. Always on,
-for everybody (main game and Soul Link runs), versioned.
+Pokémon family except the mythicals can be found in Sinnoh, the Mystery-Gift-only events are on, the Regi ruins work
+without an event Regigigas, and the swarm changes every 2 hours (the same for everybody). Always on, for everybody
+(main game and Soul Link runs), versioned.
 
 ### The ROM (`client/yellowlink/sinnoh_rom.py`, spec `sinnoh_complete.py`, plan `dev/sinnoh/PLAN.md`)
 - The player adds their own Pokémon Platinum (USA rev 0, `ce81046e…`) as before (`roms/platinum.nds`). At every
   Platinum start the app makes sure `roms/platinum-sinnoh.nds` (data folder, shared by all servers like the ROMs)
   is the Complete Sinnoh build of the current spec: if it isn't (missing, damaged, older spec), it copies the
-  vanilla file and edits ONE file inside the copy in place: `/fielddata/encountdata/pl_enc_data.narc` (183 wild
-  tables x 424 bytes; same size, nothing moves). The original is only read. Then it runs that file.
-- Checks on every build: the source is the supported vanilla SHA1; every table = `spec.apply(i, vanilla table)`
-  (`apply` refuses when a vanilla value isn't what the spec expects); the copy is compared byte by byte with the
-  original outside the NARC (equal); the result's SHA1 = `sinnoh_rom.EXPECTED[spec_digest(spec)]` (deterministic:
-  one SHA1 per spec version; `spec_digest` = SHA1 over version + EDITS + RATE_EDITS; recompute with
-  `python dev/sinnoh/build_rom.py --update`, a unit test fails while it's missing). Written as `.part` and renamed.
-  Afterwards only the SHA1 is checked (~0.3 s, cached per path/size/mtime).
+  vanilla file and changes only data inside the copy (`sinnoh_rom.plan`):
+  1. `/fielddata/encountdata/pl_enc_data.narc` (183 wild tables x 424 bytes) - in place, same size: `spec.apply`.
+  2. `/application/zukanlist/zkn_data/zukan_enc_platinum.narc` (Pokédex AREA map: 4 + 495 x 10 members, member
+     `4 + species + 495 x category` = sorted u32 map numbers + a 0) - `spec.apply_area` on the 111 changed lists,
+     re-packed with `encdata.make_narc` (proved to reproduce the vanilla file byte for byte first). The lists grow
+     (+452 bytes), so the NARC is written after the vanilla ROM's last file (`header 0x80` "used ROM size", rounded
+     up to 0x200 = 0x063C3200; the 128 MB image is 0xFF there), its FAT entry (file 133) points there, header 0x80
+     = the new end and the header CRC16 (0x15E, poly 0xA001, init 0xFFFF) is recomputed. The vanilla copy stays at
+     its old place (a vanilla snapshot's cached FAT still finds valid data).
+  3. `/fielddata/script/scr_seq.narc` - `sinnoh_rom.ENGINE_EDITS` (ours, not the design spec's): 1 byte in each of
+     the three Regi ruins' statue scripts (see "Regis" below). In place.
+  The original is only read.
+- Checks on every build: the source is the supported vanilla SHA1; every write reads back; the copy is compared byte
+  by byte with the original and may differ only in the planned ranges (the wild NARC, the 3 script bytes, FAT entry
+  133, header 0x80-0x83 + 0x15E-0x15F, the new area NARC); the result's SHA1 = `sinnoh_rom.EXPECTED[spec_digest]`
+  (deterministic: one SHA1 per spec version; `spec_digest` = SHA1 over spec version + EDITS + RATE_EDITS +
+  AREA_EDITS + ENGINE_EDITS + `BUILD_FORMAT`; recompute with `python dev/sinnoh/build_rom.py --update`, which also
+  prints every changed range; a unit test fails while it's missing). Written as `.part` and renamed. Afterwards only
+  the SHA1 is checked (~0.3 s, cached per path/size/mtime). Spec v2: SHA1 `8abeae7b6039637d0671fc3859a0952f8997054b`.
 - If it can't be made (disk full, a broken install), the app runs plain Platinum and says so in the chat (red line)
   - never a reason not to play.
 - `platinum.VARIANTS` (sha1 -> Variant(key "vanilla"|"sinnoh", sha1, title, spec_version)) lists vanilla and every
   `EXPECTED` build; `SUPPORTED_SHA1S` = all of them -> `App.full` (every Platinum feature: same code, the builder
-  proves only the NARC differs). `variant_of(sha1)`, `same_code(a, b)`.
+  proves only data differs). `variant_of(sha1)`, `same_code(a, b)`.
 - Nothing about the ROM goes to the server or into the repo (CLAUDE.md "Never distribute ROMs"): the spec is our
-  own numbers (table, slot, species id, levels) only.
+  own numbers (table, slot, species id, levels, map numbers) and the 3 script bytes are our own.
 
 ### Wild tables (`client/yellowlink/encdata.py`)
 Member i of the NARC = the table of every map whose `sMapHeaders[map].wildEncountersArchiveID` (u16 at +0x0E,
@@ -813,7 +825,7 @@ checked: all 183 members equal pret's JSONs):
 |---|---|---|
 | 0 | 4 | land rate |
 | 4 | 96 | 12 land slots (level u32, species u32): 20 20 10 10 10 10 5 5 4 4 1 1 % |
-| 100 | 8 | swarm x2 -> land slots 0,1 while today's swarm is on this map |
+| 100 | 8 | swarm x2 -> land slots 0,1 while the swarm is on this map |
 | 108 / 116 | 8 / 8 | day x2 / night x2 -> land slots 2,3 (morning: the land slots) |
 | 124 | 16 | Poké Radar x4 -> land slots 4,5,10,11 in a shaking patch |
 | 140 | 24 | form rates x5 + Unown table (never edited) |
@@ -824,37 +836,76 @@ checked: all 183 members equal pret's JSONs):
 
 In RAM the current map's table is a copy: `FieldSystem->mapHeaderData` (+0x14) `->wildEncounters` (+0x920), 424
 bytes, copied from the NARC by `MapHeaderData_LoadWildEncounters` on every map load (`PlatinumMemory.wild_table_id
-/ wild_table / write_wild_table`). Not edited (separate files): honey trees, Great Marsh / Trophy Garden daily
-lists (`encdata_ex.narc`) and the Pokédex AREA map (`zukan_enc_platinum.narc`: it won't show the new spots).
+/ wild_table / write_wild_table`). Not edited (separate files): honey trees and the Great Marsh / Trophy Garden
+daily lists (`encdata_ex.narc`).
 
 ### Resume snapshots
 A DS snapshot is written with `<resume>.rom` = SHA1 of the ROM it was taken on (none = before 0.7.7 = vanilla).
-On resume: a snapshot of any verified variant is loaded (identical code; verified: vanilla savestates run on in the
-Complete Sinnoh ROM, dev/sinnoh/verify.py `compat`); if it came from another build, the current map's table in RAM
-is the old one, so at the first safe frame the app copies the ROM's member over it (`write_wild_table`, exactly
-what the next map load does). A snapshot of an unknown ROM is moved aside (`.other-rom`) and the game starts from
-the battery save. Saves (battery) are the same format for every variant: nothing to convert, per-server saves
-unchanged.
+On resume: a snapshot of any verified variant is loaded (identical code; verified: dev/sinnoh/verify.py `compat`;
+DeSmuME prints "savestate does not match the ROM" because the header CRC differs - harmless); if it came from
+another build, at the first safe frame the app (`_wild_refresh_now`) copies the ROM's member over the current map's
+wild table in RAM (exactly what the next map load does) and makes the game's cached file table equal this ROM's:
+the game copies the FAT into RAM once at boot (`FS_LoadTable`; the "rom" FSArchive's `fat` pointer is at
+**0x021CEC60**, its size at +4), so an old snapshot would keep reading the vanilla area NARC
+(`PlatinumMemory.refresh_cached_fat`: writes only the 8-byte entries that differ, at most 8, else nothing). A script
+already loaded for the current map stays the old one until the next map load (only matters standing inside a Regi
+ruin). A snapshot of an unknown ROM is moved aside (`.other-rom`) and the game starts from the battery save. Saves
+(battery) are the same format for every variant: nothing to convert, per-server saves unchanged.
 
 ### Soul Link
-Areas are map labels (`platinum_areas.py`), not encounter tables: new species in existing tables change nothing.
-Both players of a Platinum run play Complete Sinnoh (always on). Clients put `"sinnoh_v<spec version>"` into
-`library.challenge_rules` (an existing free-form capability list, server unchanged); the Soul Link form only offers
-Platinum when both lists hold the same `sinnoh_v*` entry (or neither), with the tip "different versions of Sinnoh's
-wild Pokémon - update YellowLink". A run made on plain Platinum (0.7.4-0.7.6) continues on Complete Sinnoh.
+Areas are map labels (`platinum_areas.py`), not encounter tables: new species in existing tables (and the swarm
+rotation) change nothing. Both players of a Platinum run play Complete Sinnoh (always on). Clients put
+`"sinnoh_v<spec version>"` into `library.challenge_rules` (an existing free-form capability list, server
+unchanged); the Soul Link form only offers Platinum when both lists hold the same `sinnoh_v*` entry (or neither),
+with the tip "different versions of Sinnoh's wild Pokémon - update YellowLink". A run made on plain Platinum
+(0.7.4-0.7.6) continues on Complete Sinnoh.
 
 ### Mystery Gift events (`client/yellowlink/sinnoh_events.py`)
-What pret's Mystery Gift deliveryman writes (`src/scrcmd_mystery_gift.c`), given by the app once the save has the
-**National Dex** (`Pokedex.nationalDexObtained`, body + 0x1328 + 0x31B, with the Pokédex magic 0xBEEFCAFE), at a
-safe frame, after two identical checks a second apart, with a toast + chat line; main game and Soul Link runs:
+What pret's Mystery Gift deliveryman writes (`src/scrcmd_mystery_gift.c`), given by the app at a safe frame once the
+save meets the event's condition (Ilias's choice), after two identical checks a second apart, with a toast + chat
+line; main game and Soul Link runs. National Dex = `Pokedex.nationalDexObtained` (body + 0x1328 + 0x31B, with the
+Pokédex magic 0xBEEFCAFE); "caught" = `Pokedex.caughtPokemon` bit species-1 (body + 0x1328 + 4).
 
-| event | key item (`Bag_TryAddItem`, Key Items pocket body + 0x8C4, 50 x {u16 item, u16 qty}) | vars (body + 0xDAC + 2*(var-0x4000)) | then the game's own scripts |
-|---|---|---|---|
-| member_card | MEMBER CARD 454 | VAR_DISTRIBUTION_EVENT_DARKRAI 0x4043 = 0x1209 | Canalave Harbor Inn (game completed + National Dex + the sailor's son woken up) -> dream -> Newmoon Island -> Darkrai Lv50 |
-| oaks_letter | OAK'S LETTER 452 | VAR_DISTRIBUTION_EVENT_SHAYMIN 0x4044 = 0x1112; VAR_SHAYMIN_EVENT_STATE 0x4057 0 -> 1 | Route 224 (Oak, tablet) -> Seabreak Path -> Flower Paradise -> Shaymin Lv30 |
-| azure_flute | AZURE FLUTE 455 | VAR_DISTRIBUTION_EVENT_ARCEUS 0x4045 = 0x1123 | play it at Spear Pillar (31,52) -> Hall of Origin -> Arceus Lv80 |
-| secret_key | SECRET KEY 467 | VAR_DISTRIBUTION_EVENT_ROTOM 0x4046 = 0x1103 | the wall in the Galactic Eterna Building 1F -> Rotom's room (forms) |
+| event | when | key item (`Bag_TryAddItem`, Key Items pocket body + 0x8C4, 50 x {u16 item, u16 qty}) | vars (body + 0xDAC + 2*(var-0x4000)) | then the game's own scripts |
+|---|---|---|---|---|
+| member_card | National Dex | MEMBER CARD 454 | VAR_DISTRIBUTION_EVENT_DARKRAI 0x4043 = 0x1209 | Canalave Harbor Inn (game completed + National Dex + the sailor's son woken up) -> dream -> Newmoon Island -> Darkrai Lv50 |
+| oaks_letter | National Dex | OAK'S LETTER 452 | VAR_DISTRIBUTION_EVENT_SHAYMIN 0x4044 = 0x1112; VAR_SHAYMIN_EVENT_STATE 0x4057 0 -> 1 | Route 224 (Oak, tablet) -> Seabreak Path -> Flower Paradise -> Shaymin Lv30 |
+| azure_flute | National Dex + FLAG_CAUGHT_DIALGA (208) + FLAG_CAUGHT_PALKIA (209) | AZURE FLUTE 455 | VAR_DISTRIBUTION_EVENT_ARCEUS 0x4045 = 0x1123 | play it at Spear Pillar (31,52) -> Hall of Origin -> Arceus Lv80 |
+| secret_key | first Rotom caught (dex bit 479) or National Dex | SECRET KEY 467 | VAR_DISTRIBUTION_EVENT_ROTOM 0x4046 = 0x1103 | the wall in the Galactic Eterna Building 1F -> Rotom's room (forms) |
 
 "Given" = item in the bag and var = magic, so it is idempotent (state in the save; never twice). An item already in
 the bag isn't added again; VAR_SHAYMIN_EVENT_STATE is only raised from 0. The items are never taken away by any
-script. Not given: the Manaphy egg (mythicals: a later YellowLink feature).
+script. Not given: the Manaphy egg (mythicals: a later YellowLink feature). The flute waits for Dialga and Palkia
+because the Spear Pillar map where the flute works only comes back once both are caught (scripts_mt_coronet_6f.s).
+
+### Regis and Regigigas without an event (`sinnoh_rom.ENGINE_EDITS`, a data edit)
+Platinum's three Regi statues (`scripts_{rock_peak,iceberg,iron}_ruins.s`, scr_seq members 396/394/392) open only
+after the Hall of Fame, the 7-dot walk **and** `CheckPartyHasFatefulEncounterRegigigas` (a native script command:
+any party Regigigas with MON_DATA_FATEFUL_ENCOUNTER, i.e. an event one), while Snowpoint Temple B5F's Regigigas
+wakes up only with the three Regis in the party (`CheckHasAllLegendaryTitansInParty`, species only) and is NOT
+fateful when caught (`StartLegendaryBattle`) - without an event the chain can never start. Our edit, at member
+offset 106 of each statue script:
+```
+2B 03 0C 80        CheckPartyHasFatefulEncounterRegigigas VAR_RESULT    (0 or 1)
+11 00 0C 80 00 00  CompareVarToValue VAR_RESULT, 0        -> value 0 becomes 2 (never equal)
+1C 00 01 ...       GoToIf EQUAL, "something spoke out"
+```
+so the statue no longer refuses; the Hall of Fame check, the dots, the battle (Lv30), the "caught" state and the
+Regigigas side are the game's own. One save: dots -> statue -> catch Regirock, Regice, Registeel -> Snowpoint
+Temple B5F -> Regigigas Lv1 (dev/sinnoh/verify.py `regis` plays all of it).
+
+### Swarms every 2 hours (`client/yellowlink/sinnoh_swarm.py`, no server)
+The game: the save's SpecialEncounter block (body + **0x7F24**: marshDaily +0, **swarmDaily +4** (int),
+trophy garden +8, honey trees +0x10, radar chains, recent routes, 6 roamers, roamer route indexes, **swarmEnabled
++0x14E** (u8)) - `swarmEnabled` is set once by the rival's sister in Sandgem (Hall of Fame + National Dex,
+`EnableSwarms`); the swarm is on map `sSwarmMapIdTable[swarmDaily % 22]` (Routes 201 202 203 206 207 208 209 214 215
+217 218 221 222 224 225 226 227 228 229 230, Valley Windworks, Eterna Forest) whose table's swarm list replaces land
+slots 0,1; the value is read at every encounter (and by the sister/TV). Every day the game sets a new random value.
+YellowLink: 2-hour UTC slots `floor(unix time / 7200)`; slot n -> swarm `order(n // 22)[n % 22]`, where
+`order(c)` sorts 0..21 by `SHA1("yellowlink-swarm-v1:<c>:<i>")` and swaps its first two when the first equals the
+previous cycle's (unswapped) last - every swarm once per 44 hours, never twice in a row, a pure function of the
+clock (every player on every server agrees as long as their PC clock is right). At a safe frame (`SwarmRotator`,
+every 60 frames) the app writes `swarmDaily` = that index whenever `swarmDaily % 22` differs (also after the game's
+daily change); `swarmEnabled`, marshDaily and everything else are untouched. When a new slot starts and swarms are
+on in this save: toast + chat line "Swarm now: <species> on <place> (until HH:MM)" (species = the running ROM's
+table, place = the map's area name). Complete Sinnoh only (main game and Soul Link runs).

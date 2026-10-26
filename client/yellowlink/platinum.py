@@ -29,11 +29,12 @@ VANILLA_SHA1 = PLATINUM_SHA1
 
 # ---------------------------------------------------------------------------------------------------------
 # ROM variants (Complete Sinnoh, SPEC.md "Complete Sinnoh"). The game YellowLink runs is always "platinum"; which
-# file runs it is a variant. Complete Sinnoh = the player's vanilla ROM with only the wild-encounter NARC edited in
-# place (sinnoh_rom.py) - the code, every overlay and every table we read are byte-identical (checked by the
-# builder: the copy differs from vanilla only inside /fielddata/encountdata/pl_enc_data.narc), so every address and
-# hook in this module and in platinum_exp / platinum_pc / sinnoh_view holds unchanged, and the whole Platinum suite
-# passes on it (dev/platinum/ptrom.py: YL_PT_ROM=sinnoh). A ROM not listed here gets no multiplayer features.
+# file runs it is a variant. Complete Sinnoh = the player's vanilla ROM with only data files changed (sinnoh_rom.py:
+# the wild-encounter NARC in place, the Pokédex area NARC rebuilt after the last file + its FAT entry and the header's
+# used size/CRC, 2 bytes in each Regi ruins script) - the code, every overlay and every table we read are
+# byte-identical (checked by the builder: the copy differs from vanilla only in those planned ranges), so every address
+# and hook in this module and in platinum_exp / platinum_pc / sinnoh_view holds unchanged, and the whole Platinum
+# suite passes on it (dev/platinum/ptrom.py: YL_PT_ROM=sinnoh). A ROM not listed here gets no multiplayer features.
 # ---------------------------------------------------------------------------------------------------------
 
 
@@ -146,6 +147,7 @@ MH_WILD_ENCOUNTERS_ID = 0x0E      # MapHeader.wildEncountersArchiveID u16 (0xFFF
 FS_MAP_HEADER_DATA = 0x14         # FieldSystem.mapHeaderData (MapHeaderData*)
 MHD_WILD_ENCOUNTERS = 0x920       # MapHeaderData.wildEncounters (after 4 counts, 4 ptrs, tmpEventsBuf[512], initScripts[64])
 WILD_TABLE_SIZE = 424
+FS_ROM_FAT_PTR = 0x021CEC60       # NitroSDK "rom" FSArchive: fat (u32 ptr to the FAT copied by FS_LoadTable), +4 size
 
 # --- Soul Link (verified by dev/platinum/soullink_verify.py; dev/notes/soullink_platinum.md) ----------------
 # Battle: the battle child app (overlay 16): args (+0x18) = FieldBattleDTO, data (+0x1C) = BattleSystem.
@@ -761,6 +763,30 @@ class PlatinumMemory:
             return False
         self.m.write(a, data)
         return True
+
+    def cached_fat_addr(self, fat_size: int):
+        """Where the game keeps its copy of the ROM's file allocation table (FS_LoadTable at boot, system.c: the
+        "rom" FSArchive's fat pointer at FS_ROM_FAT_PTR, its size at +4), or None if it doesn't look right."""
+        a = self.m.r32(FS_ROM_FAT_PTR)
+        if not _ptr(a) or self.m.r32(FS_ROM_FAT_PTR + 4) != fat_size:
+            return None
+        return a
+
+    def refresh_cached_fat(self, rom_fat: bytes, max_entries: int = 8) -> int:
+        """Make the game's cached FAT equal the running ROM's (after resuming a snapshot taken on another Complete
+        Sinnoh build: its FAT can point the moved Pokédex area file at the old place). Writes only the 8-byte entries
+        that differ, at most `max_entries` (more = something else is wrong: nothing written). Only when safe.
+        Returns the number of entries written (-1 = refused)."""
+        a = self.cached_fat_addr(len(rom_fat))
+        if a is None or not self.is_safe():
+            return -1
+        ram = self.m.read(a, len(rom_fat))
+        diff = [i for i in range(0, len(rom_fat), 8) if ram[i:i + 8] != rom_fat[i:i + 8]]
+        if len(diff) > max_entries:
+            return -1
+        for i in diff:
+            self.m.write(a + i, rom_fat[i:i + 8])
+        return len(diff)
 
     def in_safari_game(self) -> bool:
         return self.flag(FLAG_SAFARI_GAME_ACTIVE)

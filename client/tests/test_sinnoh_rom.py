@@ -76,7 +76,7 @@ def make_nds(files: dict, pad_to: int = 0x40000) -> bytes:
     fnt_off = 0x200
     fat_off = (fnt_off + len(fnt) + 0x1FF) & ~0x1FF
     data_off = (fat_off + 8 * len(files) + 0x1FF) & ~0x1FF
-    blob = bytearray(max(pad_to, data_off + sum(len(v) + 0x200 for v in files.values())))
+    blob = bytearray(max(pad_to, data_off + sum(len(v) + 0x200 for v in files.values()) + 0x20000))
     fat = bytearray(8 * len(files))
     pos = data_off
     for path, content in files.items():
@@ -89,9 +89,13 @@ def make_nds(files: dict, pad_to: int = 0x40000) -> bytes:
     struct.pack_into("<4I", blob, 0x40, fnt_off, len(fnt), fat_off, len(fat))
     blob[fnt_off:fnt_off + len(fnt)] = fnt
     blob[fat_off:fat_off + len(fat)] = fat
-    for i in range(0x1000, len(blob) - 0x400, 0x777):      # some "code" bytes everywhere else
+    for i in range(0x1000, pos, 0x777):                    # some "code" bytes everywhere else
         if blob[i] == 0:
             blob[i] = (i * 31) & 0xFF
+    used = pos
+    struct.pack_into("<I", blob, sinnoh_rom.HDR_USED_SIZE, used)
+    blob[used:] = b"\xff" * (len(blob) - used)            # like the real image: 0xFF after the last file
+    struct.pack_into("<H", blob, sinnoh_rom.HDR_CRC, sinnoh_rom.crc16(bytes(blob[:sinnoh_rom.HDR_CRC])))
     return bytes(blob)
 
 
@@ -204,8 +208,8 @@ def test_patch_narc_only_edited_members():
 def test_build_deterministic_and_verified(fake_rom, tmp_path):
     spec = spec_with([land_edit(3), land_edit(7, 1)])
     before = fake_rom.read_bytes()
-    a = sinnoh_rom.build(fake_rom, tmp_path / "a.nds", spec, expected=None)
-    b = sinnoh_rom.build(fake_rom, tmp_path / "b.nds", spec, expected=None)
+    a = sinnoh_rom.build(fake_rom, tmp_path / "a.nds", spec, expected=None, engine_edits=())
+    b = sinnoh_rom.build(fake_rom, tmp_path / "b.nds", spec, expected=None, engine_edits=())
     assert a == b == hashlib.sha1((tmp_path / "a.nds").read_bytes()).hexdigest()
     assert fake_rom.read_bytes() == before                         # the original is never written
     out = (tmp_path / "a.nds").read_bytes()
@@ -219,9 +223,9 @@ def test_build_deterministic_and_verified(fake_rom, tmp_path):
     r2.close()
     # expected SHA1 enforced; nothing left behind on failure
     with pytest.raises(sinnoh_rom.BuildError, match="expected"):
-        sinnoh_rom.build(fake_rom, tmp_path / "c.nds", spec, expected="0" * 40)
+        sinnoh_rom.build(fake_rom, tmp_path / "c.nds", spec, expected="0" * 40, engine_edits=())
     assert not (tmp_path / "c.nds").exists() and not (tmp_path / "c.nds.part").exists()
-    assert sinnoh_rom.build(fake_rom, tmp_path / "d.nds", spec, expected=a) == a
+    assert sinnoh_rom.build(fake_rom, tmp_path / "d.nds", spec, expected=a, engine_edits=()) == a
 
 
 def test_build_refuses_other_roms_and_bad_specs(fake_rom, tmp_path, monkeypatch):
@@ -229,10 +233,10 @@ def test_build_refuses_other_roms_and_bad_specs(fake_rom, tmp_path, monkeypatch)
     other = tmp_path / "other.nds"
     other.write_bytes(fake_rom.read_bytes()[:-1] + b"X")
     with pytest.raises(sinnoh_rom.BuildError, match="isn't"):
-        sinnoh_rom.build(other, tmp_path / "x.nds", spec, expected=None)
+        sinnoh_rom.build(other, tmp_path / "x.nds", spec, expected=None, engine_edits=())
     bad = spec_with([land_edit(3)._replace(old_species=1)])
     with pytest.raises(ValueError):
-        sinnoh_rom.build(fake_rom, tmp_path / "y.nds", bad, expected=None)
+        sinnoh_rom.build(fake_rom, tmp_path / "y.nds", bad, expected=None, engine_edits=())
     assert not (tmp_path / "y.nds").exists() and not (tmp_path / "y.nds.part").exists()
     monkeypatch.setattr(sinnoh_rom, "load_spec", lambda: None)
     with pytest.raises(sinnoh_rom.BuildError, match="missing"):
@@ -243,19 +247,19 @@ def test_build_refuses_other_roms_and_bad_specs(fake_rom, tmp_path, monkeypatch)
 
 def test_ensure_builds_once_and_repairs(fake_rom, tmp_path, monkeypatch):
     spec = spec_with([land_edit(9)])
-    sha = sinnoh_rom.build(fake_rom, tmp_path / "ref.nds", spec, expected=None)
-    monkeypatch.setitem(sinnoh_rom.EXPECTED, sinnoh_rom.spec_digest(spec), (sha, 7))
+    sha = sinnoh_rom.build(fake_rom, tmp_path / "ref.nds", spec, expected=None, engine_edits=())
+    monkeypatch.setitem(sinnoh_rom.EXPECTED, sinnoh_rom.spec_digest(spec, ()), (sha, 7))
     dest = tmp_path / "roms" / sinnoh_rom.FILE_NAME
     calls = []
     real_build = sinnoh_rom.build
     monkeypatch.setattr(sinnoh_rom, "build", lambda *a, **k: calls.append(1) or real_build(*a, **k))
-    assert sinnoh_rom.ensure(fake_rom, dest, spec) == (str(dest), sha)
-    assert sinnoh_rom.ensure(fake_rom, dest, spec) == (str(dest), sha)
+    assert sinnoh_rom.ensure(fake_rom, dest, spec, engine_edits=()) == (str(dest), sha)
+    assert sinnoh_rom.ensure(fake_rom, dest, spec, engine_edits=()) == (str(dest), sha)
     assert len(calls) == 1                                         # second call: just the SHA1 check
     data = bytearray(dest.read_bytes())
-    data[5000] ^= 0xFF                                             # damaged copy -> made again
+    data[0x1000] ^= 0xFF                                             # damaged copy -> made again
     dest.write_bytes(bytes(data))
-    assert sinnoh_rom.ensure(fake_rom, dest, spec) == (str(dest), sha)
+    assert sinnoh_rom.ensure(fake_rom, dest, spec, engine_edits=()) == (str(dest), sha)
     assert len(calls) == 2 and hashlib.sha1(dest.read_bytes()).hexdigest() == sha
     assert sha in [s for s, _v in sinnoh_rom.known_builds()]
 
@@ -291,3 +295,133 @@ def test_variant_table():
         assert platinum.same_code(sha, platinum.VANILLA_SHA1)
     assert platinum.variant_of("0" * 40) is None
     assert not platinum.same_code("0" * 40, platinum.VANILLA_SHA1)
+
+
+# --- v2: Pokédex area NARC (relocated) + our script edits ------------------------------------------------------
+AREA_LISTS = [struct.pack("<3I", 10 + i % 7, 20 + i % 5, 0) if i % 3 else b"\0\0\0\0" for i in range(40)]
+AREA_NARC = encdata.make_narc(AREA_LISTS)
+SCRIPTS = [b"\x02\x00" * 40, b"\x05\x00" + sinnoh_rom._REGI_CTX + b"\x02\x00" * 30, b"\x02\x00" * 12]
+
+
+def area_spec(adds=((3, 99),), edits=()):
+    """A spec with area edits: (member, map) pairs added to the list."""
+    class S:
+        SPEC_VERSION = 9
+        EDITS = tuple(edits)
+        RATE_EDITS = ()
+        AREA_EDITS = tuple(adds)
+        AREA_NARC_PATH = sinnoh_rom.AREA_NARC_PATH
+
+        @staticmethod
+        def apply(i, data):
+            return encdata.apply_edits(i, data, S.EDITS, ())
+
+        @staticmethod
+        def area_members():
+            return sorted({m for m, _ in S.AREA_EDITS})
+
+        @staticmethod
+        def apply_area(i, data):
+            words = list(struct.unpack("<%dI" % (len(data) // 4), data))[:-1]
+            for m, mp in S.AREA_EDITS:
+                if m == i:
+                    if mp in words:
+                        raise ValueError("already there")
+                    words.append(mp)
+            return struct.pack("<%dI" % (len(words) + 1), *sorted(words), 0)
+    return S
+
+
+REGI = (sinnoh_rom.ScriptEdit(sinnoh_rom.SCRIPT_NARC_PATH, 1, 2, sinnoh_rom._REGI_CTX,
+                              sinnoh_rom.ENGINE_EDITS[0].new, "test ruin"),)
+
+
+@pytest.fixture
+def full_rom(tmp_path, monkeypatch):
+    img = make_nds({encdata.NARC_PATH: NARC, sinnoh_rom.AREA_NARC_PATH: AREA_NARC,
+                    sinnoh_rom.SCRIPT_NARC_PATH: encdata.make_narc(SCRIPTS), "/poketool/other.narc": b"OTHER" * 50},
+                   pad_to=0x80000)
+    p = tmp_path / "platinum.nds"
+    p.write_bytes(img)
+    monkeypatch.setattr(sinnoh_rom, "VANILLA_SHA1", hashlib.sha1(img).hexdigest())
+    return p
+
+
+def test_engine_edits_are_the_three_regi_ruins():
+    assert [e.member for e in sinnoh_rom.ENGINE_EDITS] == [392, 394, 396]
+    for e in sinnoh_rom.ENGINE_EDITS:
+        assert e.narc == sinnoh_rom.SCRIPT_NARC_PATH and e.offset == 106 and len(e.old) == len(e.new) == 13
+        # only the compared value changes: CompareVarToValue VAR_RESULT, 0 -> 2
+        assert [i for i in range(13) if e.old[i] != e.new[i]] == [8]
+        assert e.old[:4] == bytes.fromhex("2b030c80") and e.new[8:10] == b"\x02\x00"
+
+
+def test_crc16_and_compare_except(tmp_path):
+    assert sinnoh_rom.crc16(b"123456789") == 0x4B37                 # CRC-16/MODBUS check value
+    a, b = tmp_path / "a", tmp_path / "b"
+    data = bytes(range(256)) * 9000
+    a.write_bytes(data)
+    m = bytearray(data)
+    m[10] ^= 1
+    m[(1 << 20) + 5] ^= 1                                          # second chunk
+    b.write_bytes(bytes(m))
+    assert sinnoh_rom._compare_except(a, b, [(10, 11), ((1 << 20) + 5, (1 << 20) + 6)])
+    assert not sinnoh_rom._compare_except(a, b, [(10, 11)])
+    assert not sinnoh_rom._compare_except(a, b, [((1 << 20) + 5, (1 << 20) + 6)])
+    assert sinnoh_rom._compare_except(a, b, [(0, len(data))])
+    assert sinnoh_rom._compare_except(a, a, [])
+
+
+def test_build_v2_relocates_area_narc_and_edits_scripts(full_rom, tmp_path):
+    spec = area_spec(adds=((1, 99), (5, 1), (39, 7)), edits=[land_edit(3)])
+    before = full_rom.read_bytes()
+    sha = sinnoh_rom.build(full_rom, tmp_path / "a.nds", spec, expected=None, engine_edits=REGI)
+    assert sinnoh_rom.build(full_rom, tmp_path / "b.nds", spec, expected=None, engine_edits=REGI) == sha
+    out = (tmp_path / "a.nds").read_bytes()
+    assert len(out) == len(before) and full_rom.read_bytes() == before
+    rv, rs = ndsrom.NDSRom(str(full_rom)), ndsrom.NDSRom(str(tmp_path / "a.nds"))
+    # area: rebuilt + moved after the vanilla data; the old copy is untouched
+    old_s, old_n = rv.extent(sinnoh_rom.AREA_NARC_PATH)
+    new_s, new_n = rs.extent(sinnoh_rom.AREA_NARC_PATH)
+    used = struct.unpack_from("<I", before, sinnoh_rom.HDR_USED_SIZE)[0]
+    assert new_s == (used + 0x1FF) & ~0x1FF and new_n == old_n + 4 * 3
+    assert out[old_s:old_s + old_n] == before[old_s:old_s + old_n]
+    a = rs.narc(sinnoh_rom.AREA_NARC_PATH)
+    assert a[1] == struct.pack("<4I", 11, 21, 99, 0) and a[5] == struct.pack("<4I", 1, 15, 20, 0)
+    assert a[39] == struct.pack("<2I", 7, 0) and a[2] == AREA_LISTS[2] and len(a) == len(AREA_LISTS)
+    # header: used size + CRC, nothing else
+    assert struct.unpack_from("<I", out, sinnoh_rom.HDR_USED_SIZE)[0] == new_s + new_n
+    assert struct.unpack_from("<H", out, sinnoh_rom.HDR_CRC)[0] == sinnoh_rom.crc16(out[:sinnoh_rom.HDR_CRC])
+    # scripts: exactly one byte
+    so, sn = rv.extent(sinnoh_rom.SCRIPT_NARC_PATH)
+    member1 = encdata.narc_member_offsets(rv.file(sinnoh_rom.SCRIPT_NARC_PATH))[1][0]
+    assert [i - so for i in range(so, so + sn) if out[i] != before[i]] == [member1 + 2 + 8]
+    sd = rs.narc(sinnoh_rom.SCRIPT_NARC_PATH)
+    assert sd[1] == b"\x05\x00" + REGI[0].new + b"\x02\x00" * 30 and sd[0] == SCRIPTS[0]
+    # every changed byte is one the plan allows
+    plan = sinnoh_rom.plan(full_rom, spec, REGI)
+    diff = [i for i in range(len(out)) if out[i] != before[i]]
+    assert diff and all(any(lo <= i < hi for lo, hi in plan.allowed) for i in diff)
+    changed_scr = [i for i in diff if so <= i < so + sn]
+    assert len(changed_scr) == 1
+    rv.close()
+    rs.close()
+
+
+def test_build_v2_refusals(full_rom, tmp_path):
+    with pytest.raises(sinnoh_rom.BuildError, match="scripts"):
+        bad = (REGI[0]._replace(old=b"\x00" * 13, new=b"\x01" * 13),)
+        sinnoh_rom.build(full_rom, tmp_path / "x.nds", area_spec(), expected=None, engine_edits=bad)
+    with pytest.raises(ValueError, match="already"):
+        sinnoh_rom.build(full_rom, tmp_path / "y.nds", area_spec(adds=((1, 11),)), expected=None, engine_edits=())
+    assert not list(tmp_path.glob("*.part")) and not (tmp_path / "x.nds").exists()
+
+
+def test_digest_covers_area_and_engine_edits():
+    base = area_spec()
+    other = area_spec(adds=((3, 98),))
+    d = sinnoh_rom.spec_digest
+    assert d(base, REGI) != d(other, REGI) != d(other, ())
+    assert d(base, REGI) == d(area_spec(), REGI)
+    # default = ENGINE_EDITS
+    assert d(base) == d(base, sinnoh_rom.ENGINE_EDITS) != d(base, ())

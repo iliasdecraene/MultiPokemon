@@ -12,9 +12,15 @@ Mystery Gift deliveryman writes when you pick the gift up; the event scripts che
 
 (The Manaphy egg is the only other Mystery-Gift-only content; mythicals are left for a later YellowLink feature.)
 
-We do the same writes - bag slot + vars, nothing else - at a safe overworld frame once the player has the
-**National Dex** (the Darkrai/Shaymin/Arceus scripts need FLAG_GAME_COMPLETED + National Dex anyway; Rotom is only
-catchable after it), and say so with a toast. Everything after that is the game's own scripts. Idempotent: the
+We do the same writes - bag slot + vars, nothing else - at a safe overworld frame once the save meets the event's
+condition (Ilias's choice; the Darkrai/Shaymin/Arceus scripts need FLAG_GAME_COMPLETED + National Dex anyway):
+
+    member_card, oaks_letter   the National Dex
+    secret_key                 the first Rotom caught (Pokédex "caught" bit) or the National Dex, whichever comes first
+    azure_flute                the National Dex + Dialga and Palkia caught at the Spear Pillar (FLAG_CAUGHT_DIALGA and
+                               FLAG_CAUGHT_PALKIA; only then is the Spear Pillar back to the map where the flute works)
+
+and say so with a toast. Everything after that is the game's own scripts. Idempotent: the
 state lives in the save (an event is "given" when its item is in the bag and its var holds the magic number), so a
 reload / second computer never gives anything twice. Addresses: save body pages (platinum.PAGE_*), verified by
 dev/sinnoh/verify.py on the real ROM (SPEC.md "Complete Sinnoh").
@@ -36,8 +42,18 @@ VF_FLAGS = 0x240
 VARS_START, VARS_END = 0x4000, 0x4120
 PAGE_POKEDEX = 0x1328
 POKEDEX_MAGIC = 0xBEEFCAFE
+POKEDEX_CAUGHT = 0x04                   # Pokedex.caughtPokemon[16] (u32): bit (species - 1)
 POKEDEX_NATIONAL = 0x31B                # Pokedex.nationalDexObtained (u8)
+NUM_FLAGS = 2912
 FLAG_GAME_COMPLETED = 2404
+FLAG_CAUGHT_DIALGA = 208                # set by scripts_spear_pillar_dialga.s only when Dialga is caught
+FLAG_CAUGHT_PALKIA = 209
+SPECIES_ROTOM = 479
+
+# Event.requires
+NATIONAL_DEX = "national_dex"
+ROTOM_OR_NATIONAL_DEX = "rotom_or_national_dex"
+NATIONAL_DEX_DIALGA_PALKIA = "national_dex_dialga_palkia"
 
 VAR_SHAYMIN_EVENT_STATE = 0x4057
 
@@ -50,6 +66,7 @@ class Event(NamedTuple):
     magic: int           # sDistributionEventMagicNumbers
     legend: str          # what it leads to (for logs / PLAN)
     hint: str            # toast after "Mystery Gift: <item>!"
+    requires: str = NATIONAL_DEX
 
 
 EVENTS = (
@@ -58,9 +75,9 @@ EVENTS = (
     Event("oaks_letter", 452, "OAK'S LETTER", 0x4044, 0x1112, "Shaymin (Flower Paradise)",
           "Professor Oak is waiting on Route 224."),
     Event("azure_flute", 455, "AZURE FLUTE", 0x4045, 0x1123, "Arceus (Hall of Origin)",
-          "Play it at the top of the Spear Pillar."),
+          "Play it at the top of the Spear Pillar.", NATIONAL_DEX_DIALGA_PALKIA),
     Event("secret_key", 467, "SECRET KEY", 0x4046, 0x1103, "Rotom's forms (Rotom's room, Eterna City)",
-          "It opens a hidden room in the Galactic building in Eterna City."),
+          "It opens a hidden room in the Galactic building in Eterna City.", ROTOM_OR_NATIONAL_DEX),
 )
 EVENTS_BY_ID = {e.id: e for e in EVENTS}
 _warned: set = set()
@@ -79,6 +96,32 @@ def national_dex(pm) -> bool:
     if not body or pm.m.r32(body + PAGE_POKEDEX) != POKEDEX_MAGIC:
         return False
     return pm.m.r8(body + PAGE_POKEDEX + POKEDEX_NATIONAL) == 1
+
+
+def _flag(pm, body, n) -> bool:
+    return bool(pm.m.r8(body + PAGE_VARS_FLAGS + VF_FLAGS + n // 8) >> (n % 8) & 1)
+
+
+def caught(pm, species: int) -> bool:
+    """The Pokédex has `species` as caught (Pokedex.caughtPokemon bit species - 1)."""
+    body = _body(pm)
+    if not body or pm.m.r32(body + PAGE_POKEDEX) != POKEDEX_MAGIC or not 1 <= species <= 493:
+        return False
+    i = species - 1
+    return bool(pm.m.r8(body + PAGE_POKEDEX + POKEDEX_CAUGHT + i // 8) >> (i % 8) & 1)
+
+
+def due(pm, ev: Event) -> bool:
+    """The save meets the event's condition (Event.requires)."""
+    body = _body(pm)
+    if not body:
+        return False
+    nat = national_dex(pm)
+    if ev.requires == ROTOM_OR_NATIONAL_DEX:
+        return nat or caught(pm, SPECIES_ROTOM)
+    if ev.requires == NATIONAL_DEX_DIALGA_PALKIA:
+        return nat and _flag(pm, body, FLAG_CAUGHT_DIALGA) and _flag(pm, body, FLAG_CAUGHT_PALKIA)
+    return nat
 
 
 def _var_addr(body, var):
@@ -108,10 +151,8 @@ def given(pm, ev: Event) -> bool:
 
 
 def pending(pm) -> list:
-    """Events the player should have now and doesn't (empty before the National Dex)."""
-    if not national_dex(pm):
-        return []
-    return [ev for ev in EVENTS if not given(pm, ev)]
+    """Events the player should have now (condition met) and doesn't."""
+    return [ev for ev in EVENTS if due(pm, ev) and not given(pm, ev)]
 
 
 def give(pm, ev: Event) -> bool:

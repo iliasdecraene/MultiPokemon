@@ -1,6 +1,6 @@
 """Complete Sinnoh on the real ROM: the built ROM, old snapshots, wild encounters on edited maps, the four events.
 
-    python dev/sinnoh/verify.py [rom] [compat] [wild] [events]     (default: all)
+    python dev/sinnoh/verify.py [rom] [compat] [wild] [events] [regis] [swarm] [area]     (default: all)
     YL_SINNOH_SPEC=test python dev/sinnoh/verify.py                (with the tiny test spec instead of the real one)
     YL_SINNOH_MAPS=8 / YL_SINNOH_TRIALS=24                         (how many edited maps / encounters per map)
 
@@ -66,16 +66,50 @@ def check_rom():
     ok(sinnoh_rom._sha1(vanilla) == sinnoh_rom.VANILLA_SHA1, "source = vanilla Platinum US rev 0")
     rv, rs = ndsrom.NDSRom(vanilla), ndsrom.NDSRom(ptrom.ROM)
     start, size = rv.extent(encdata.NARC_PATH)
-    ok(rs.extent(encdata.NARC_PATH) == (start, size), "NARC at the same offset/size (%#x, %d bytes)" % (start, size))
-    ok(sinnoh_rom._compare_outside(vanilla, ptrom.ROM, start, start + size),
-       "the ROM differs from vanilla only inside pl_enc_data.narc")
+    ok(rs.extent(encdata.NARC_PATH) == (start, size), "wild NARC at the same offset/size (%#x, %d bytes)" % (start, size))
+    plan = sinnoh_rom.plan(vanilla, sp)
+    ok(sinnoh_rom._compare_except(vanilla, ptrom.ROM, plan.allowed),
+       "the ROM equals vanilla outside the builder's planned ranges (%d ranges)" % len(plan.allowed))
     nv, ns = rv.narc(encdata.NARC_PATH), rs.narc(encdata.NARC_PATH)
     same = all(ns[i] == sp.apply(i, nv[i]) for i in range(encdata.TABLE_COUNT))
-    ok(same, "every table = spec.apply(vanilla table) (%d slot edits, %d rate edits)"
+    ok(same, "every wild table = spec.apply(vanilla table) (%d slot edits, %d rate edits)"
        % (len(sp.EDITS), len(getattr(sp, "RATE_EDITS", ()))))
     changed = [i for i in range(encdata.TABLE_COUNT) if ns[i] != nv[i]]
     ok(set(changed) == {e.table for e in sp.EDITS} | {r.table for r in getattr(sp, "RATE_EDITS", ())},
        "changed tables = the spec's tables (%d)" % len(changed))
+    # scripts: exactly the three Regi statue bytes
+    so, sn = rv.extent(sinnoh_rom.SCRIPT_NARC_PATH)
+    ok(rs.extent(sinnoh_rom.SCRIPT_NARC_PATH) == (so, sn), "script NARC in place")
+    sv, ss = rv.narc(sinnoh_rom.SCRIPT_NARC_PATH), rs.narc(sinnoh_rom.SCRIPT_NARC_PATH)
+    diff = [i for i in range(len(sv)) if sv[i] != ss[i]]
+    ok(diff == [e.member for e in sinnoh_rom.ENGINE_EDITS] and all(
+        ss[e.member][e.offset:e.offset + len(e.new)] == e.new for e in sinnoh_rom.ENGINE_EDITS),
+       "scripts: only the Regi ruins' statue check changed (members %s)" % diff)
+    # Pokédex area map
+    if getattr(sp, "AREA_EDITS", ()):
+        av, as_ = rv.narc(sp.AREA_NARC_PATH), rs.narc(sp.AREA_NARC_PATH)
+        mem = set(sp.area_members())
+        ok(len(av) == len(as_) == sp.AREA_MEMBER_COUNT, "area NARC: %d members" % len(as_))
+        bad = [i for i in range(len(av)) if (as_[i] != (sp.apply_area(i, av[i]) if i in mem else av[i]))]
+        ok(not bad, "area NARC: %d edited lists = spec.apply_area, all others vanilla%s"
+           % (len(mem), (" - NOT %s" % bad[:5]) if bad else ""))
+        a0, n0 = rv.extent(sp.AREA_NARC_PATH)
+        a1, n1 = rs.extent(sp.AREA_NARC_PATH)
+        with open(vanilla, "rb") as f:
+            hv = f.read(0x200)
+        used = struct.unpack_from("<I", hv, 0x80)[0]
+        ok(a1 >= used and a1 % 0x200 == 0 and n1 > 0, "area NARC moved after the vanilla data (%#x -> %#x)" % (a0, a1))
+        with open(ptrom.ROM, "rb") as f:
+            f.seek(a0)
+            old_kept = f.read(n0) == rv.file(sp.AREA_NARC_PATH)
+            f.seek(0)
+            hs = f.read(0x200)
+        ok(old_kept, "the vanilla area NARC is still at its old place (old snapshots' cached FAT)")
+        ok(struct.unpack_from("<I", hs, 0x80)[0] == a1 + n1 and
+           struct.unpack_from("<H", hs, 0x15E)[0] == sinnoh_rom.crc16(hs[:0x15E]),
+           "header: used ROM size = end of the moved NARC, header CRC valid")
+        ok(hs[:0x80] == hv[:0x80] and hs[0x84:0x15E] == hv[0x84:0x15E],
+           "header otherwise identical (game code offsets, ARM9/ARM7, FNT/FAT positions)")
     sha = sinnoh_rom._sha1(ptrom.ROM)
     want = sinnoh_rom.expected_sha1(sp)
     if want:
@@ -84,16 +118,19 @@ def check_rom():
            "platinum.VARIANTS lists it (App.full, same code as vanilla)")
     else:
         ok(False, "spec v%s has no EXPECTED SHA1 yet (run dev/sinnoh/build_rom.py --update)" % sp.SPEC_VERSION)
-    with open(vanilla, "rb") as f:
-        hv = f.read(0x200)
-    with open(ptrom.ROM, "rb") as f:
-        hs = f.read(0x200)
-    ok(hv == hs, "header identical (game code, CRCs, FAT/FNT offsets)")
     rv.close()
     rs.close()
 
 
 # ------------------------------------------------------------------------------------------- snapshot compat
+def rom_fat(path):
+    with open(path, "rb") as f:
+        hdr = f.read(0x50)
+        off, size = struct.unpack_from("<II", hdr, 0x48)
+        f.seek(off)
+        return f.read(size)
+
+
 def check_compat(d, pm):
     """Vanilla savestates (= a player's resume snapshot from 0.7.6 or a vanilla dev fixture) in the Complete Sinnoh
     ROM: same code, so the game runs on; the loaded wild table is vanilla's until the next map load (the app
@@ -101,6 +138,14 @@ def check_compat(d, pm):
     print("== vanilla snapshots in the Complete Sinnoh ROM")
     rs = ndsrom.NDSRom(ptrom.ROM)
     narc = rs.narc(encdata.NARC_PATH)
+    fat = rom_fat(ptrom.ROM)
+    vfat = rom_fat(ptrom.VANILLA_ROM)
+    # a fresh boot of the Complete Sinnoh ROM caches ITS file table (FS_LoadTable): the moved area NARC is found
+    d.run(600)
+    a = pm.cached_fat_addr(len(fat))
+    ok(a is not None and d.read(a, len(fat)) == fat,
+       "power-on: the game's cached FAT (FSArchive fat ptr at %#x -> %s) = this ROM's FAT"
+       % (P.FS_ROM_FAT_PTR, hex(a) if a else None))
     for st in ("pt_town", "pt_pc", "pt_battle", "pt_sl_route202"):
         d.load(os.path.join(ptrom.STATES, st + ".dsst"))
         d.run(300)
@@ -121,6 +166,17 @@ def check_compat(d, pm):
                                                 "spec edits Route 202" if edited else "no Route 202 edit"))
     ok(pm.write_wild_table(narc[tid]) and pm.wild_table() == narc[tid],
        "write_wild_table: RAM table = the ROM's member (what the app does after resuming another build)")
+    a = pm.cached_fat_addr(len(fat))
+    before = d.read(a, len(fat)) if a else b""
+    diff = [i // 8 for i in range(0, len(fat), 8) if before[i:i + 8] != fat[i:i + 8]]
+    fid = rs.file_id(sinnoh_rom.AREA_NARC_PATH)
+    ok(before == vfat and diff == [fid], "vanilla snapshot: cached FAT = vanilla's (differs from this ROM only in "
+       "entry %s = the area NARC; the vanilla copy is still there, so it is safe as is)" % diff)
+    n = pm.refresh_cached_fat(fat)
+    ok(n == 1 and d.read(a, len(fat)) == fat, "refresh_cached_fat: 1 entry written, cached FAT = this ROM's")
+    ok(pm.refresh_cached_fat(fat) == 0, "refresh again: nothing to do")
+    d.run(120)
+    ok(pm.in_game() and pm.party_checked() is not None, "game runs on after the refresh")
     # a real map load: from Twinleaf Town (pt_starter, vanilla snapshot with a Pokémon) walk north into Route 201
     d.load(os.path.join(ptrom.STATES, "pt_starter.dsst"))
     walker.settle(d, pm, 300)
@@ -469,6 +525,213 @@ def event_rotom(d, pm, w):
     ok(pm.map_id() == ROOM, "the Secret Key opened the wall: in Rotom's room (map %d)" % pm.map_id())
 
 
+# ------------------------------------------------------------------------------------------- Regis / Regigigas
+RUINS = (  # (name, map, state var, dots (pret sDotCoordinates*), species)
+    ("Rock Peak Ruins", 592, "VAR_ROCK_PEAK_RUINS_STATE", [(5, 5), (5, 7), (5, 9), (7, 7), (9, 5), (9, 7), (9, 9)], 377),
+    ("Iceberg Ruins", 590, "VAR_ICEBERG_RUINS_STATE", [(3, 7), (5, 7), (7, 5), (7, 7), (7, 9), (9, 7), (11, 7)], 378),
+    ("Iron Ruins", 588, "VAR_IRON_RUINS_STATE", [(4, 7), (5, 5), (5, 9), (7, 7), (9, 5), (9, 9), (10, 7)], 379),
+)
+RUINS_ACTIVATED_STATUE, RUINS_CAUGHT = 270, 290
+MASTER_BALL = 1
+BAG_BALLS = 0x6BC                  # Bag.balls[15] after items, key items, TMs, mail, medicine, berries
+
+
+def until_safe(d, pm, frames=1500, every=30, key="a"):
+    for i in range(frames):
+        if i > 60 and pm.is_safe():
+            return True
+        if i % every == 0:
+            d.press(key, 4)
+        d.run(1)
+    return pm.is_safe()
+
+
+def balls(d, pm):
+    return struct.unpack("<HH", d.read(pm.save_body() + E.PAGE_BAG + BAG_BALLS, 4))
+
+
+def catch(d, pm, tries=4):
+    """In a wild battle (TEST SHORTCUT: Master Balls in the bag): BAG -> POKé BALLS -> the first ball -> USE (touch
+    screen), then through the messages,
+    the Pokédex page and the nickname question (B = no). True when the battle ended with one ball fewer."""
+    before = balls(d, pm)[1]
+    for _ in range(tries):
+        d.run(600)                       # the command menu (FIGHT / BAG / RUN / POKéMON)
+        # USE is tapped at its left end (40, 172): the same spot as BAG, never RUN, if the menus are out of step
+        for x, y, wait in ((40, 172, 90), (190, 58, 90), (64, 30, 90), (40, 172, 900)):
+            d.touch(x, y)
+            d.run(wait)
+        if balls(d, pm)[1] < before:
+            break
+    for i in range(3000):
+        if not pm.in_battle() and pm.is_safe():
+            break
+        if i % 120 == 0:
+            d.press("a" if i % 240 == 0 else "b", 4)
+        d.run(1)
+    return balls(d, pm)[1] == before - 1 and not pm.in_battle()
+
+
+def party_species(pm):
+    from yellowlink import pk4
+    return [pk4.PK4.from_encrypted(r).species for r in (pm.party_checked() or [])]
+
+
+def check_regis(d, pm):
+    """Ilias: the Regi ruins without an event Regigigas, then Snowpoint Temple's Regigigas, in ONE save: dots ->
+    statue -> catch Regirock, Regice, Registeel (real battles, Master Balls) -> Regigigas wakes up."""
+    print("== Regis -> Regigigas in one save (no event Regigigas)")
+    world = worldmap.World(ptrom.ROM)
+    w = devwarp.DevWarp(d, ptrom.STATES)
+    w.boot("pt_title.dsst")
+    w.flag(E.FLAG_GAME_COMPLETED)          # TEST SHORTCUT: Hall of Fame done (the ruins need it)
+    w.national_dex()
+    d.write(w.body + E.PAGE_BAG + BAG_BALLS, struct.pack("<HH", MASTER_BALL, 10))   # TEST SHORTCUT: Master Balls
+    ok(all(sp != 486 for sp in party_species(pm)), "the party has no Regigigas (event or not)")
+    for name, mid, var_name, dots, species in RUINS:
+        var = _flag(var_name)
+        r = w.go(mid, 7, 11, facing=0)
+        if not ok(r == "loaded" and pm.map_id() == mid, "%s: CONTINUE'd in (%s)" % (name, r)):
+            continue
+        tiles = world.tiles(mid, d.r16(P.MAP_HEADERS + 24 * mid + 2))
+        for dot in dots:
+            walker.walk_to(d, pm, tiles, dot)
+            d.run(30)
+            if pm.var(var) >= 260:
+                break
+        until_safe(d, pm)
+        ok(pm.var(var) == RUINS_ACTIVATED_STATUE, "%s: walking the 7 dots activates the statue (state %d)"
+           % (name, pm.var(var)))
+        walker.walk_to(d, pm, tiles, (7, 2))
+        walker.face(d, pm, "up")
+        d.press("a", 10)
+        for i in range(900):
+            if pm.in_battle():
+                break
+            if i % 30 == 0:
+                d.press("a", 4)
+            d.run(1)
+        bi = battle_species(d, pm, 600) if pm.in_battle() else None
+        if not ok(bi and bi["dex"] == species and bi["level"] == 30,
+                  "%s: the statue (no event Regigigas in the party) starts the battle: %s" % (
+                      name, ("species %d Lv%d" % (bi["dex"], bi["level"])) if bi else "no battle")):
+            continue
+        ok(catch(d, pm), "%s: caught with a Poké Ball" % name)
+        ok(pm.var(var) == RUINS_CAUGHT and species in party_species(pm),
+           "%s: the game's script records it (state %d) and it is in the party %s" % (
+               name, pm.var(var), party_species(pm)))
+    TEMPLE = _map("MAP_HEADER_SNOWPOINT_TEMPLE_B5F")
+    r = w.go(TEMPLE, 11, 14, facing=0)
+    ok(r == "loaded" and pm.map_id() == TEMPLE, "Snowpoint Temple B5F (%s)" % r)
+    tiles = world.tiles(TEMPLE, d.r16(P.MAP_HEADERS + 24 * TEMPLE + 2))
+    walker.walk_to(d, pm, tiles, (11, 13))
+    walker.face(d, pm, "up")
+    d.press("a", 10)
+    bi = None
+    for i in range(1500):
+        if pm.in_battle():
+            bi = battle_species(d, pm, 900)
+            break
+        if i % 30 == 0:
+            d.press("a", 4)
+        d.run(1)
+    ok(pm.flag(_flag("FLAG_AWAKENED_REGIGIGAS")), "Regigigas awakens (the three Regis in the party)")
+    ok(bi and bi["dex"] == 486 and bi["level"] == 1, "Regigigas's battle: %s" % (
+        ("species %d Lv%d" % (bi["dex"], bi["level"])) if bi else "no battle"))
+    if bi:
+        ok(catch(d, pm) and pm.flag(_flag("FLAG_CAUGHT_REGIGIGAS")) and 486 in party_species(pm),
+           "Regigigas caught (FLAG_CAUGHT_REGIGIGAS, in the party %s)" % party_species(pm))
+
+
+# ------------------------------------------------------------------------------------------------- swarms
+def slot_for(index, start=249000):
+    """A 2-hour slot whose swarm is `index` (sinnoh_swarm's rotation)."""
+    from yellowlink import sinnoh_swarm as SW
+    return next(s for s in range(start, start + 400) if SW.pick(s) == index)
+
+
+def check_swarm(d, pm):
+    """The game's own swarm mechanism, driven by the shared 2-hour rotation (sinnoh_swarm.SwarmRotator)."""
+    from yellowlink import sinnoh_swarm as SW
+    print("== swarms every 2 hours")
+    world = worldmap.World(ptrom.ROM)
+    narc = world.rom.narc(encdata.NARC_PATH)
+    w = devwarp.DevWarp(d, ptrom.STATES)
+    w.boot("pt_title.dsst")
+    P.fast_continue(d)
+    walker.settle(d, pm)
+    ram = d.read(0x02000000, 0x400000)
+    hits = []
+    pat = struct.pack("<22I", *SW.SWARM_MAPS)
+    k = ram.find(pat)
+    while k >= 0:
+        hits.append(0x02000000 + k)
+        k = ram.find(pat, k + 1)
+    ok(len(hits) == 1, "sSwarmMapIdTable in RAM (overlay 6) = SWARM_MAPS (at %s)" % [hex(h) for h in hits])
+    base = pm.save_body() + SW.PAGE_SPECIAL_ENCOUNTERS
+    trophy = d.read(base + 8, 8)
+    ok(trophy == b"\0\0\0\0\xff\xff\xff\xff" and d.r8(base + 16) == 21,
+       "SpecialEncounter at body + %#x (trophy garden slots NONE, last slathered honey tree = 21)"
+       % SW.PAGE_SPECIAL_ENCOUNTERS)
+    ok(not SW.enabled(pm), "a mid-game save: swarms off")
+    # the rival's sister turns them on (National Dex + Hall of Fame): the game's own EnableSwarms
+    w.boot("pt_title.dsst")
+    w.flag(E.FLAG_GAME_COMPLETED)        # TEST SHORTCUT
+    w.national_dex()                     # TEST SHORTCUT
+    HOUSE = _map("MAP_HEADER_SANDGEM_TOWN_COUNTERPART_HOUSE_1F")
+    r = w.go(HOUSE, 6, 7, facing=2)
+    ok(r == "loaded" and pm.map_id() == HOUSE, "Sandgem Town, the rival's house (%s)" % r)
+    told = _flag("FLAG_TALKED_TO_COUNTERPART_SISTER_WITH_NATIONAL_DEX")
+    tiles = world.tiles(HOUSE, d.r16(P.MAP_HEADERS + 24 * HOUSE + 2))
+    for i in range(80):                  # she wanders north/south in column 5: wait next to her and talk
+        if pm.flag(told):
+            break
+        if pm.is_safe():
+            z = 6 + (i // 4) % 3
+            if walker.pos(pm) != (6, z):
+                walker.walk_to(d, pm, tiles, (6, z))
+            walker.face(d, pm, "left")
+            d.press("a", 10)
+        d.run(40)
+    until_safe(d, pm)
+    ok(pm.flag(told) and SW.enabled(pm), "her script (EnableSwarms) sets swarmEnabled at +%#x: %s"
+       % (SW.SE_SWARM_ENABLED, SW.enabled(pm)))
+    # the rotation picks Route 201 -> the game shows the swarm there; another slot -> gone again
+    ROUTE_201 = 342
+    t201 = pm.m.r16(P.MAP_HEADERS + 24 * ROUTE_201 + P.MH_WILD_ENCOUNTERS_ID)
+    swarm_sp = SW.species_of(ROUTE_201, lambda m: t201, narc)
+    land = {sp for sp, _ in encdata.parse(narc[t201])["land"]}
+    ok(swarm_sp and swarm_sp not in land, "Route 201's swarm species %s isn't in its normal slots" % swarm_sp)
+    s201 = slot_for(SW.SWARM_MAPS.index(ROUTE_201))
+    tiles = world.tiles(ROUTE_201, 0)
+    x, z, dx = worldmap.encounter_pairs(tiles)[len(worldmap.encounter_pairs(tiles)) // 2]
+    r = w.go(ROUTE_201, x, z)
+    ok(r == "loaded" and pm.map_id() == ROUTE_201, "Route 201 (%s)" % r)
+    rot = SW.SwarmRotator(pm, every=1, clock=lambda: s201 * SW.SLOT_SECONDS + 60)
+    news = None
+    for _ in range(10):
+        news = news or rot.step()
+        d.run(1)
+    ok(news and news["map"] == ROUTE_201 and SW.swarm_index(pm) == 0,
+       "the rotator writes swarmDaily for slot %d (Route 201) and announces it: %s" % (s201, news))
+    trials = int(os.environ.get("YL_SINNOH_TRIALS", "24"))
+    got = [g for g in force_encounters(d, pm, w, ROUTE_201, x, z, dx, trials) if g]
+    n_swarm = sum(1 for sp, _ in got if sp == swarm_sp)
+    ok(n_swarm >= trials // 8, "swarm on: %d of %d Route 201 battles are %d (slots 0+1 = 40%%)"
+       % (n_swarm, len(got), swarm_sp))
+    other = slot_for(next(i for i in range(22) if SW.SWARM_MAPS[i] != ROUTE_201), s201 + 1)
+    rot.clock = lambda: other * SW.SLOT_SECONDS + 60
+    news2 = None
+    for _ in range(10):
+        news2 = news2 or rot.step()
+        d.run(1)
+    ok(news2 and news2["slot"] == other and SW.swarm_index(pm) == SW.pick(other),
+       "2 hours later: the next swarm (%s) replaces it" % (news2 and news2["map"]))
+    got = [g for g in force_encounters(d, pm, w, ROUTE_201, x, z, dx, trials) if g]
+    ok(got and all(sp != swarm_sp for sp, _ in got), "swarm moved away: no %d in %d Route 201 battles"
+       % (swarm_sp, len(got)))
+
+
 _PRET = os.environ.get("YL_PRET_PLATINUM", "/home/claude/pokeplatinum")
 _ENUMS = {}
 
@@ -507,13 +770,13 @@ def _map(name):
 
 
 def main():
-    which = [a for a in sys.argv[1:]] or ["rom", "compat", "wild", "events"]
+    which = [a for a in sys.argv[1:]] or ["rom", "compat", "wild", "events", "regis", "swarm", "area"]
     build_rom.ensure_dev_rom("test" if os.environ.get("YL_SINNOH_SPEC") == "test" else "auto")
     print("Complete Sinnoh verify:", ptrom.label(), "spec", spec().__name__, "v%s" % spec().SPEC_VERSION)
     if "rom" in which:
         check_rom()
     d = pm = None
-    if set(which) & {"compat", "wild", "events"}:
+    if set(which) & {"compat", "wild", "events", "regis", "swarm", "area"}:
         d = DS()
         pm = P.PlatinumMemory(d)
         _DS.append(d)
@@ -523,6 +786,10 @@ def main():
         check_wild(d, pm)
     if "events" in which:
         check_events(d, pm)
+    if "regis" in which:
+        check_regis(d, pm)
+    if "swarm" in which:
+        check_swarm(d, pm)
     bad = [w for c, w in RESULTS if not c]
     print("\n%d checks, %d failed" % (len(RESULTS), len(bad)))
     for w in bad:

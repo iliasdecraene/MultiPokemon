@@ -5,6 +5,7 @@ import io
 import logging
 import os
 import shutil
+import struct
 import sys
 import time
 import webbrowser
@@ -188,6 +189,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         self.ds = self.game_info.platform == "nds"
         self.sinnoh_problem = None
         self.sinnoh_events = None
+        self.sinnoh_swarm = None
         self._wild_refresh = None     # set after resuming a snapshot of another ROM build (see _sinnoh_step)
         if self.ds:
             # Complete Sinnoh: everybody plays our own version, made here from the player's own Platinum
@@ -451,10 +453,11 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             self.game.rom = self.plat_data       # Soul Link's forced PC moves need the ROM (move PP, stats)
         self._start_pt_pc()
         self._install_exp_share()
-        self.sinnoh_events = None
+        self.sinnoh_events = self.sinnoh_swarm = None
         if self.full and getattr(self, "complete_sinnoh", False):
-            from . import sinnoh_events
+            from . import sinnoh_events, sinnoh_swarm
             self.sinnoh_events = sinnoh_events.EventUnlocker(self.game)
+            self.sinnoh_swarm = sinnoh_swarm.SwarmRotator(self.game)
         if self.wide:
             self.wide = False
         self.last_sram = self._read_sram()
@@ -2335,8 +2338,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         pygame.display.flip()
 
     def _sinnoh_step(self):
-        """Complete Sinnoh: Mystery Gift events once the save qualifies; the loaded wild table after a resume from
-        another ROM build (see _try_resume)."""
+        """Complete Sinnoh: Mystery Gift events once the save qualifies; the shared 2-hour swarm; the loaded wild
+        table + cached file table after a resume from another ROM build (see _try_resume)."""
         if self._wild_refresh is not None and self.game.is_safe():
             self._wild_refresh_now()
         if self.sinnoh_events is None or self.trade:
@@ -2344,22 +2347,59 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         for ev in self.sinnoh_events.step():
             self.toast(f"Mystery Gift: {ev.item_name}! {ev.hint}", 9, ui.GOOD)
             self.sys_msg(f"Mystery Gift: you received the {ev.item_name}. {ev.hint}", ui.GOOD)
+        news = self.sinnoh_swarm.step() if self.sinnoh_swarm is not None else None
+        if news:
+            text = self._swarm_text(news)
+            if text:
+                self.toast(text, 8, ui.ACCENT)
+                self.sys_msg(text, ui.ACCENT)
+
+    def _swarm_text(self, news) -> str:
+        """'Swarm now: Doduo on Route 201 (until 14:00)' from the running ROM's own tables and names."""
+        try:
+            from . import encdata, ndsrom, platinum_areas, sinnoh_swarm
+            if getattr(self, "_swarm_tables", None) is None:
+                rom = ndsrom.NDSRom(self.cfg["rom_path"])
+                try:
+                    narc = rom.narc(encdata.NARC_PATH)
+                    self._swarm_tables = [narc[i] for i in range(len(narc))]
+                finally:
+                    rom.close()
+
+            def table_of(m):
+                v = self.game.m.r16(self.G.MAP_HEADERS + 24 * m + self.G.MH_WILD_ENCOUNTERS_ID)
+                return None if v == 0xFFFF or v >= len(self._swarm_tables) else v
+            sp = sinnoh_swarm.species_of(news["map"], table_of, self._swarm_tables)
+            pd = self.plat_data
+            name = pd.species_name(sp) if pd and sp else (f"#{sp}" if sp else "?")
+            place = self.G.area_name(platinum_areas.AREAS[news["map"]])
+            until = time.strftime("%H:%M", time.localtime(news["ends"]))
+            return f"Swarm now: {name} on {place} (until {until})"
+        except Exception:  # noqa: BLE001
+            log.exception("swarm text failed")
+            return ""
 
     def _wild_refresh_now(self):
         """Give the current map the wild table of the ROM that runs now (the snapshot carried the other build's
-        copy in RAM; the next map load would fix it anyway). Exactly what MapHeaderData_LoadWildEncounters copies."""
+        copy in RAM; the next map load would fix it anyway). Exactly what MapHeaderData_LoadWildEncounters copies.
+        Also the game's cached file table (FS_LoadTable at boot): the Pokédex area file sits elsewhere in another
+        build, so the snapshot's copy is made equal to this ROM's FAT (8-byte entries, only those that differ)."""
         self._wild_refresh = None
         try:
-            tid = self.game.wild_table_id()
-            if tid is None:
-                return
             from . import encdata, ndsrom
             rom = ndsrom.NDSRom(self.cfg["rom_path"])
             try:
-                data = rom.narc(encdata.NARC_PATH)[tid]
+                hdr = rom._read(0, 0x50)
+                fat_off, fat_size = struct.unpack_from("<II", hdr, 0x48)
+                fat = rom._read(fat_off, fat_size)
+                tid = self.game.wild_table_id()
+                data = rom.narc(encdata.NARC_PATH)[tid] if tid is not None else None
             finally:
                 rom.close()
-            if self.game.wild_table() != data and self.game.write_wild_table(data):
+            n = self.game.refresh_cached_fat(fat)
+            if n:
+                log.info("cached FAT: %s", f"{n} entries refreshed" if n > 0 else "left alone (not recognised)")
+            if data is not None and self.game.wild_table() != data and self.game.write_wild_table(data):
                 log.info("wild table %d refreshed from %s", tid, os.path.basename(self.cfg["rom_path"]))
         except Exception:  # noqa: BLE001
             log.exception("wild table refresh failed")
