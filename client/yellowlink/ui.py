@@ -76,6 +76,9 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
     st = app.net.status if app.net else "offline"
     col = {"online": GOOD, "connecting": ACCENT}.get(st, BAD)
     label = st
+    name = getattr(app, "server_name", "")
+    if st == "online" and name:
+        label = name
     if st == "online" and app.net.rtt_ms is not None:
         label += f" · {app.net.rtt_ms} ms"
     if app.net and app.net.status_detail and st != "online":

@@ -158,6 +158,7 @@ sudo git clone https://github.com/iliasdecraene/MultiPokemon.git /opt/yellowlink
 cd /opt/yellowlink2/server
 sudo tee .env > /dev/null <<'ENV'
 YL_KEY=pick-a-different-password
+YL_SERVER_NAME=Second Group
 YL_NAME=yellowlink2
 YL_HOST_PORT=8766
 COMPOSE_PROJECT_NAME=yellowlink2
@@ -166,3 +167,7 @@ sudo docker compose up -d --build
 ```
 Players of that group use `ws://<server-ip>:8766` and that password. Open port 8766 if a firewall is on.
 Update it like the first one: `cd /opt/yellowlink2 && git pull && cd server && docker compose up -d --build`.
+
+### Name and welcome message
+`YL_SERVER_NAME` (shown in every player's sidebar and when they connect) and `YL_MOTD` (welcome line in the chat) can be
+set in a server's `.env`. Apply a change with `docker compose up -d` in that server's `server` folder.
