@@ -271,6 +271,8 @@ NUM_MOVES = 467
 PLATINUM_CODES = ("CPUE",)                              # US Platinum (other regions untested)
 
 GENDER_MALE_ONLY, GENDER_FEMALE_ONLY, GENDERLESS = 0, 254, 255
+# species -> (personal NARC entry of form 1, number of forms) (pret src/pokemon.c Pokemon_GetFormNarcIndex)
+FORM_PERSONAL = {386: (496, 4), 413: (499, 3), 487: (501, 2), 492: (502, 2), 479: (503, 6)}
 
 
 @dataclass(frozen=True)
@@ -300,7 +302,8 @@ class PlatinumData:
             if rom.game_code not in PLATINUM_CODES:
                 raise NDSError("not Pokémon Platinum (US): game code %r" % rom.game_code)
             pers = rom.narc(PERSONAL_NARC)
-            self.personal = [Personal.parse(lz77_decompress(pers[i])) for i in range(min(len(pers), NUM_SPECIES + 1))]
+            # entries 0..493 = species, 494/495 egg / bad egg, 496.. alternate forms (see personal_index)
+            self.personal = [Personal.parse(lz77_decompress(pers[i])) for i in range(len(pers))]
             grow = rom.narc(GROWTH_NARC)
             self.exp_tables = []
             for i in range(min(len(grow), 8)):
@@ -330,6 +333,21 @@ class PlatinumData:
     # --- species --------------------------------------------------------------------------------------
     def info(self, dex: int) -> Personal | None:
         return self.personal[dex] if 1 <= dex <= NUM_SPECIES else None
+
+    def personal_index(self, dex: int, form: int = 0) -> int:
+        """Personal NARC entry of species + form (pret Pokemon_GetFormNarcIndex): Deoxys forms 1-3 -> 496-498,
+        Wormadam 1-2 -> 499-500, Giratina Origin -> 501, Shaymin Sky -> 502, Rotom forms 1-5 -> 503-507; every
+        other species/form -> the species' own entry."""
+        base, count = FORM_PERSONAL.get(dex, (0, 0))
+        if base and 0 < form < count and base - 1 + form < len(self.personal):
+            return base - 1 + form
+        return dex
+
+    def form_base_stats(self, dex: int, form: int = 0):
+        """Base stats of a species in a given form (what Pokemon_CalcStats uses via SpeciesData_LoadForm)."""
+        if not 1 <= dex <= NUM_SPECIES:
+            return None
+        return self.personal[self.personal_index(dex, form)].base_stats
 
     def growth_rate(self, dex: int) -> int:
         p = self.info(dex)

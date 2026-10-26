@@ -8,6 +8,7 @@ See dev/notes/soullink_platinum.md for what each check proves. Runs in a private
 battery file is not touched). RAM writes used to save time are listed in the notes ("Fixtures").
 """
 import os
+import struct
 import sys
 import tempfile
 
@@ -260,6 +261,18 @@ def write_party(rig, records):
     rig.d.w32(b + P.PAGE_PARTY + 4, len(records))
 
 
+def forced(rig, fn, *args, tries=60):
+    """A forced move the way the referee does it: observe_stable() every frame (the view does it in its safe()
+    check), the move goes through once the state read the same on an earlier frame. Returns the move's result
+    (False after `tries` frames for a refused move)."""
+    for _ in range(tries):
+        rig.pm.observe_stable()
+        rig.d.run(1)
+        if fn(*args):
+            return True
+    return False
+
+
 def snapshot_mem(rig):
     """(party page, PC boxes) bytes."""
     b = body(rig.pm)
@@ -377,7 +390,7 @@ def build_pc5(rig):
     rig.load("pt_sl_pc6.dsst")
     while rig.pm.party_checked() is None:
         rig.d.run(1)
-    rig.pm.move_party_to_box(5)
+    forced(rig, rig.pm.move_party_to_box, 5)
     rig.settle()
     rig.save("pt_sl_pc5.dsst")
 
@@ -731,7 +744,7 @@ def check_boxmoves(rig):
         game_deposit(rig, slot)
         a = stable_state(rig)
         rig.load("pt_sl_pc6.dsst")
-        moved = pm.move_party_to_box(slot)
+        moved = forced(rig, pm.move_party_to_box, slot)
         b = stable_state(rig)
         ok(moved and a == b and a[0] == 5 and P.mon_key(pm.current_box_records()[-1]) == key,
            "deposit party slot %d: move_party_to_box = the game's STORE byte for byte (party, count, all 18 boxes, "
@@ -744,7 +757,7 @@ def check_boxmoves(rig):
         game_withdraw(rig, pos)
         a = stable_state(rig)
         rig.load("pt_sl_pc5.dsst")
-        moved = pm.move_box_to_party(pos)
+        moved = forced(rig, pm.move_box_to_party, pos)
         b = stable_state(rig)
         ok(moved and a == b and a[0] == 6 and party_keys(pm)[-1] == key,
            "withdraw box slot %d: move_box_to_party = the game's WITHDRAW byte for byte (party record incl. "
@@ -753,15 +766,29 @@ def check_boxmoves(rig):
     # the game accepts our moves: open the PC on the result, the deposited mon is shown and can be withdrawn
     rig.load("pt_sl_pc6.dsst")
     key = party_keys(pm)[3]
-    pm.move_party_to_box(3)
+    forced(rig, pm.move_party_to_box, 3)
     rig.settle()
     idx = len(pm.current_box_records()) - 1
     game_withdraw(rig, idx)
     ok(pm.party_count() == 6 and party_keys(pm)[-1] == key,
        "the game's own WITHDRAW takes back a mon we deposited (box slot %d)" % (idx + 1))
+    # cross-frame stability: no write unless the state was seen identical on an earlier frame
+    rig.load("pt_sl_pc6.dsst")
+    before = snapshot_mem(rig)
+    first = pm.move_party_to_box(2)
+    same_frame = pm.move_party_to_box(2)
+    ok(not first and not same_frame and snapshot_mem(rig) == before,
+       "move_party_to_box without an earlier-frame observation: False twice on the same frame, nothing written")
+    tries = 0
+    while not pm.move_party_to_box(2) and tries < 60:
+        rig.d.run(1)
+        tries += 1
+    ok(tries < 60 and pm.party_count() == 5,
+       "...and goes through on a later frame once party + box read clean and identical (%d frame(s); the lead of a "
+       "6-mon party is decrypted in place on about half the frames)" % (tries + 1))
     # refusals
     rig.load("pt_sl_route202.dsst")
-    ok(not pm.move_party_to_box(0) and pm.party_count() == 1, "move_party_to_box refuses the last party mon")
+    ok(not forced(rig, pm.move_party_to_box, 0) and pm.party_count() == 1, "move_party_to_box refuses the last party mon")
     rig.load("pt_sl_pc6.dsst")
     party = pm.party_checked()
     others = []
@@ -771,15 +798,15 @@ def check_boxmoves(rig):
             pk.hp = 0
         others.append(pk.encrypted())
     write_party(rig, others)
-    ok(not pm.move_party_to_box(1) and pm.party_count() == 6,
+    ok(not forced(rig, pm.move_party_to_box, 1) and pm.party_count() == 6,
        "refused when no OTHER non-egg party mon has HP > 0 (the game's 'last Pokémon' rule)")
-    ok(pm.move_party_to_box(0) and pm.party_count() == 5, "a fainted mon can be boxed while another can fight")
+    ok(forced(rig, pm.move_party_to_box, 0) and pm.party_count() == 5, "a fainted mon can be boxed while another can fight")
     rig.load("pt_sl_pc6.dsst")
     party = pm.party_checked()
     pk = pk4.PK4(pk4.decrypt(party[2]))
     pk.item = P.MAIL_FIRST
     write_party(rig, party[:2] + [pk.encrypted()] + party[3:])
-    ok(not pm.move_party_to_box(2) and pm.party_count() == 6, "refused when the mon holds Mail (GRASS MAIL)")
+    ok(not forced(rig, pm.move_party_to_box, 2) and pm.party_count() == 6, "refused when the mon holds Mail (GRASS MAIL)")
     # current box full -> next box with room becomes current
     rig.load("pt_sl_pc6.dsst")
     filler = pm.box_raw(0)[0]
@@ -787,10 +814,10 @@ def check_boxmoves(rig):
         if pm.box_raw(0)[i] == pk4.EMPTY_BOX:
             pm.write_box_slot(0, i, filler)
     key = party_keys(pm)[4]
-    ok(pm.move_party_to_box(4) and pm.current_box() == 1 and [P.mon_key(r) for r in pm.current_box_records()] == [key],
+    ok(forced(rig, pm.move_party_to_box, 4) and pm.current_box() == 1 and [P.mon_key(r) for r in pm.current_box_records()] == [key],
        "current box full: stored in box 2, which becomes the current box (like a catch with a full party)")
-    ok(not pm.move_box_to_party(5) and pm.move_box_to_party(0) and pm.party_count() == 6
-       and not pm.move_box_to_party(0) and party_keys(pm)[-1] == key,
+    ok(not forced(rig, pm.move_box_to_party, 5) and forced(rig, pm.move_box_to_party, 0) and pm.party_count() == 6
+       and not forced(rig, pm.move_box_to_party, 0) and party_keys(pm)[-1] == key,
        "move_box_to_party: bad index -> False; withdraw back; party full -> False")
 
 
@@ -902,6 +929,9 @@ def check_double(rig):
        and info["dex"] == e1[0] and info["pid"] == e1[1] and info["others"] == [e2[0]],
        "double wild battle with Cheryl: kind 'wild', battle_type 0x4A, dex = the FIRST wild mon (battler 1), "
        "others = [battler 3's species]: %s" % {x: info and info[x] for x in ("dex", "others", "battle_type")})
+    ok(info["dexes"] == [e1[0], e2[0]] and info["keys"][0] == info["key"]
+       and [k[:8] for k in info["keys"]] == ["%08x" % e1[1], "%08x" % e2[1]],
+       "battle_info keys/dexes list both wild mons (battlers 1 and 3), first = key/dex")
     ok(pm.battle_party_slot() == (0, battle_mon(rig, 0)[2]) and p2[1] not in pm._save_party_pids(),
        "battle_party_slot(): the player's mon (battler 0); the partner's mon (battler 2, Cheryl's species %d) "
        "is never reported" % p2[0])
@@ -1035,11 +1065,71 @@ def check_safari(rig):
        "safari battle: kind 'wild', safari True, battle_type 0x20, battle_party_slot() None (no mon sent out)")
 
 
+def check_egg(rig):
+    """A real egg from the Day Care man (the game's Daycare_GiveEggToPlayer; RAM: Daycare.offspringPersonality
+    set = "an egg is waiting"), then a real hatch (RAM: the egg's cycles 0 + Day Care step counter 254)."""
+    rig.load("pt_sl_daycare.dsst")
+    pm, d = rig.pm, rig.d
+    dc = body(pm) + P.PAGE_DAYCARE
+    d.w32(dc + 2 * P.DAYCARE_MON_SIZE, 0x12345678)          # Daycare.offspringPersonality
+    rig.step("down", 7)                                      # out of the Day Care: Solaceon Town (553, 646)
+    rig.settle()
+    rig.step("down", 2)
+    rig.step("right", 1)                                     # facing the Day Care man at (555, 648)
+    n0 = pm.party_count()
+    for _ in range(12):
+        if pm.party_count() > n0:
+            break
+        rig.press("a", 50)
+    for _ in range(20):
+        if pm.is_safe():
+            break
+        rig.press("b", 40)
+    rig.settle()
+    clean, egg_ok = 0, True
+    for _ in range(120):
+        p = pm.party_checked()
+        if p is not None:
+            clean += 1
+            egg_ok = egg_ok and P.party_section_ok(p[-1])
+        d.run(1)
+    party = party_infos(pm)
+    egg = party[-1]
+    sec = P._xor16(pm.party_checked()[-1][P.BOX_MON_SIZE:], 0x12345678) if pm.party_checked() else b""
+    ok(pm.party_count() == n0 + 1 and egg["egg"] and egg["key"].startswith("12345678") and egg["level"] == 1
+       and egg["hp"] > 0 and clean > 0 and egg_ok,
+       "the Day Care man's EGG (PID = offspringPersonality): party_section_ok() (level 1, HP %d/%d), party_checked() "
+       "clean on %d of 120 frames, mon_info egg True" % (struct.unpack_from("<H", sec, 6)[0] if sec else -1,
+                                                         struct.unpack_from("<H", sec, 8)[0] if sec else -1, clean))
+    while pm.party_checked() is None:
+        d.run(1)
+    recs = pm.party_checked()
+    pk = pk4.PK4(pk4.decrypt(recs[-1]))
+    pk.friendship = 0                                        # egg cycles left
+    write_party(rig, recs[:-1] + [pk.encrypted()])
+    d.w8(dc + 2 * P.DAYCARE_MON_SIZE + 4, 254)              # Daycare.stepCounter: one step to the next cycle
+    for _ in range(6):
+        if not rig.step("left" if _ % 2 else "right"):
+            break
+    for _ in range(60):
+        if pm.is_safe():
+            break
+        rig.press("a", 60) if not rig.yes_no_shown() else rig.press("b", 60)
+    for _ in range(20):
+        if pm.is_safe():
+            break
+        rig.press("b", 40)
+    rig.settle()
+    hatched = party_infos(pm)[-1]
+    ok(not hatched["egg"] and hatched["dex"] == egg["dex"] and hatched["key"] == egg["key"],
+       "the egg hatched (real hatch scene): species %d, mon_key unchanged (%s)" % (hatched["dex"], hatched["key"]))
+
+
 # ---------------------------------------------------------------------------------------------------------
 SECTIONS = [("areas", check_areas), ("tutorial", check_tutorial), ("wild", check_wild), ("catch", check_catch),
             ("trainer", check_trainer), ("faint", check_faint), ("blackout", check_blackout),
             ("party6", check_party6), ("boxmoves", check_boxmoves), ("keys", check_keys),
-            ("daycare", check_daycare), ("double", check_double), ("evolve", check_evolve),
+            ("daycare", check_daycare), ("egg", check_egg), ("double", check_double), ("evolve", check_evolve),
             ("safari", check_safari), ("gift", check_gift), ("hof", check_hof)]
 
 

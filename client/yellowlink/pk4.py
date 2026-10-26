@@ -511,8 +511,10 @@ def nature_mult(nature: int, stat: int) -> int:
 
 
 def calc_stats(pk: PK4, rom, level: int | None = None) -> list:
-    """Pokemon_CalcStats: [maxhp, atk, def, speed, spatk, spdef]."""
-    base = rom.base_stats(pk.species)
+    """Pokemon_CalcStats: [maxhp, atk, def, speed, spatk, spdef]. Uses the base stats of the mon's FORM (Deoxys,
+    Wormadam, Giratina Origin, Shaymin Sky, Rotom appliances) when the ROM data knows forms."""
+    form_stats = getattr(rom, "form_base_stats", None)
+    base = form_stats(pk.species, pk.form) if form_stats else rom.base_stats(pk.species)
     lv = level if level is not None else pk.level(rom)
     iv, ev = pk.ivs, pk.evs
     out = []

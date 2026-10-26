@@ -1538,6 +1538,8 @@ class App(ChallengeMixin, TradeMixin):
 
     def _pause_ds_audio(self, paused):
         """Around anything that stops the main loop (file pickers, report window): no looping sound."""
+        if not paused and getattr(self, "_ds_chal_paused", False):
+            return                       # the Soul Link is still waiting for the partner: stay silent
         if self.nds is not None and not self.nds.closed:
             try:
                 self.nds.pause_audio(paused)

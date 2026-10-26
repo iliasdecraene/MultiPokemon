@@ -498,6 +498,8 @@ def _game_tip(app, form, g) -> str:
         return f"Add {title} in Regions first" + (" (v1.0)." if g == "crystal" else ".")
     e = next((x for x in app.roster if x.get("uid") == form["uid"]), {}) or {}
     if g not in ("yellow", "crystal") and g in (e.get("games") or []) and not e.get("challenge_games"):
+        if "challenge_games" not in e:            # the server doesn't send it at all: it's the server that's old
+            return f"The server needs updating for a {title} Soul Link (ask the host)."
         return f"{form['name']} needs to update YellowLink (press U) for a {title} Soul Link."
     return f"{form['name']} doesn't have {title} added" + (" (v1.0)." if g == "crystal" else ".")
 

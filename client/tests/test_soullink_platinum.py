@@ -29,6 +29,7 @@ TID, SID = 33356, 2998
 class FakeBus:
     def __init__(self):
         self.mem = bytearray(0x400000)
+        self.frame = 0                      # like ds.DS.frame / NDSCore.frame_count
 
     def read(self, a, n):
         return bytes(self.mem[a - RAM0:a - RAM0 + n])
@@ -53,6 +54,14 @@ class FakeBus:
 
     def w32(self, a, v):
         struct.pack_into("<I", self.mem, a - RAM0, v & 0xFFFFFFFF)
+
+
+def stable(pm):
+    """Two frames of the referee's observe_stable() with nothing changing (forced moves need that)."""
+    for _ in range(2):
+        pm.observe_stable()
+        pm.m.frame += 1
+    return pm
 
 
 def mon(i, species=387, level=10, **kw):
@@ -167,7 +176,8 @@ def test_battle_info_wild():
     info = pm.battle_info()
     pid = struct.unpack_from("<I", wild)[0]
     assert info == {"kind": "wild", "dex": 396, "shiny": False, "safari": False, "contest": False, "level": 4,
-                    "battle_type": 0, "pid": pid, "key": pk4.mon_key(wild), "map": 343, "others": []}
+                    "battle_type": 0, "pid": pid, "key": pk4.mon_key(wild), "map": 343, "others": [],
+                    "keys": [pk4.mon_key(wild)], "dexes": [396]}
     end_battle(bus)
     assert pm.battle_info() is None
 
@@ -201,10 +211,16 @@ def test_battle_info_double_and_trainer():
                  partner=[party_rec(native(species=113, pid=99, tid=1, sid=2, level=20))])
     info = pm.battle_info()
     assert info["kind"] == "wild" and info["dex"] == 399 and info["others"] == [396]
+    assert info["keys"] == [pk4.mon_key(a), pk4.mon_key(b)] and info["dexes"] == [399, 396] and info["key"] == \
+        pk4.mon_key(a)
     start_battle(bus, pm, P.BATTLE_TYPE_TRAINER, [party_rec(mon(70, species=399, level=5)),
                                                   party_rec(mon(71, species=403, level=5))])
     info = pm.battle_info()
-    assert info["kind"] == "trainer" and info["dex"] == 399 and info["others"] == []
+    assert info["kind"] == "trainer" and info["dex"] == 399 and info["others"] == [] and info["dexes"] == [399]
+    bad = bytearray(party_rec(mon(72, species=399)))               # unreadable this frame -> None, not the next mon
+    bad[40] ^= 1
+    start_battle(bus, pm, 0, [bytes(bad)], enemies2=[b])
+    assert pm.battle_info() is None and pm.battle_kind() == "wild"
 
 
 def test_battle_party_slot_by_pid_and_switch():
@@ -359,7 +375,7 @@ def test_move_party_to_box_restores_pp_and_shifts():
     recs[1] = pk.encrypted()
     bus, pm = world(recs)
     pm.write_box_slot(0, 0, mon(20))
-    assert pm.move_party_to_box(1)
+    assert stable(pm).move_party_to_box(1)
     assert pm.party_count() == 3 and pm.party_raw() == [recs[0], recs[2], recs[3]]
     assert pm.read(pm.save_body() + P.PAGE_PARTY + 8 + 3 * 236, 236) == pk4.EMPTY_PARTY
     box = pm.current_box_records()
@@ -372,25 +388,53 @@ def test_move_party_to_box_restores_pp_and_shifts():
 def test_move_party_to_box_refusals():
     recs = [party_rec(mon(i)) for i in range(3)]
     bus, pm = world(recs[:1])
-    assert not pm.move_party_to_box(0) and not pm.move_party_to_box(5)
+    assert not stable(pm).move_party_to_box(0) and not stable(pm).move_party_to_box(5)
     set_party(pm, [recs[0], party_rec(mon(5), hp=0), party_rec(mon(6, egg=True))])
-    assert not pm.move_party_to_box(0)                            # nobody else could fight
-    assert pm.move_party_to_box(1) and pm.party_count() == 2      # a fainted one can go
+    assert not stable(pm).move_party_to_box(0)                            # nobody else could fight
+    assert stable(pm).move_party_to_box(1) and pm.party_count() == 2      # a fainted one can go
     mail = pk4.PK4(pk4.decrypt(recs[1]))
     mail.item = 137
     set_party(pm, [recs[0], mail.encrypted(), recs[2]])
-    assert not pm.move_party_to_box(1)
+    assert not stable(pm).move_party_to_box(1)
     capsule = pk4.PK4(pk4.decrypt(recs[1]))
     capsule.d[0x8D] = 3
     set_party(pm, [recs[0], capsule.encrypted(), recs[2]])
-    assert not pm.move_party_to_box(1)
+    assert not stable(pm).move_party_to_box(1)
     bad = bytearray(recs[1])
     bad[40] ^= 0xFF                                               # mid-update: no forced move
     set_party(pm, [recs[0], bytes(bad), recs[2]])
-    assert not pm.move_party_to_box(0)
+    assert not stable(pm).move_party_to_box(0)
     pm_norom = P.PlatinumMemory(bus)
     with pytest.raises(RuntimeError):
         pm_norom.move_party_to_box(0)
+
+
+def test_forced_moves_need_a_state_seen_on_an_earlier_frame():
+    recs = [party_rec(mon(i)) for i in range(3)]
+    bus, pm = world(recs)
+    pm.write_box_slot(0, 0, mon(20))
+    assert not pm.move_party_to_box(1) and pm.party_count() == 3      # first look: only recorded
+    assert not pm.move_party_to_box(1) and pm.party_count() == 3      # same frame again: no evidence
+    bus.frame += 1
+    assert pm.move_party_to_box(1) and pm.party_count() == 2          # identical on a later frame: done
+    bus.frame += 1
+    assert not pm.move_box_to_party(0)                               # state just changed: wait
+    pm.observe_stable()
+    bus.frame += 1
+    pm.write_box_slot(0, 5, mon(21))                                 # the game changed something meanwhile
+    assert not pm.move_box_to_party(0) and pm.party_count() == 2
+    bus.frame += 1
+    assert pm.move_box_to_party(0) and pm.party_count() == 3
+    # observe_stable() is what the referee's view calls each check; the move then works at once
+    bus.frame += 1
+    pm.observe_stable()
+    assert not pm.observe_stable()                                   # same frame
+    bus.frame += 1
+    assert pm.observe_stable() and pm.move_party_to_box(0)
+    d = bytearray(pm.party_raw()[0])                                 # mid-update -> never stable
+    d[40] ^= 1
+    set_party(pm, [bytes(d)] + pm.party_raw()[1:])
+    assert not stable(pm).observe_stable()
 
 
 def test_move_party_to_box_full_box_goes_to_next_and_switches():
@@ -400,13 +444,13 @@ def test_move_party_to_box_full_box_goes_to_next_and_switches():
     for i in range(30):
         pm.write_box_slot(17, i, mon(100 + i))
     pm.write_box_slot(0, 0, mon(200))
-    assert pm.move_party_to_box(2)
+    assert stable(pm).move_party_to_box(2)
     assert pm.current_box() == 0 and [pk4.mon_key(r) for r in pm.current_box_records()] == \
         [pk4.mon_key(mon(200)), pk4.mon_key(recs[2])]
     for b in range(18):
         for i in range(30):
             pm.write_box_slot(b, i, mon(1000 + b * 30 + i))
-    assert not pm.move_party_to_box(1) and pm.party_count() == 2
+    assert not stable(pm).move_party_to_box(1) and pm.party_count() == 2
 
 
 def test_move_party_to_box_shaymin_land_form():
@@ -414,7 +458,7 @@ def test_move_party_to_box_shaymin_land_form():
     sky.form = 1
     recs = [party_rec(mon(2)), pk4.to_party(sky.box_bytes(), ROM)]
     bus, pm = world(recs)
-    assert pm.move_party_to_box(1)
+    assert stable(pm).move_party_to_box(1)
     assert pk4.PK4(pk4.decrypt(pm.current_box_records()[0])).form == 0
 
 
@@ -423,13 +467,13 @@ def test_move_box_to_party():
     bus, pm = world(recs)
     pm.write_box_slot(0, 4, mon(30, level=12))
     pm.write_box_slot(0, 9, mon(31, level=15))
-    assert pm.move_box_to_party(1)
+    assert stable(pm).move_box_to_party(1)
     assert pm.party_count() == 3 and pm.party_raw()[2] == pk4.to_party(mon(31, level=15), ROM)
     assert pm.box_raw(0)[9] == pk4.EMPTY_BOX and [pk4.mon_key(r) for r in pm.current_box_records()] == \
         [pk4.mon_key(mon(30))]
-    assert not pm.move_box_to_party(1) and not pm.move_box_to_party(-1)
+    assert not stable(pm).move_box_to_party(1) and not stable(pm).move_box_to_party(-1)
     set_party(pm, [party_rec(mon(i)) for i in range(6)])
-    assert not pm.move_box_to_party(0)
+    assert not stable(pm).move_box_to_party(0)
 
 
 def test_daycare_records():
@@ -442,6 +486,10 @@ def test_daycare_records():
     assert pm.daycare_records() == [mon(7)]
     bus.write(dc, mon(8))
     assert pm.daycare_records() == [mon(8), mon(7)]
+    bad = bytearray(mon(8))
+    bad[50] ^= 1                                                   # mid-decryption / corrupt: "unknown"
+    bus.write(dc, bytes(bad))
+    assert pm.daycare_records() is None
 
 
 # --- keys / info / areas ---------------------------------------------------------------------------------------
@@ -478,6 +526,43 @@ def test_areas():
     assert all(len(v) == 1 or a in v for a, v in labels.items() if a != "lost_tower")
 
 
+def test_area_keys_fit_the_server():
+    import re
+    server = os.path.join(os.path.dirname(__file__), "..", "..", "server", "yellowlink_server", "challenges.py")
+    pattern = re.search(r'AREA_RE = re.compile\(r"(.+?)"\)', open(server, encoding="utf-8").read()).group(1)
+    area_re = re.compile(pattern)
+    assert all(area_re.match(a) for a in platinum_areas.AREAS)
+    assert all(len(a) <= 37 for a in platinum_areas.AREAS)           # room for a shiny-clause "*nn" suffix
+    assert P.area_of(352) == "unused_eterna_gate_route_206"
+
+
+class FormRom:
+    """FakeRom + form base stats (like ndsrom.PlatinumData.form_base_stats)."""
+    def __getattr__(self, name):
+        return getattr(ROM, name)
+
+    def form_base_stats(self, dex, form=0):
+        if dex == P.SPECIES_SHAYMIN and form == 1:
+            return (100, 103, 75, 127, 120, 75)
+        return ROM.base_stats(dex)
+
+
+def test_calc_stats_uses_the_form():
+    land = pk4.PK4(pk4.decrypt(mon(1, species=P.SPECIES_SHAYMIN, level=50)))
+    sky = pk4.PK4(land.plain())
+    sky.form = 1
+    rom = FormRom()
+    assert pk4.calc_stats(land, rom, 50) == pk4.calc_stats(land, ROM, 50)
+    st = pk4.calc_stats(sky, rom, 50)
+    assert st != pk4.calc_stats(land, rom, 50)
+    iv, ev, nat = sky.ivs, sky.evs, sky.nature
+    spd = (2 * 127 + iv[3] + ev[3] // 4) * 50 // 100 + 5
+    m = pk4.nature_mult(nat, 3)
+    assert st[3] == (spd * 110 // 100 if m > 0 else spd * 90 // 100 if m < 0 else spd)
+    party = pk4.PK4(pk4.decrypt(pk4.to_party(sky.box_bytes(), rom)))
+    assert party.stats == st and party.hp == st[0]
+
+
 # --- real ROM data ---------------------------------------------------------------------------------------------
 @pytest.mark.skipif(not os.path.exists(PT_ROM), reason="needs dev/states/platinum.nds")
 def test_real_rom_withdraw_and_names():
@@ -485,7 +570,24 @@ def test_real_rom_withdraw_and_names():
     bus, pm = world([party_rec(mon(1))], rom=rom)
     starly = native(species=396, pid=0xBEEF, tid=TID, sid=SID, level=4)
     pm.write_box_slot(0, 0, starly)
-    assert pm.move_box_to_party(0)
+    assert stable(pm).move_box_to_party(0)
     p = pk4.PK4(pk4.decrypt(pm.party_raw()[1]))
     assert p.species == 396 and p.party_level == p.level(rom) and p.hp == p.stats[0] > 0
     assert P.area_name("mt_coronet") == rom.location_name(50) == "Mt. Coronet"
+
+
+@pytest.mark.skipif(not os.path.exists(PT_ROM), reason="needs dev/states/platinum.nds")
+@pytest.mark.parametrize("dex,form,index,base", [
+    (386, 0, 386, (50, 150, 50, 150, 150, 50)), (386, 1, 496, (50, 180, 20, 150, 180, 20)),
+    (386, 3, 498, (50, 95, 90, 180, 95, 90)), (413, 2, 500, (60, 69, 95, 36, 69, 95)),
+    (487, 1, 501, (150, 120, 100, 90, 120, 100)), (492, 1, 502, (100, 103, 75, 127, 120, 75)),
+    (479, 5, 507, (50, 65, 107, 86, 105, 107)), (479, 6, 479, (50, 50, 77, 91, 95, 77)), (25, 1, 25, None)])
+def test_real_rom_form_personal_entries(dex, form, index, base):
+    rom = ndsrom.platinum(PT_ROM)
+    assert rom.personal_index(dex, form) == index
+    assert rom.form_base_stats(dex, form) == (base or rom.base_stats(dex))
+    pk = pk4.PK4(pk4.decrypt(native(species=dex, pid=0x4321, tid=TID, sid=SID, level=40)))
+    pk.form = form
+    st = pk4.calc_stats(pk, rom, 40)
+    assert st[1] == pk4.calc_stats(pk, type("R", (), {"base_stats": lambda self, d: rom.form_base_stats(dex, form)})(),
+                                   40)[1]

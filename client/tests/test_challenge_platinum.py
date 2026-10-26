@@ -25,8 +25,8 @@ def mk(species, pid, tid=33356, sid=2998, nick="", hp=20, egg=False, party=True)
     pk.nickname_codes = g4_encode(nick or "MON", 11)
     if egg:
         pk.is_egg = True
-    if party:
-        pk.hp = hp
+    if party:                       # a party section the game would accept (platinum.party_section_ok)
+        pk.party_level, pk.stats, pk.hp = 5, [30, 10, 10, 10, 10, 10], hp
     return pk.encrypted()
 
 
@@ -86,7 +86,8 @@ class FakePM:
         return self.pc
 
     def party_checked(self):
-        if not self.party_ok or not all(platinum.record_checksum_ok(r) for r in self.party):
+        if not self.party_ok or not all(platinum.record_checksum_ok(r) and platinum.party_section_ok(r)
+                                        for r in self.party):
             return None
         return list(self.party)
 
@@ -118,7 +119,7 @@ class FakePM:
             return False
         self.moved.append(("party", index))
         rec = pk4.PK4(pk4.decrypt(self.box.pop(index)) + bytes(100))
-        rec.hp = 20
+        rec.party_level, rec.stats, rec.hp = 5, [30, 10, 10, 10, 10, 10], 20
         self.party.append(rec.encrypted())
         return True
 

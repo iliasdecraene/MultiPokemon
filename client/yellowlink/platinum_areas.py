@@ -354,7 +354,7 @@ AREAS = (
     'route_205',  # 349 ROUTE_205_NORTH (label route_205)
     'route_206',  # 350 ROUTE_206 (label route_206)
     'route_206',  # 351 ROUTE_206_CYCLING_ROAD_SOUTH_GATE (label route_206)
-    'unused_gate_between_eterna_city_route_206',  # 352 UNUSED_GATE_BETWEEN_ETERNA_CITY_ROUTE_206 (label mystery_zone)
+    'unused_eterna_gate_route_206',  # 352 UNUSED_GATE_BETWEEN_ETERNA_CITY_ROUTE_206 (label mystery_zone)
     'route_207',  # 353 ROUTE_207 (label route_207)
     'route_208',  # 354 ROUTE_208 (label route_208)
     'route_208',  # 355 ROUTE_208_HOUSE (label route_208)
@@ -718,8 +718,8 @@ AREA_NAMES = {
     'unknown_409': 'Unknown 409',
     'unknown_470': 'Unknown 470',
     'unknown_473': 'Unknown 473',
+    'unused_eterna_gate_route_206': 'Unused gate (Eterna City - Route 206)',
     'unused_fight_area_house': 'Unused Fight Area House',
-    'unused_gate_between_eterna_city_route_206': 'Unused Gate Between Eterna City Route 206',
     'valley_windworks': 'Valley Windworks',
     'valor_cavern': 'Valor Cavern',
     'valor_lakefront': 'Valor Lakefront',

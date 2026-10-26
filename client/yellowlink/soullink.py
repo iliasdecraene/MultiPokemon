@@ -243,6 +243,7 @@ class Referee:
     SAFE_EVERY = 6            # frames between light checks while standing in the overworld
     SCAN_EVERY = 600          # frames between full PC scans (release/rollback detection)
     END_FRAMES = 8            # frames without battle data before a battle counts as over
+    LOST = (2, 3)             # battle "result" values the game whites out on (Platinum BATTLE_RESULT_LOSE / DRAW)
     HOLD_AFTER = 300          # frames to keep checks off after a party-hiding event (contest) ends
 
     def __init__(self, sl: SoulLink, view, send, notify):
@@ -295,6 +296,8 @@ class Referee:
         if self.battle is not None:
             if info is not None:
                 self.battle["gone"] = 0
+                if info.get("result"):                # the game's own outcome (Platinum), set on its last frames
+                    self.battle["result"] = info["result"]
                 self._battle_tick()
             else:                                    # over once "no battle" holds for a few frames
                 self.battle["gone"] = self.battle.get("gone", 0) + 1
@@ -318,12 +321,31 @@ class Referee:
         self.scan_due = True
 
     # --- battles ---------------------------------------------------------------------------------------------
+    @staticmethod
+    def _wild(info) -> list:
+        """The wild mons of a battle as [(key or None, dex, shiny)]: Platinum's battle_info lists every one
+        (`keys`/`dexes`, a double battle has two); Yellow/Crystal only give the one `dex` (no key)."""
+        dexes = list(info.get("dexes") or [info.get("dex", 0)])
+        keys = list(info.get("keys") or ([info["key"]] if info.get("key") else []))
+        shinies = list(info.get("shinies") or [bool(info.get("shiny"))])
+        return [(keys[i] if i < len(keys) else None, d, bool(shinies[i]) if i < len(shinies) else False)
+                for i, d in enumerate(dexes)]
+
     def _battle_start(self, info, resumed=False):
         area = self.view.area()
+        before = self._present_keys()
+        stored = getattr(self.view, "stored_keys", None)
+        if stored is not None:
+            # every mon the save already holds: a catch with a full party and a full current box lands in another
+            # box (Platinum), next to older mons that must not be taken for the catch
+            before |= stored() or set()
         b = {"info": info, "area": area, "mode": "none", "fainted": set(), "party": None, "over": False,
-             "before": self._present_keys()}
+             "before": before, "wild": self._wild(info)}
         self.battle = b
         if info.get("kind") != "wild":
+            return
+        if len(b["wild"]) > 1:
+            self._double_start(b, resumed)
             return
         if resumed and self.sl.mine()["enc"].get(area, {}).get("status") == "open":
             b["mode"] = "count"                      # the run was paused/reloaded in this very encounter: go on
@@ -349,6 +371,35 @@ class Referee:
             b["mode"] = "count"
             self.send({"t": "enc", "area": area, "dex": info.get("dex", 0), "status": "open"})
             self.notify(f"First encounter in {name}! Catch it to link it with your partner's.", "good")
+
+    def _double_start(self, b, resumed):
+        """Two wild mons (Platinum, walking with a partner): only one can be caught. The encounter is the first one
+        the clauses allow; what counts is settled at the end with the mon actually caught (_settle_double)."""
+        area, wild = b["area"], b["wild"]
+        if resumed and self.sl.mine()["enc"].get(area, {}).get("status") == "open":
+            b["mode"] = "count"
+            return
+        name = self.view.area_name(area)
+        rules_on = self.sl.mine()["balls"] or self.view.has_balls()
+        allowed = [w for w in wild if not (self.sl.rules["dupes"] and self.sl.is_dupe(w[1]))]
+        if b["info"].get("contest") or not rules_on:
+            b["mode"] = "free"
+        elif self.sl.rules["shiny"] and any(w[2] for w in wild):
+            b["mode"] = "shiny"                      # decided by the mon caught (rare enough not to pre-log)
+            self.notify("A shiny! Shiny clause: catch it - it doesn't use up this area.", "good")
+        elif self.sl.area_used(area):
+            b["mode"] = "illegal"
+            self.tell_once(f"used:{area}", f"You already had your encounter in {name} - you can't keep this one.")
+        elif not allowed:
+            b["mode"] = "illegal"
+            self.send({"t": "enc", "area": area, "dex": wild[0][1], "status": "skipped", "why": "dupe"})
+            self.notify(f"Dupes clause: you already caught these families. This doesn't count - "
+                        f"your next encounter in {name} does.")
+        else:
+            b["mode"] = "count"
+            b["open_dex"] = allowed[0][1]
+            self.send({"t": "enc", "area": area, "dex": allowed[0][1], "status": "open"})
+            self.notify(f"First encounter in {name}! Catch one to link it with your partner's.", "good")
 
     def _battle_tick(self):
         b = self.battle
@@ -391,15 +442,23 @@ class Referee:
                 self._kill(m, "fainted")
         rules_on = self.sl.mine()["balls"] or self.view.has_balls()
         living = [m for m in party if not m.egg]
-        if rules_on and not held and living and all(m.hp == 0 or m.key in b["fainted"] for m in living):
+        if b.get("result") is not None:
+            # the game's own verdict: it whites out on a lost (or drawn) battle only - in a partner battle all your
+            # Pokémon can faint while the partner wins (no white-out; the deaths above still count)
+            lost = b["result"] in self.LOST
+        else:
+            lost = bool(living) and all(m.hp == 0 or m.key in b["fainted"] for m in living)
+        if rules_on and not held and lost:
             self.send({"t": "blackout"})
             self.notify("You blacked out. The Soul Link is over...", "bad")
             self.ended = True
-        dex = b["info"].get("dex", 0)
         new = [m for m in party + (self.view.box() or []) if m.key not in b["before"]]
-        caught = next((m for m in new if m.dex == dex), None)
+        caught, wild = self._find_catch(new, b["wild"])
+        dex = wild[1] if wild else b["info"].get("dex", 0)
         area, mode = b["area"], b["mode"]
-        if mode == "count":
+        if len(b["wild"]) > 1 and b["info"].get("kind") == "wild":
+            self._settle_double(b, caught, wild)
+        elif mode == "count":
             if caught:
                 self.send({"t": "enc", "area": area, "dex": dex, "status": "caught", "key": caught.key})
             else:
@@ -418,6 +477,47 @@ class Referee:
         self.last_party = party
         self.scan_due = True
         return True
+
+    @staticmethod
+    def _find_catch(new, wild):
+        """(mon, wild entry) of the mon caught in this battle, or (None, None). By key when the game gives the wild
+        mons' keys (Platinum: PID + OT ids don't change on capture), else by species (Yellow/Crystal: one mon)."""
+        keyed = [w for w in wild if w[0]]
+        if keyed:
+            for m in new:
+                for w in keyed:
+                    if m.key == w[0]:
+                        return m, w
+            return None, None
+        for m in new:
+            for w in wild:
+                if m.dex == w[1]:
+                    return m, w
+        return None, None
+
+    def _settle_double(self, b, caught, wild):
+        area, mode, sl = b["area"], b["mode"], self.sl
+        dupe = caught is not None and sl.rules["dupes"] and sl.is_dupe(wild[1])
+        if mode == "count":
+            if caught and not dupe:
+                self.send({"t": "enc", "area": area, "dex": wild[1], "status": "caught", "key": caught.key})
+                return
+            self.send({"t": "enc", "area": area, "dex": b.get("open_dex", 0), "status": "failed"})
+            self.notify(f"Missed the encounter in {self.view.area_name(area)}. "
+                        f"Your partner's catch there can't be used.", "bad")
+            if caught:                              # caught the one the dupes clause doesn't allow
+                self.send({"t": "dead", "key": caught.key, "why": "not first encounter"})
+        elif not caught:
+            return
+        elif mode == "shiny" and wild[2]:
+            n = sum(1 for a in sl.mine()["enc"] if a.startswith(area + "*"))
+            self.send({"t": "enc", "area": f"{area}*{n + 1}"[:40], "dex": wild[1], "status": "caught",
+                       "key": caught.key, "shiny": True})
+        elif mode == "free" or (mode == "shiny" and not sl.area_used(area) and not dupe):
+            self.send({"t": "enc", "area": area, "dex": wild[1], "status": "caught", "key": caught.key})
+        else:
+            self.send({"t": "dead", "key": caught.key, "why": "not first encounter"})
+            self.notify("That catch doesn't count - it goes to the PC and stays there.", "bad")
 
     # --- overworld checks ------------------------------------------------------------------------------------
     def _present_keys(self) -> set:

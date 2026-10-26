@@ -11,6 +11,10 @@ from . import crystal, pcdb, text
 from .soullink import MonInfo
 
 log = logging.getLogger("yellowlink.challenge")
+DTO_RESULT_MASK = 0x14      # Platinum FieldBattleDTO.resultMask (pret field_battle_data_transfer.h; written on the
+                            # battle's last ~7 frames, 5 = fled, 4 = caught, 1 = won, 2 = lost, 3 = draw - checked
+                            # on the ROM)
+BAD_SLOT_SCANS = 3          # a PC slot unreadable on this many full scans in a row is logged (a real Bad Egg)
 
 
 class ChallengeView:
@@ -27,19 +31,29 @@ class ChallengeView:
             self.codec = platinum_pc.Gen4PC(self.g, None)
             self._key = getattr(self.G, "mon_key", None) or pk4.mon_key
             self._box_index = []         # box() position -> index in current_box_records() (unreadable ones skipped)
+            self.stored_keys = self._stored_keys_ds     # (referee: a catch can land in any box)
+            self._bad_slot = (None, 0)   # (slot, full scans in a row it was unreadable)
         else:
             self.codec = crystal.Gen2PC(app.pyboy.memory, app.rom) if self.gen2 else \
                 pcdb.Gen1PC(app.pyboy.memory, app.rom)
+        self._move_error_logged = False
 
     # --- state -------------------------------------------------------------------------------------------
     def ready(self) -> bool:
         return self.g.in_game()
 
     def safe(self) -> bool:
-        return self.g.is_safe()
+        ok = self.g.is_safe()
+        if ok and self.ds and hasattr(self.g, "observe_stable"):
+            self.g.observe_stable()     # Platinum: the forced moves only write what read the same on an earlier frame
+        return ok
 
     def battle(self):
-        return self.g.battle_info()
+        info = self.g.battle_info()
+        if info is not None and self.ds and "result" not in info:
+            dto = self.g.battle_dto() if hasattr(self.g, "battle_dto") else None
+            info["result"] = self.g.r32(dto + DTO_RESULT_MASK) if dto else 0     # the game's own outcome
+        return info
 
     def battle_slot(self):
         return self.g.battle_party_slot()
@@ -179,23 +193,54 @@ class ChallengeView:
         if party is None:
             return None
         keys = {m.key for m in party}
-        for box in self.codec.read_slots():
-            for rec in box:
+        for b, box in enumerate(self.codec.read_slots()):
+            for s, rec in enumerate(box):
                 kind, rec = self.ppc.normalise(rec)
-                if kind == "bad":
-                    return None                          # can't tell which mon that is: try again later
+                if kind == "bad":                        # can't tell which mon that is: try again later
+                    n = self._bad_slot[1] + 1 if self._bad_slot[0] == (b, s) else 1
+                    self._bad_slot = ((b, s), n)
+                    if n == BAD_SLOT_SCANS:
+                        log.warning("soul link: PC box %d slot %d stays unreadable (a Bad Egg?) - release/rollback "
+                                    "detection is off while it's there", b + 1, s + 1)
+                    return None
                 if kind == "mon":
                     keys.add(self._key(rec))
-        for rec in self.g.daycare_records():
+        self._bad_slot = (None, 0)
+        day = self.g.daycare_records()
+        if day is None:
+            return None                                  # a Day Care slot can't be read right now
+        for rec in day:
             m = self._pk4_info(rec, party=len(rec) == self.pk4.PARTY_SIZE)
             if m is None:
                 return None
             keys.add(m.key)
         return keys
 
+    def _stored_keys_ds(self):
+        """Keys of every mon in the 18 Platinum boxes (unreadable slots left out)."""
+        keys = set()
+        try:
+            for box in self.codec.read_slots():
+                for rec in box:
+                    kind, rec = self.ppc.normalise(rec)
+                    if kind == "mon":
+                        keys.add(self._key(rec))
+        except Exception:  # noqa: BLE001
+            log.exception("reading the PC boxes failed")
+        return keys
+
     # --- forced moves --------------------------------------------------------------------------------------
+    def _move(self, fn, index):
+        try:
+            return fn(index)
+        except RuntimeError as e:                        # e.g. Platinum without its ROM data: can't rebuild
+            if not self._move_error_logged:
+                self._move_error_logged = True
+                log.error("soul link: forced PC move impossible (%s) - the player is asked to do it", e)
+            return False
+
     def to_box(self, slot: int) -> bool:
-        ok = self.g.move_party_to_box(slot)
+        ok = self._move(self.g.move_party_to_box, slot)
         log.info("soul link: party slot %d -> PC: %s", slot, ok)
         return ok
 
@@ -204,6 +249,6 @@ class ChallengeView:
             if not 0 <= index < len(self._box_index):
                 return False
             index = self._box_index[index]
-        ok = self.g.move_box_to_party(index)
+        ok = self._move(self.g.move_box_to_party, index)
         log.info("soul link: PC slot %d -> party: %s", index, ok)
         return ok

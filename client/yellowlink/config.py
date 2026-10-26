@@ -291,14 +291,19 @@ class Config(dict):
 
     def challenge_dir(self, cid: str) -> Path:
         """A run's own save folder. Challenges belong to the server they're played on (record, partner), not to
-        the main save it may share (SPEC.md section 8): always the server's OWN folder, so sharing or un-sharing a
-        save never hides a run. A run a 0.7.2 client put in the shared save's folder is still found there."""
+        the main save it may share (SPEC.md section 8): new runs go in the server's OWN folder. Clients up to
+        0.7.3 put a sharing server's runs in the shared save's folder; such a run is found wherever it is (the
+        app folder or any servers/<id>/ folder - run ids are unique), also after the save was un-shared."""
         name = "".join(ch for ch in cid if ch.isalnum() or ch in "-_")[:40]
         d = self._folder_path(self.active_server["id"]) / "challenges" / name
-        if not d.exists():
-            legacy = self.data_dir / "challenges" / name
-            if legacy != d and legacy.exists():
-                return legacy
+        if not d.exists() and name:
+            old = [self.data_dir / "challenges" / name, app_dir() / "challenges" / name]
+            servers = app_dir() / "servers"
+            if servers.is_dir():
+                old += sorted(p / "challenges" / name for p in servers.iterdir() if p.is_dir())
+            hit = next((p for p in old if p != d and p.is_dir()), None)
+            if hit is not None:
+                return hit
         d.mkdir(parents=True, exist_ok=True)
         return d
 

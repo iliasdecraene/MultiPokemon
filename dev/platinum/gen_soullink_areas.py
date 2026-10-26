@@ -23,6 +23,7 @@ town or route shares the area of the place it belongs to): a map's area is its l
     Crystal's Team Rocket Base override)
   * maps labelled 'Mystery Zone' (unused maps, Underground, Union Room, Colosseums, record mixing) -> one area
     each, named after the map, so nothing unrelated is grouped.
+Keys are at most 37 characters (server limit 40 incl. the referee's "*n" shiny-clause suffix).
 Names not in the ROM's location list (Lost Tower, Underground, Union Room, ...) are written here.
 """
 import json
@@ -62,13 +63,18 @@ MAP_OVERRIDES = {
     "ROUTE_209_LOST_TOWER_1F": "lost_tower", "ROUTE_209_LOST_TOWER_2F": "lost_tower",
     "ROUTE_209_LOST_TOWER_3F": "lost_tower", "ROUTE_209_LOST_TOWER_4F": "lost_tower",
     "ROUTE_209_LOST_TOWER_5F": "lost_tower",
+    "UNUSED_GATE_BETWEEN_ETERNA_CITY_ROUTE_206": "unused_eterna_gate_route_206",   # keys must stay <= 37 chars
 }
 EXTRA_NAMES = {   # areas without a location name in the ROM
     "lost_tower": "Lost Tower", "underground": "Underground", "union_room": "Union Room",
     "communication_club_colosseum_2p": "Colosseum (2 players)",
     "communication_club_colosseum_4p": "Colosseum (4 players)", "record_mixing_room": "Record Mixing Room",
     "everywhere": "Everywhere (unused)", "nothing": "Nothing (unused)",
+    "unused_eterna_gate_route_206": "Unused gate (Eterna City - Route 206)",
 }
+# the server accepts area keys matching ^[A-Za-z0-9_*-]{1,40}$ (challenges.AREA_RE); the referee appends
+# "*n" for shiny-clause catches, so generated keys stay <= 37 characters
+KEY_RE = re.compile(r"^[a-z0-9_]{1,37}$")
 
 
 def key_of(text_id):
@@ -126,6 +132,9 @@ def generate(pret=PRET, rom_path=ROM):
         out.append("    %r,  # %d %s (label %s)" % (area_key(n, key), i, n, key))
     out.append(")")
     keys = sorted(set(area_key(n, key) for _i, n, _lab, key in rows))
+    bad = [k for k in keys if not KEY_RE.match(k)]
+    if bad:
+        raise SystemExit("area keys too long / bad characters: %s" % bad)
     out.append("AREA_NAMES = {")
     for k in keys:
         if k in label_name and label_name[k] not in ("?", ""):

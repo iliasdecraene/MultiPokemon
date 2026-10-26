@@ -208,6 +208,8 @@ class PlatinumMemory:
     def __init__(self, bus, rom=None):
         self.m = bus
         self.rom = rom          # ndsrom.PlatinumData: needed only by the Soul Link forced moves (move PP, stats)
+        self._obs = None        # (frame, snapshot) of the last stable-state observation (see observe_stable)
+        self._obs_prev = None   # the one before it, from an earlier frame
 
     # raw access ------------------------------------------------------------------------------------------
     def r8(self, a):
@@ -552,7 +554,11 @@ class PlatinumMemory:
           safari   True in the Great Marsh (BATTLE_TYPE_SAFARI); contest always False
           level    the wild mon's level
         Platinum extras: battle_type (bit mask), pid, key (= mon_key the mon will have once caught: PID+TID+SID
-        don't change on capture), map (DTO mapHeaderID), others (dex of the other wild mon(s) in a double).
+        don't change on capture), map (DTO mapHeaderID), others (dex of the other wild mon(s) in a double),
+        keys / dexes (lists for ALL wild mons of the battle, first = key / dex; a trainer battle lists only its
+        first mon) - in a double the player may catch the second wild mon: match the catch by key.
+        None for a frame if a wild mon's record is being worked on right then (never seen; the DTO copies are
+        only touched while the battle starts) - like "no battle" for a frame, which the referee tolerates.
         Valid from the battle app's first frame to its last: the field builds the DTO (and the wild mon) before
         the battle starts, and every battle has a fresh DTO -> never a mon from the previous battle."""
         dto = self.battle_dto()
@@ -566,21 +572,27 @@ class PlatinumMemory:
             n = self.m.r32(party + 4) if _ptr(party) else 0
             for slot in range(min(n, 6) if battler == 1 or kind == "wild" else 0):
                 p = self._party_mon(party, slot)
-                if p is not None:
-                    mons.append(p)
-                if kind != "wild" and mons:
+                if p is None:
+                    return None                         # being worked on this very frame: read again next frame
+                mons.append(p)
+                if kind != "wild":
                     break
+        mapid = self.m.r32(dto + DTO_MAP_HEADER)
         if not mons:
             return {"kind": kind, "dex": 0, "shiny": False, "safari": False, "contest": False, "level": 0,
-                    "battle_type": bt, "pid": 0, "key": None, "map": self.m.r32(dto + DTO_MAP_HEADER), "others": []}
+                    "battle_type": bt, "pid": 0, "key": None, "map": mapid, "others": [], "keys": [], "dexes": []}
+        keys, dexes = [], []
+        for m in mons:
+            pid = struct.unpack_from("<I", m, 0)[0]
+            tid, sid = struct.unpack_from("<HH", m, 0x08 + 4)
+            keys.append("%08x%04x%04x" % (pid, tid, sid))
+            dexes.append(struct.unpack_from("<H", m, 0x08)[0])
         first = mons[0]
         pid = struct.unpack_from("<I", first, 0)[0]
         tid, sid = struct.unpack_from("<HH", first, 0x08 + 4)
-        return {"kind": kind, "dex": struct.unpack_from("<H", first, 0x08)[0],
-                "shiny": _gen4_shiny(pid, tid, sid), "safari": bool(bt & BATTLE_TYPE_SAFARI), "contest": False,
-                "level": first[0x8C], "battle_type": bt, "pid": pid, "key": "%08x%04x%04x" % (pid, tid, sid),
-                "map": self.m.r32(dto + DTO_MAP_HEADER),
-                "others": [struct.unpack_from("<H", m, 0x08)[0] for m in mons[1:]] if kind == "wild" else []}
+        return {"kind": kind, "dex": dexes[0], "shiny": _gen4_shiny(pid, tid, sid),
+                "safari": bool(bt & BATTLE_TYPE_SAFARI), "contest": False, "level": first[0x8C], "battle_type": bt,
+                "pid": pid, "key": keys[0], "map": mapid, "others": dexes[1:], "keys": keys, "dexes": dexes}
 
     def _battle_ctx(self):
         app = self._battle_app()
@@ -703,6 +715,42 @@ class PlatinumMemory:
             return True
         return self.hall_of_fame_count() > 0
 
+    # Soul Link: "the game isn't working on it" across frames -----------------------------------------------
+    def _frame(self):
+        """The emulator's frame counter (NDSCore.frame_count / ds.DS.frame) or None (fake buses in tests)."""
+        f = getattr(self.m, "frame_count", None)
+        return f if f is not None else getattr(self.m, "frame", None)
+
+    def _move_snapshot(self):
+        """(party records, current box id, current box raw slots) when the party reads clean, else None."""
+        party = self.party_checked()
+        if party is None:
+            return None
+        box = self.current_box()
+        return tuple(party), box, tuple(self.box_raw(box)) if 0 <= box < NUM_BOXES else ()
+
+    def observe_stable(self) -> bool:
+        """Call once per frame (or every few frames) while the player is safe - the referee's view does it in
+        safe(): records what the party and the current box look like and returns True when they read clean
+        (party_checked) and byte-identical to the previous observation made on an EARLIER emulated frame.
+
+        Why: the game decrypts records in place in the middle of its frame work; party_checked()'s "two reads
+        agree" happens within one paused frame, so it can't see an operation that is still going on. The forced
+        moves (move_party_to_box / move_box_to_party) only write when the state they are about to change was
+        observed identical on an earlier frame - by this method or by an earlier attempt of the move itself."""
+        snap = self._move_snapshot()
+        f = self._frame()
+        if self._obs is not None and (f is None or self._obs[0] != f):
+            self._obs_prev = self._obs
+        self._obs = (f, snap)
+        prev = self._obs_prev
+        return snap is not None and prev is not None and prev[1] == snap
+
+    def _stable_for_move(self) -> bool:
+        """True if the current party + current box equal an observation from an earlier frame. Otherwise the
+        current state is recorded and the caller returns False ("try again on a later frame")."""
+        return self.observe_stable()
+
     # Soul Link: current box + forced moves ------------------------------------------------------------------
     def _box_slots(self, box: int) -> list:
         """[(slot, normalised 136-byte record)] of the non-empty slots of a box (records the game is working on
@@ -732,9 +780,12 @@ class PlatinumMemory:
 
         False (nothing changed) if the slot doesn't exist, the party isn't readable right now, no OTHER non-egg
         party mon has HP > 0, the mon holds Mail or has a Ball Capsule (the game refuses both) or all 18
-        boxes are full."""
+        boxes are full - and also (try again on a later frame) when the party/current box weren't observed
+        identical on an earlier frame (observe_stable(); the first attempt records the state)."""
         if self.rom is None:
             raise RuntimeError("move_party_to_box needs PlatinumMemory(bus, rom) (move PP)")
+        if not self._stable_for_move():
+            return False
         party = self.party_checked()
         if party is None or not 0 <= slot < len(party) or len(party) < 2:
             return False
@@ -786,9 +837,12 @@ class PlatinumMemory:
         """Withdraw entry `box_index` of current_box_records() into the party like the box UI does
         (Pokemon_FromBoxPokemon = pk4.to_party: level from exp, stats recomputed, HP = max, no status, empty
         mail/capsule; Party_AddPokemon) and clear its box slot (BoxPokemon_Init). False if the party is full or
-        not readable right now, or the index doesn't exist. Call only while is_safe()."""
+        not readable right now, or the index doesn't exist - and (try again later) while the state isn't
+        stable across frames (see observe_stable). Call only while is_safe()."""
         if self.rom is None:
             raise RuntimeError("move_box_to_party needs PlatinumMemory(bus, rom) (stats, growth)")
+        if not self._stable_for_move():
+            return False
         party = self.party_checked()
         if party is None or len(party) >= 6:
             return False
@@ -804,9 +858,10 @@ class PlatinumMemory:
         self.write_box_slot(box, pos, pk4.EMPTY_BOX)
         return True
 
-    def daycare_records(self) -> list:
+    def daycare_records(self) -> list | None:
         """Mons left at the Solaceon Pokémon Day Care as encrypted 136-byte box records: [mon 1, mon 2], each only
-        if its slot isn't empty (Daycare = 2 x DaycareMon {BoxPokemon, DaycareMail, steps} at body+0x1654)."""
+        if its slot isn't empty (Daycare = 2 x DaycareMon {BoxPokemon, DaycareMail, steps} at body+0x1654).
+        None (not []) if a slot can't be read right now (mid-decryption, or corrupt): "unknown", skip the scan."""
         from .platinum_pc import normalise
         body = self.save_body()
         if not body:
@@ -814,6 +869,8 @@ class PlatinumMemory:
         out = []
         for i in range(2):
             kind, rec = normalise(self.m.read(body + PAGE_DAYCARE + i * DAYCARE_MON_SIZE, BOX_MON_SIZE))
+            if kind == "bad":
+                return None                             # unreadable right now (or a Bad Egg): don't guess
             if kind == "mon":
                 out.append(rec)
         return out
