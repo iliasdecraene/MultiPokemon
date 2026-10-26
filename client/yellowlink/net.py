@@ -142,6 +142,12 @@ class NetClient:
                 self.inbox.put(msg)
 
         async def writer():
+            try:
+                await _writer()
+            except websockets.exceptions.ConnectionClosed:
+                pass                      # the server closed it (e.g. wrong password, moved): the reader reports why
+
+        async def _writer():
             last_ping = 0.0
             while True:
                 try:

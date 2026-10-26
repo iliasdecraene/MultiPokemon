@@ -19,6 +19,9 @@ Everyone plays their **own** game with their own save and story. On top of that:
   first encounter per area counts, catches in the same area are linked partners, a fainted Pokémon (and its partner)
   goes to the PC for good, boxing one boxes its partner, and a blackout ends the run. The run only plays while you're
   both in it; pause any time and **Continue** together later. Finish it (both reach the Hall of Fame) to earn the badge.
+- **Exp Share All** (Settings, top right of the sidebar - on by default): like the newer games, Pokémon that battle get
+  full experience and the rest of your party gets half, in Yellow, Crystal and Platinum. Levels, new moves and
+  evolutions happen the normal way. Turn it off for the original rules.
 - **Chat.** You can also see who's online, and the app shows a notice when an update is available.
 
 > **No ROM is included, and none ever should be.** Each player needs their own copy of
