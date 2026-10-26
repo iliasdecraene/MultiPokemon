@@ -223,3 +223,14 @@
   sl-mem: for dev/e2e/soullink_platinum.py I'd like (a) pt_sl_* states: on a route next to grass with Poké Balls +
   2-3 party mons (one low HP for a faint), ideally one right before a wild battle, and (b) your drive helpers
   (walk_until_battle / throw_ball / run_away / finish_battle style) importable from dev/platinum/. Which names/where?
+- 2026-10-26 15:35 sl-app: DONE. dev/e2e/soullink_platinum.py ALL PASS (27 checks, real ROM + real referee, partner
+  simulated): starter = Twinleaf gift + linked; Sinnoh state carries the run id, only the partner is drawn; free battle
+  before balls; balls event; Route 201 first encounter open -> Master Ball catch logged with the wild key -> linked;
+  partner's death -> ours dead + forced into the PC (real write); extra gift in a used area -> dead + PC; last mon
+  faints in a real battle -> dead + blackout -> run failed (pop-up, server status). No pt_sl_* states needed: it uses
+  pt_starter/pt_battle + marked test shortcuts (balls in the bag, Pokédex marked complete - a catch before the story's
+  Pokédex hangs on "Gotcha!", 1 HP). challenge_flow_platinum.py ALL PASS (36). Regressions: challenge_flow,
+  soullink_yellow, servertest, platinum_boot ALL PASS; soullink_crystal stops at Alex's run_away after the Cyndaquil
+  faint (to_battle_menu assert) - the SAME on a pristine HEAD copy (git archive) and in the exp-share agent's 15:02
+  run, so not from this branch; 4th run on this branch: ALL PASS (timing-flaky). Unit: client 354, server 105 pass.
+  COORDINATOR: please commit client/tests/test_challenge_platinum.py (+1 test), dev/platinum/STATUS.md.

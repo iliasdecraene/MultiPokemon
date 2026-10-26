@@ -153,7 +153,10 @@ class Rig:
         return self.pm.in_battle() and px[0] > 180 and px[1] < 80 and px[2] < 80
 
     def wait_menu(self, n=3000, on=None):
-        return self.wait(self.menu_shown, n, on)
+        i = self.wait(self.menu_shown, n, on)
+        if i is not None:
+            self.run(20, on)                                # drawn a few frames before it takes input
+        return i
 
     def yes_no_shown(self):
         img = self.d.emu.screenshot()
@@ -203,11 +206,17 @@ class Rig:
 # helpers on game data
 # ---------------------------------------------------------------------------------------------------------
 def party_infos(pm):
-    return [P.mon_info(r) for r in pm.party_raw()]
+    """mon_info of the party as party_checked() reads it (None while the game is mid-update)."""
+    for _ in range(10):
+        p = pm.party_checked()
+        if p is not None:
+            return [P.mon_info(r) for r in p]
+        pm.m.run(1)
+    return None
 
 
 def party_keys(pm):
-    return [P.mon_key(r) for r in pm.party_raw()]
+    return [i["key"] for i in party_infos(pm)]
 
 
 def body(pm):
@@ -372,7 +381,309 @@ def fixtures(rig):
 
 
 # ---------------------------------------------------------------------------------------------------------
-SECTIONS = []
+# checks
+# ---------------------------------------------------------------------------------------------------------
+def check_areas(rig):
+    import gen_soullink_areas as gen
+    from yellowlink import platinum_areas as A
+    pret = os.environ.get("YL_PRET_PLATINUM", gen.PRET)
+    if os.path.isdir(pret):
+        ok(gen.generate(pret, ROM) == open(os.path.join(HERE, "..", "..", "client", "yellowlink",
+                                                        "platinum_areas.py"), encoding="utf-8").read(),
+           "platinum_areas.py = output of gen_soullink_areas.py (pret + ROM names)")
+        rows = gen.parse(pret)
+        ok(all(P.LOCATIONS[P.MAP_LOCATION[i]][0] == key for i, _n, _lab, key in rows) and len(rows) == 593,
+           "pret labels of all 593 maps = platinum.MAP_LOCATION (= the ROM's sMapHeaders, verify.py)")
+    else:
+        note("pret checkout not found (%s): generator comparison skipped" % pret)
+    labels = rig.d.read(P.MAP_HEADERS, 24 * P.NUM_MAP_HEADERS)
+    same = {}
+    for i in range(P.NUM_MAP_HEADERS):
+        same.setdefault(P.area_of(i), set()).add(labels[24 * i + 18])
+    ok(len(A.AREAS) == 593 and all(P.area_name(a) for a in A.AREAS),
+       "593 maps, every area has a name (%d areas)" % len(set(A.AREAS)))
+    expect = {342: "route_201", 343: "route_202", 411: "twinleaf_town", 415: "twinleaf_town",
+              420: "sandgem_town", 422: "sandgem_town", 437: "solaceon_town", 59: "oreburgh_city",
+              11: "jubilife_city", 207: "mt_coronet", 219: "mt_coronet", 202: "eterna_forest", 203: "eterna_forest",
+              357: "lost_tower", 356: "route_209", 504: "great_marsh", 509: "great_marsh", 187: "pokemon_league",
+              2: "underground", 466: "union_room", 345: "route_204", 346: "route_204", 362: "route_210",
+              363: "route_210", 492: "route_210", 288: "iron_island", 294: "iron_island"}
+    ok(all(P.area_of(k) == v for k, v in expect.items()),
+       "area_of: Route 201/202, Twinleaf + house, Sandgem + lab, Day Care -> Solaceon Town, Mining Museum -> "
+       "Oreburgh City, Jubilife TV -> Jubilife City, Mt. Coronet floors, Eterna Forest in/out, Lost Tower, "
+       "Great Marsh 1-6, Route 204/210 halves (+ Cafe), Iron Island floors")
+    ok(P.area_name("route_201") == "Route 201" and P.area_name("mt_coronet") == "Mt. Coronet"
+       and P.area_name("lost_tower") == "Lost Tower" and P.area_name("route_201*2") == "Route 201"
+       and P.area_name(P.area_of(437)) == "Solaceon Town" and P.area_of(9999) == "map_270f",
+       "area_name: ROM names (Mt. Coronet), extras (Lost Tower), shiny-clause keys, unknown ids")
+    merged = {a: sorted(v) for a, v in same.items() if len(v) > 1}
+    note("areas joining several ROM labels (buildings into their town): %s" % merged)
+
+
+def battle_trace(rig, frames, log, on_extra=None):
+    """Run frames, logging (frame info, slot) once per frame."""
+    pm = rig.pm
+    for _ in range(frames):
+        log.append((pm.battle_info(), pm.battle_party_slot(), pm.in_battle()))
+        if on_extra:
+            on_extra()
+        rig.d.run(1)
+
+
+def check_tutorial(rig):
+    rig.load("pt_sl_tutorial.dsst")
+    pm = rig.pm
+    infos, slots = set(), set()
+    balls0 = dict(pm.balls())
+
+    def on():
+        i = pm.battle_info()
+        infos.add((i or {}).get("kind"))
+        if i:
+            infos.add(("dex", i["dex"], i["battle_type"]))
+        slots.add(pm.battle_party_slot())
+    while pm.in_battle():
+        on()
+        rig.press("a", 14, on)
+    ok(pm.battle_kind() is None and {"special", ("dex", SPECIES["bidoof"], P.BATTLE_TYPE_CATCH_TUTORIAL)} <= infos
+       and None not in infos - {None} and slots == {None},
+       "Dawn's catching tutorial: kind 'special' on every battle frame (battle_type 0x400), dex BIDOOF, "
+       "battle_party_slot() None throughout (%s)" % sorted(map(str, infos)))
+    for _ in range(80):
+        if pm.is_safe():
+            break
+        rig.press("a", 20)
+    b = dict(pm.balls())
+    ok(b.get(4, 0) == balls0.get(4, 0) + 5 and pm.has_poke_balls(),
+       "after the tutorial: Dawn's 5 POKé BALL arrive in the ball pocket (body+0x630+0x6BC): %s" % pm.balls())
+
+
+def check_wild(rig):
+    """Several encounters in a row from the same grass: info valid from the battle app's first frame, constant
+    until the battle ends, equal to the BattleContext's enemy mon, never the previous battle's mon."""
+    rig.load("pt_sl_route202.dsst")
+    pm = rig.pm
+    prev_key = None
+    seen = []
+    for n in range(6):
+        before = []
+        k = rig.walk_to_battle(on=lambda: before.append(pm.battle_info()))
+        first = pm.battle_info()
+        log = []
+        rig.wait_menu(on=lambda: log.append((pm.battle_info(), pm.battle_party_slot())))
+        species, pid, hp, _slot = battle_mon(rig, 1)
+        infos = [i for i, _s in log] + [first]
+        ok(k is not None and all(i is None for i in before) and first is not None
+           and all(i == first for i in infos) and first["kind"] == "wild" and first["battle_type"] == 0
+           and first["dex"] == species and first["pid"] == pid and first["key"] != prev_key
+           and first["map"] == MAP_ROUTE_202 and 1 <= first["level"] <= 100,
+           "wild #%d: battle_info None before the battle app, then from its first frame on %s (%d frames to "
+           "the menu, = BattleContext enemy: species %d pid %08x), never the previous mon"
+           % (n + 1, {x: first[x] for x in ("dex", "level", "shiny", "key")}, len(log), species, pid))
+        slots = [s for _i, s in log]
+        firsts = [i for i, s in enumerate(slots) if s is not None]
+        ok(firsts and all(s is None for s in slots[:firsts[0]]) and all(s == (0, slots[-1][1]) for s in
+                                                                     slots[firsts[0]:]),
+           "wild #%d: battle_party_slot() None until the battle mon is loaded (frame %s), then %s"
+           % (n + 1, firsts[0] if firsts else None, slots[-1]))
+        seen.append(first["dex"])
+        prev_key = first["key"]
+        rig.run_away()
+        ok(pm.battle_info() is None and pm.battle_kind() is None and pm.battle_party_slot() is None and pm.is_safe(),
+           "wild #%d: ran away -> battle_info/kind/slot None" % (n + 1))
+    note("species met: %s" % seen)
+
+
+def check_catch(rig):
+    rig.load("pt_sl_wild.dsst")
+    pm = rig.pm
+    info = pm.battle_info()
+    n0 = pm.party_count()
+    masters = dict(pm.balls()).get(1, 0)
+    log = []
+    rig.throw(on=lambda: log.append((pm.battle_info() is not None, pm.party_count())))
+    rig.finish(on=lambda: log.append((pm.battle_info() is not None, pm.party_count())))
+    end = next(i for i, (b, _n) in enumerate(log) if not b)
+    grow = next(i for i, (_b, n) in enumerate(log) if n == n0 + 1)
+    keys = party_keys(pm)
+    mi = party_infos(pm)[-1]
+    ok(pm.party_count() == n0 + 1 and keys[-1] == info["key"] and mi["dex"] == info["dex"],
+       "catch (MASTER BALL): the new party mon has key %s = battle_info()['key'] and dex %d" % (keys[-1], mi["dex"]))
+    ok(0 < grow - end <= 4 and all(b for b, _n in log[:end]),
+       "battle_info() stays valid until the battle app ends; the field copies the party back %d frames later "
+       "(referee waits END_FRAMES=8 before reading the party)" % (grow - end))
+    ok(dict(pm.balls()).get(1, 0) == masters - 1, "the MASTER BALL left the ball pocket")
+
+
+def check_trainer(rig):
+    rig.load("pt_sl_route202.dsst")
+    pm = rig.pm
+    rig.teleport(182, 821)
+    rig.step("left")
+    for _ in range(100):
+        if pm.in_battle():
+            break
+        rig.press("a", 10)
+    info = pm.battle_info()
+    ok(info is not None and info["kind"] == "trainer" and info["battle_type"] == P.BATTLE_TYPE_TRAINER
+       and info["dex"] == SPECIES["bidoof"] and pm.battle_kind() == "trainer",
+       "Lass Natalie (Route 202): kind 'trainer', battle_type 1, dex = her BIDOOF: %s"
+       % {x: info and info[x] for x in ("kind", "dex", "level")})
+    rig.wait_menu()
+    ok(pm.battle_party_slot() == (0, battle_mon(rig, 0)[2]), "trainer battle: battle_party_slot (0, hp)")
+    rig.save("pt_sl_trainer.dsst")
+
+
+def faint_lead(rig, on=None, limit=25):
+    """At the command menu: lead's battle HP -> 1 (RAM), then WITHDRAW until it faints. Returns True once
+    battle_party_slot() reported HP 0."""
+    pm = rig.pm
+    set_battle_hp(rig, 0, 1)
+    seen = []
+
+    def watch():
+        s = pm.battle_party_slot()
+        seen.append(s)
+        if on:
+            on(s)
+    for _ in range(limit):
+        rig.use_move(1, watch)                       # WITHDRAW (no damage dealt -> the wild mon stays)
+        for i in range(800):
+            watch()
+            rig.d.run(1)
+            if seen[-1] and seen[-1][1] == 0:
+                return True
+            if i > 150 and rig.menu_shown():
+                break
+    return False
+
+
+def check_faint(rig):
+    """Party of 2: the lead faints (HP 0 reported live), the next mon is sent out: (1, hp) - never (1, 0)."""
+    rig.load("pt_sl_caught.dsst")
+    pm = rig.pm
+    rig.walk_to_battle()
+    rig.wait_menu()
+    rig.save("pt_sl_faint.dsst")
+    log = []
+    fainted = faint_lead(rig, log.append)
+    zero = [i for i, s in enumerate(log) if s == (0, 0)]
+    note("slots before the faint: %s" % sorted(set(map(str, log[:zero[0] if zero else None]))))
+    ok(fainted and len(zero) >= 2 and zero[1] == zero[0] + 1 and all(s in (None, (0, 1)) for s in log[:zero[0]]),
+       "lead at 1 HP: battle_party_slot() (0, 1) ... then (0, 0) on consecutive frames when it faints")
+    rig.run(300)
+    rig.press("a", 80)                              # "Use next Pokémon"
+    rig.press("a", 80)
+    rig.touch(190, 30, 60)                          # party slot 2
+    log2 = []
+    rig.touch(128, 100, 0)                          # SHIFT
+    rig.run(400, lambda: log2.append(pm.battle_party_slot()))
+    after = [s for s in log2 if s is not None and s != (0, 0)]
+    hp1 = party_infos(pm)[1]["hp"]
+    ok(after and all(s == (1, hp1) for s in after) and (1, 0) not in log2,
+       "switch-in after the faint: (0, 0) -> None (1 frame: slot index written before the battle mon) -> (1, %d); "
+       "never (1, 0)" % hp1)
+    rig.run_away()
+    party = party_infos(pm)
+    ok(party[0]["hp"] == 0 and party[1]["hp"] > 0, "after the battle the save party has the fainted lead at HP 0")
+
+
+def check_blackout(rig):
+    """Party of 1 faints: the battle ends, the field copies the party (HP 0) back 2 frames later and only heals
+    it at the Pokémon Center hundreds of frames later -> the referee's blackout check (party read 8 frames after
+    the battle) sees HP 0."""
+    rig.load("pt_sl_wild.dsst")
+    pm = rig.pm
+    ok(faint_lead(rig), "lone lead faints (HP 0 reported live)")
+    log = []
+
+    def on():
+        mi = P.mon_info(pm.party_raw()[0]) if pm.party_raw() else None
+        log.append((pm.battle_info() is not None, mi and mi["hp"], pm.map_id()))
+    for _ in range(300):
+        if pm.is_safe():
+            break
+        on()
+        rig.press("a", 30, on)
+    end = next(i for i, e in enumerate(log) if not e[0])
+    zero = [i for i, e in enumerate(log) if i >= end and e[1] == 0]
+    healed = next((i for i, e in enumerate(log) if zero and i > zero[0] and e[1]), None)
+    ok(zero and zero[0] - end <= 4 and healed and healed - end > 100 and log[end + 8][1] == 0,
+       "blackout: party HP 0 from %d frames after battle_info() turns None until the heal %d frames later "
+       "(map %d -> %d, the Pokémon Center)" % (zero[0] - end, healed - end, log[0][2], log[-1][2]))
+
+
+def check_party6(rig):
+    """Catches with a full party go to the PC: current box (the game switches it to the first box with room)."""
+    rig.load("pt_sl_party6.dsst")
+    pm = rig.pm
+    infos = party_infos(pm)
+    box = pm.current_box_records()
+    ok(pm.party_count() == 6 and len(box) == 2 and pm.current_box() == 0 and all(i["hp"] > 0 for i in infos),
+       "pt_sl_party6: 6 in the party, 2 catches in box 1 (current box 0)")
+    keys = [P.mon_key(r) for r in box]
+    ok(len(set(keys + [i["key"] for i in infos])) == 8, "8 different mon_keys")
+    rig.walk_to_battle()
+    info = pm.battle_info()
+    rig.wait_menu()
+    rig.throw()
+    rig.finish()
+    box2 = pm.current_box_records()
+    ok(pm.party_count() == 6 and len(box2) == 3 and P.mon_key(box2[-1]) == info["key"] and pm.current_box() == 0,
+       "a catch with a full party: stored in the current box's first free slot, key = battle_info()['key']")
+
+
+def game_deposit(rig, slot):
+    """Bill's... SOMEONE'S PC -> DEPOSIT -> party slot -> STORE -> the box shown (current). Party grid in the
+    deposit screen: two columns (slot 1 left, 2 right, 3 left ...)."""
+    pm = rig.pm
+    for _ in range(6):
+        rig.press("a", 40)
+    rig.wait(pm.pc_open, 300)
+    rig.run(120)
+    if slot % 2:
+        rig.press("right", 20)
+    for _ in range(slot // 2):
+        rig.press("down", 20)
+    rig.press("a", 30)          # menu: STORE
+    rig.press("a", 40)
+    rig.press("a", 60)          # the box shown
+    rig.run(60)
+    close_pc(rig)
+
+
+def close_pc(rig):
+    pm = rig.pm
+    for _ in range(12):
+        if pm.is_safe():
+            break
+        rig.press("b", 40)
+    rig.settle(300)
+
+
+def game_withdraw(rig, pos):
+    """SOMEONE'S PC -> WITHDRAW -> box slot `pos` (6 columns) -> WITHDRAW."""
+    pm = rig.pm
+    for _ in range(5):
+        rig.press("a", 40)
+    rig.press("down", 10)
+    rig.press("a", 30)
+    rig.wait(pm.pc_open, 300)
+    rig.run(200)
+    for _ in range(pos % 6):
+        rig.press("right", 15)
+    for _ in range(pos // 6):
+        rig.press("down", 15)
+    rig.press("a", 30)          # menu: WITHDRAW
+    rig.press("a", 60)
+    rig.run(60)
+    close_pc(rig)
+
+
+# ---------------------------------------------------------------------------------------------------------
+SECTIONS = [("areas", check_areas), ("tutorial", check_tutorial), ("wild", check_wild), ("catch", check_catch),
+            ("trainer", check_trainer), ("faint", check_faint), ("blackout", check_blackout),
+            ("party6", check_party6)]
 
 
 def main():

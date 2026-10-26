@@ -332,3 +332,34 @@ def test_platinum_pc_poll_tells_the_referee(pc_now):
                                         on_pc_close=lambda: calls.append("close"))
     app._chal_pc_poll()
     assert calls == (["open"] if pc_now else ["close"])
+
+
+def test_ds_failing_inside_a_challenge_goes_back_to_the_main_game(tmp_path, monkeypatch):
+    """Platinum can't start for the run: drop active_challenge (no crash loop into the run), then the usual fallback."""
+    from yellowlink import app as appmod, nds_core
+    from yellowlink.config import Config
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    cfg = Config()
+    cfg.update(name="Ilias", server_url="ws://1.2.3.4:8765", rom_path=__file__, games={"platinum": __file__},
+               current_game="platinum")
+    starts = []
+
+    class FakeApp:
+        def __init__(self, c, diag=None):
+            starts.append(c.challenge)
+            if c.challenge:
+                raise nds_core.DSUnavailable("no DLL")
+            self.enter_challenge = {"id": "run1", "game": "platinum"} if len(starts) == 1 else None
+            self.pending_share = self.switch_to = self.travel_to = self.restart_into = None
+            self.leave_challenge = False
+
+        def run(self):
+            pass
+
+    seen = []
+    monkeypatch.setattr(appmod, "App", FakeApp)
+    monkeypatch.setattr(appmod, "_ds_fallback", lambda c, d, e: (seen.append(c.challenge), False)[1])
+    diag = types.SimpleNamespace(errors=0)
+    appmod._main([], cfg, diag)
+    assert starts == [None, {"id": "run1", "game": "platinum"}]
+    assert seen == [None] and "active_challenge" not in Config()
