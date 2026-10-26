@@ -221,6 +221,20 @@ Tiles base..base+3 arranged TL, TR, BL, BR. Horizontal flip of the whole 16×16 
 Color index 0 transparent. Tile data from the sender's VRAM (`sprite` message, 24 tiles: indices 0x00-0x0B then 0x80-0x8B).
 Cache own tiles only while `CFC3 & 1 == 0`.
 
+### Badges (0.7.5) — `game.progress` / `champion` / `wild_is_shiny` (verified: `dev/badges/verify.py`)
+| name | addr | notes |
+|---|---|---|
+| wNumHoFTeams | D5A1 | +1 by AnimateHallOfFame (saturates at 255), inside wMainData (saved). `champion()` = count > 0 or standing in HALL_OF_FAME (map $76) |
+| wPokedexOwned | D2F6 | 19 bytes, bit dex−1; Kanto goal = #1-150 (the game's own Pokédex OWN = ours + Mew, checked on the dex screen) |
+| wEnemyMonDVs | CFF0 | wild DVs (LoadEnemyMonData, right after InitWildBattle sets wIsInBattle; constant from frame 0 to the menu in 6 real encounters) |
+| wTransformedEnemyMonOriginalDVs | CCEB | the wild mon's own DVs once it used Transform (wEnemyMonDVs then = the target's) |
+| wEnemyBattleStatus3 | D068 | bit 3 TRANSFORMED |
+
+Own catch = OT name + OT ID equal to wPlayerName/wPlayerID (Gen 1 has no origin field). Shiny = Gen-2 rule on DVs
+(bytes 27-28). Read from the party, all 12 boxes (pcdb.Gen1PC) and the Day Care; key = `mon_key` (= the PC database
+key). `wild_is_shiny`: only `battle_info()["kind"] == "wild"` (normal + Safari), else None. Catching a transformed
+mon gives a DITTO with the original DVs (pret ItemUseBall), so the indicator matches what is caught.
+
 
 ---------------------------------------------------------------------------------------------------
 ## 4. Live PvP battles (protocol + game recipe) — added in 0.2.0
@@ -389,6 +403,30 @@ Records in the PC store: 32 + 11 + 11 + 1 egg-flag byte (55). Hooks: open `_Bill
 RTC: PyBoy's RTC advances with emulated frames while running (not wall time) and adds the wall time elapsed since it
 was saved when a `.rtc` file or save state is loaded. Keep a `.rtc` next to each `.sav` (`stop(rtc_file=...)`), or
 PyBoy silently reads/writes `<rom>.rtc` next to the ROM. `rtc_file=io.BytesIO()` (empty) raises "No data".
+
+### Badges (0.7.5) — `crystal.progress` / `champion` (verified: `dev/badges/verify.py`)
+| name | addr | notes |
+|---|---|---|
+| wPokedexCaught | 1:DE99 | 32 bytes, bit dex−1; Johto goal = #1-251 minus Mew (151) and Celebi (251) = 249 |
+| wHallOfFameCount / wStatusFlags bit 6 / EVENT_BEAT_ELITE_FOUR (68 in wEventFlags 1:DA72) | 1:D95E / 1:D84C | `champion()` = any of these (`entered_hall_of_fame()`, saved) or standing in HALL_OF_FAME (16:8); each proof checked alone + the real HoF scene |
+| wPlayerID / wPlayerName | 1:D47B / 1:D47D | own catch = OT name + OT ID equal |
+
+Origin = Crystal: caught data (bytes 29-30) non-zero - the game writes it for every catch, gift (`givepoke` without a
+trainer OT goes through SetCaughtData), contest prize and hatch; YellowLink's Gen-1 conversions have 0000. A real
+Route 29 catch got caught data 8202. Eggs don't count until hatched (same `mon_key`). Read from the party, the 14 boxes
+(Gen2PC: only the live sBox before the first save) and both Day Care slots (wBreedMon1/2).
+
+### Badges (0.7.5) — Platinum, `platinum.progress` / `champion` (full memory map: dev/platinum/MEMORY_MAP.md)
+| name | where | notes |
+|---|---|---|
+| Pokedex | save body + 0x1328 (save page 7, 812 bytes) | u32 magic 0xBEEFCAFE, then caughtPokemon u32[16] (+0x04), seenPokemon (+0x44); bit species−1 (pret include/pokedex.h) |
+| Sinnoh dex | ROM `/application/zukanlist/zkn_data/zukan_data.narc` member 12 | the 210 species = `badges.SINNOH_DEX`; `/poketool/pl_pokezukan.narc` member 0 = national→Sinnoh number. #151 is MANAPHY (490), which Platinum alone can't catch |
+| Champion | FLAG_GAME_COMPLETED 2404 / TrainerInfo.isMainStoryCleared / RECORD_TIMES_ENTERED_HALL_OF_FAME | `champion()` = `entered_hall_of_fame()` (all set by ClearGame, saved) or standing in the Hall of Fame room (map 187); checked alone + the real scene |
+
+Own catch = origin game 12 (Platinum) + OT name + TID + SID equal to TrainerInfo (a real catch has all of them;
+converted Gen-1/2 mons are origin 4/7 with SID 0). Shiny = (TID ^ SID ^ PID_hi ^ PID_lo) < 8; eggs don't count until
+hatched. Read from `party_checked()` (None -> progress None), all 18 x 30 box slots and the Day Care
+(`platinum_pc.normalise`; a slot that can't be read is skipped that time).
 
 ### Exp Share All hooks (Yellow + Crystal) — `client/yellowlink/expshare_gb.py`
 Modern rule (Gen 6+): participants get the full single-participant exp + stat exp (no split), other party mons with

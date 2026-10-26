@@ -568,6 +568,9 @@ def platinum_checks():
 
     # variations of that record (written into the party, the boxes and the Day Care)
     base = pk4.PK4(pk4.decrypt(last))
+    lo2 = (new_pid & 0xFFFF) ^ 0x1234                       # another mon (own key), still shiny for TID/SID
+    pid2 = ((lo2 ^ tid ^ sid) << 16) | lo2
+    base.pid = pid2
 
     def variant(**kw):
         v = pk4.PK4(base.plain())
@@ -577,7 +580,7 @@ def platinum_checks():
     slot_box, slot_i = 5, 7
     cases = [("own shiny", variant(), True),
              ("OT name OTHER", variant(ot_codes=ndsrom.g4_encode("OTHER", 8)), False),
-             ("another SID", variant(sid=sid ^ 0x100, pid=new_pid ^ (0x100 << 16)), False),
+             ("another SID", variant(sid=sid ^ 0x100, pid=pid2 ^ (0x100 << 16)), False),
              ("origin FireRed (converted Gen-1 mon)", variant(origin_game=4), False),
              ("an egg", variant(is_egg=True), False)]
     res = []

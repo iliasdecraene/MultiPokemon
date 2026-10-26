@@ -36,3 +36,39 @@ Until badges.py exists I use a local stub with these names in the tests.
 - UI: badge_art.py (medals supersampled, hover tip, "Shiny!" tag under the wild enemy at GB (124, 57)),
   panels.py (Regions: sockets right of each region name; Multiplayer: selected player's sockets per region;
   trade/PC rows: sparkle after a shiny's name via badges.entry_is_shiny).
+
+## 2026-10-26 badges-game (done)
+Files: client/yellowlink/badges.py (rules), game.py / crystal.py / platinum.py (`champion`, `owner`, `progress`;
+Yellow `wild_is_shiny`; Platinum `PAGE_POKEDEX`, `pokedex_caught_bits`), challenge_view.py (`run_champion()`),
+client/tests/test_badges.py (21 tests), dev/badges/verify.py (real ROMs, 84 checks ALL PASS: `python dev/badges/verify.py
+[yellow] [crystal] [platinum]`, never writes dev/states), SPEC.md "Badges (0.7.5)" subsections in sections 3 and 6.
+Interface exactly as in the BRIEF + app notes above; extras: progress()["owner"] = {"ot", "tid"[, "sid"]},
+`entry_shiny_key`, `award_soullink` (gold beats silver), `merge_earned`, `summary`, `SHINY_KEEP` = 1000 (= server cap).
+- Champion: Yellow wNumHoFTeams D5A1 > 0; Crystal entered_hall_of_fame() (HoF count / wStatusFlags bit 6 /
+  EVENT_BEAT_ELITE_FOUR); Platinum entered_hall_of_fame() (FLAG_GAME_COMPLETED / isMainStoryCleared / HoF record);
+  each + "standing in the HoF room". Verified with RAM edits both ways AND the games' own HoF scenes.
+- Dex: Yellow D2F6 (checked against the game's own Pokédex OWN screen), Crystal 1:DE99, Platinum body+0x1328
+  (save page 7, magic BEEFCAFE, caught bits at +4); Sinnoh list = the ROM's own (zukan_data.narc member 12) = pret.
+- Own catch: Yellow OT name + ID; Crystal OT name + ID + caught data != 0 (every Crystal catch/gift/hatch has it,
+  converted Gen-1 mons don't); Platinum origin 12 + OT name + TID + SID. Eggs never count until hatched.
+  Verified with real catches: Yellow (shiny DVs written in the wild mon, it used Transform, MASTER BALL -> a shiny
+  DITTO in the party), Crystal (shiny DVs, MASTER BALL, caught data 8202), Platinum (wild PID made shiny, MASTER BALL).
+- wild_is_shiny: Yellow wEnemyMonDVs CFF0, or wTransformedEnemyMonOriginalDVs CCEB when wEnemyBattleStatus3 D068
+  bit 3 (the wild mon used Transform); only kind "wild" (normal + Safari) else None. Stable from frame 0 (6 encounters).
+OPEN for the coordinator / Ilias:
+1. **Sinnoh "caught all 210" includes MANAPHY (#151 of Platinum's Sinnoh dex)**, which can't be caught in Platinum
+   (Pokémon Ranger egg only); Platinum's own Sinnoh diploma only needs it SEEN. As written the Sinnoh Pokédex badge
+   is unobtainable. One-line fix if wanted: `badges.SINNOH_DEX_EXCLUDED = (MANAPHY,)` -> goal 209 (DEX_TOTAL follows;
+   the server/UI should read DEX_TOTAL; verify.py's dex check expects 210 now).
+2. **YellowLink PC trades never set the in-game owned/caught flags.** A real trade sets them; ours lands in the
+   PC store and appears in the game's boxes, so version exclusives / traded-only species never get their dex bit and
+   the Kanto/Johto/Sinnoh Pokédex badge is in practice impossible. Suggest: when a mon from another player/game shows
+   up in a game's PC view (or is withdrawn), set seen+owned for its species like the games' own trade code
+   (game.GameMemory.set_dex / crystal set_dex exist; Platinum needs Pokedex caught+seen bits, maybe gender/forms).
+   App/pcdb territory - not done here.
+3. Key collisions (by design, PC-store keys): Yellow shiny key = OT ID + DVs + catch-rate byte, and shiny DVs leave
+   only 8 Atk values -> two own shinies of the same species with the same Atk DV count once (1 in 8 per pair).
+   Crystal adds caught data (level/time/place) so collisions need same level+place+time of day+Atk DV. Platinum keys
+   are unique (PID). Fine for tiers in practice; documented.
+4. Yellow has no origin field: a mon converted from Crystal/Platinum into Yellow counts for Kanto if its OT name +
+   ID equal the Yellow save's (only with identical trainer IDs).

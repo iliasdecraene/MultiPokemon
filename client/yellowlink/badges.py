@@ -70,7 +70,7 @@ DEX_TOTAL = {r: len(v) for r, v in REGIONAL_DEX.items()}          # 150 / 249 / 
 
 # --- shinies -----------------------------------------------------------------------------------------------------
 SHINY_TIERS = (1, 10, 25, 50, 100)
-SHINY_KEEP = 200                  # keys remembered per region (well above the top tier; bounds the synced state)
+SHINY_KEEP = 1000                 # keys remembered per region (= the server cap; far above the top tier)
 KEY_RE = re.compile(r"^[A-Za-z0-9_:-]{1,40}$")
 SOULLINK_MEDALS = ("silver", "gold")      # rank order: gold beats silver
 
