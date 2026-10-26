@@ -1,9 +1,11 @@
-# Complete Sinnoh — the plan (for Ilias to review)
+# Complete Sinnoh — the plan
+
+**Version 2** — updated after Ilias's review: starters before the League, swarms change every 2 hours, the
+Pokédex area map shows the new spots, legendaries from other regions come with the raids later.
 
 **What this is.** Normal Pokémon Platinum stays normal Platinum (same story, trainers, difficulty, trade
 evolutions), but every Pokémon family can be found in Sinnoh in single player. This plan lists every Pokémon
-we add to the wild, where and how often, and why it fits there. Nothing is final until you say so: change any row
-you don't like and we adjust it.
+we add to the wild, where and how often, and why it fits there. Any row can still be changed.
 
 How it works for players: YellowLink makes a modified copy of each player's own Platinum file in its data folder
 (the original is never touched) where only the wild-Pokémon lists are changed. Everyone in the group plays with the
@@ -16,18 +18,20 @@ same lists, so trades, badges and Soul Link stay fair. Saves keep working; only 
    take over a "spare" slot (a Pokémon that appears more than once in the same list, or that is just as easy to find
    nearby at the same point of the story).
 2. **Habitat fits.** Bugs in Eterna Forest, cave dwellers in caves, desert Pokémon on the desert route, water
-   Pokémon by surfing or fishing, the moon rock at night and the sun rock by day, fire starters on the volcanic route.
+   Pokémon by surfing or fishing, the moon rock at night and the sun rock by day, fire starters by fire and rock.
    Where Nintendo already placed a Pokémon somewhere in Sinnoh (the GBA-cartridge slots, Diamond/Pearl's lists — the
    Platinum ROM still contains both), we use that same place.
 3. **Levels like the area.** Every new Pokémon gets the level (range) of the slot it takes over, so nothing is
    suddenly stronger or weaker than its neighbours.
 4. **Rarity fits strength.** Normal Pokémon 5–10 %. All 12 starters (Kanto, Johto, Hoenn and the two Sinnoh ones
-   you didn't pick) are rare (5 %) and **only after the Hall of Fame**. No legendary or mythical goes into a wild list.
+   you didn't pick) are rare (5 %) and live in the **middle of the game** (from about the 2nd badge on, before the
+   League — not on the first routes). No legendary or mythical goes into a wild list.
 5. **Base forms only** (Caterpie, not Butterfree). Evolve or breed for the rest.
 6. **Nothing lost.** A script checks that every Pokémon that was catchable before is still catchable in the same
    way (or easier) and no later in the story than before.
-7. **Only the wild lists change** — no catch rates, stats, trainers or story. The four "Mystery Gift" key items are
-   handed out by YellowLink at the right moment, then the game's own events run (see Special events).
+7. **Only the wild lists change** (plus the Pokédex area map, so it shows the new spots) — no catch rates, stats,
+   trainers or story. The four "Mystery Gift" key items are handed out by YellowLink at the right moment, then the
+   game's own events run (see Special events).
 
 ## Audit: what normal US Platinum offers today (by evolution family)
 
@@ -42,7 +46,7 @@ game's scripts.
 | Gift / egg / in-game trade / fossil / static / roaming legendary | 28 | 23 (starters and fossils now also wild) |
 | Mystery-Gift event only (Darkrai, Shaymin, Arceus) | 3 | 3 (we unlock them) |
 | GBA cartridge slot only (impossible here, no GBA slot) | 17 | **0** |
-| Not obtainable at all | 30 | **15** (the other-region legendaries — your decision, below) |
+| Not obtainable at all | 30 | **15** (11 other-region legendaries → raids later; Regis + Regigigas → opened by YellowLink, see below) |
 | Mythical, left for the YellowLink raid (Mew, Celebi, Jirachi, Deoxys, Manaphy, Phione) | 6 | 6 |
 
 Not obtainable in vanilla single-player (30): Bulbasaur, Charmander, Squirtle, Chikorita, Cyndaquil, Totodile,
@@ -52,8 +56,9 @@ Regirock, Regice, Registeel, Regigigas. Plus two "one of three / one of two" cas
 and the Underground gives **either** Cranidos (odd Trainer ID) **or** Shieldon (even Trainer ID), never both.
 → Today nobody can complete the Sinnoh Pokédex badge (209) alone. With this plan everyone can.
 
-Families that exist only through special mechanisms (kept as Nintendo made them — see open question 2):
-- **Swarms** (post-game, one random route per day, 22): Farfetch'd, Doduo, Drowzee, Krabby, Voltorb, Cubone,
+Families that exist only through special mechanisms (kept as Nintendo made them):
+- **Swarms** (post-game, 22 — in YellowLink the swarm changes **every 2 hours**, the same for everyone, instead of
+  once a day): Farfetch'd, Doduo, Drowzee, Krabby, Voltorb, Cubone,
   Pinsir, Natu, Dunsparce, Snubbull, Corsola, Delibird, Phanpy, Larvitar, Zigzagoon, Slakoth, Makuhita, Skitty,
   Electrike, Spoink, Spinda, Beldum.
 - **Poké Radar** (post-game, 24): Nidoran♀, Nidoran♂, Venonat, Mankey, Slowpoke, Grimer, Tauros, Sentret, Mareep,
@@ -103,20 +108,24 @@ Rarity = chance per encounter in that spot. "Night"/"day" = only at that time (t
 | Lunatone | Mt. Coronet 2F and 3F | cave, **night** | 37 | 10 % | … and the moon meteorite at night, in the mountain where the world began. |
 | Shuckle | Route 224 (post-game) | grass | 50 | 4 % | Hides under coastal rocks; the game's own GBA spot (Emerald). |
 
-### Starters (all post-game, all rare)
+### Starters (middle of the game, all 5 %)
 
-| Family | Where | How | Levels | Rarity | Why it fits |
+Each starter takes over one "spare" 5 % slot in a place that fits, after the first two gyms and before the League.
+Levels are those of the area (higher than the usual level 5, like any wild Pokémon there).
+
+| Family | Where | How | Levels | When reachable | Why it fits |
 |---|---|---|---|---|---|
-| Bulbasaur | Route 224 | grass | 49 | 5 % | Flowery meadow by the sea (the route towards Shaymin's Flower Paradise). |
-| Chikorita | Route 229 | grass | 48 | 5 % | Leafy, flowery route. |
-| Treecko | Route 229 | grass | 48 | 5 % | Forest gecko in the thick trees. |
-| Turtwig | Route 229 | grass | 48 | 5 % | Sinnoh's grass starter in the deepest green route. |
-| Charmander, Cyndaquil, Chimchar | Route 227 | grass | 50 | 5 % each | Volcanic ash route at the foot of Stark Mountain. |
-| Torchic | Stark Mountain (outside) | ground | 50 | 5 % | Same volcano. |
-| Squirtle | Route 229 | **surfing** | 35–45 | 5 % | Pond with Surskit. |
-| Totodile | Route 225 | **surfing** | 35–45 | 5 % | Fresh water with Psyduck/Golduck. |
-| Mudkip | Resort Area | **surfing** | 35–45 | 5 % | Calm fresh water with Psyduck/Golduck. |
-| Piplup | Route 230 | **surfing** | 35–45 | 5 % | Cold sea with Sealeo. |
+| Cyndaquil | Route 206 (under Cycling Road) | grass | 17 | after badge 2 | Dry, rocky route of the fire horses (Ponyta). |
+| Chikorita | Route 209 | grass | 19 | after badge 2 | Gentle meadows with Roselia and Ralts. |
+| Treecko | Route 215 | grass | 21 | after badge 3 | Rainy, wooded route. |
+| Bulbasaur | Route 212 north | grass | 23 | after badge 3 | Lush, rainy grassland by the Pokémon Mansion. |
+| Squirtle | Route 212 north | **surfing** | 20–30 | with Surf | Its ponds. |
+| Totodile | Route 208 | **surfing** | 20–30 | with Surf | River below Hearthome. |
+| Turtwig | Valor Lakefront | grass | 26 | after badge 4 | Turtwig lives along lakes — the shore of Lake Valor. |
+| Charmander, Torchic | Fuego Ironworks (outside) | grass | 28 / 29 | with Surf (from Route 205) | Next to the ironworks furnace, with Magmar. |
+| Chimchar | Route 211 east | grass | 28 | after badge 5 | Rocky mountain path of Mt. Coronet. |
+| Mudkip | Lake Valor | **surfing** | 20–30 | after badge 6 | Fresh water of the lake (the Great Marsh would fit too, but you can't surf in the Safari game). |
+| Piplup | Lake Acuity | **surfing** | 20–30 | after badge 7 | Cold northern lake — Piplup lives on cold shores. |
 
 ### Other missing families
 
@@ -127,30 +136,39 @@ Rarity = chance per encounter in that spot. "Night"/"day" = only at that time (t
 
 ## What gets rarer (every changed area, before → after)
 
-Only these 32 areas change (79 slot changes). Everything not listed is exactly vanilla.
+Only these 32 areas change (77 slot changes). Everything not listed is exactly vanilla.
 
 - **Eterna Forest:** Budew 30→20 % (40→30 by day), Buneary 24→20 %, Bidoof 10→0 % (still everywhere around),
   at night Kricketot and Hoothoot 10→0 % (both still on Route 205 north etc.); new Caterpie 10, Weedle 10, Seedot 4,
   Murkrow 10 (night), Misdreavus 10 (night).
-- **Route 205 north:** Bidoof 30→20 %; Lotad 10 %. **Route 206:** Geodude 30→20 %; Stunky 10 %.
-- **Route 207:** Machop 35→30 %; Growlithe 5 %. **Route 208:** Bibarel 20→10 %; Zangoose 5, Seviper 5 %.
-- **Route 209:** Ralts 20→15 %; Vulpix 5 %. **Route 210 south:** Ponyta 25→20 %, Roselia 15→10 %; Pineco 5, Seedot 5 %.
-- **Route 211 west:** Machop 15→5 %; Teddiursa 10 %. **Route 211 east:** Machoke 15→5 %; Teddiursa 10 %.
+- **Route 205 north:** Bidoof 30→20 %; Lotad 10 %.
+- **Route 206:** Geodude 30→20 %, Machop 20→15 %; Stunky 10, Cyndaquil 5 %.
+- **Route 207:** Machop 35→30 %; Growlithe 5 %.
+- **Route 208:** Bibarel 20→10 %; Zangoose 5, Seviper 5 %; surfing Golduck 10→5 %, Totodile 5 %.
+- **Route 209:** Roselia 25→20 %, Ralts 20→15 %; Vulpix 5, Chikorita 5 %.
+- **Route 210 south:** Ponyta 25→20 %, Roselia 15→10 %; Pineco 5, Seedot 5 %.
+- **Route 211 west:** Machop 15→5 %; Teddiursa 10 %. **Route 211 east:** Machoke 15→5 %, Bronzor 10→5 %;
+  Teddiursa 10, Chimchar 5 %.
+- **Route 212 north:** Kirlia 20→15 %; Bulbasaur 5 %; surfing Golduck 10→5 %, Squirtle 5 %.
 - **Route 212 south:** Shellos 45→35 %; Ekans 10 %. **Wayward Cave 1F:** Geodude 40→30 %; Sandshrew 10 %.
 - **Route 214:** Graveler 35→30 %, Rhyhorn 30→26 %, Houndour 15→11 %; Stunky 9, Vulpix 4 %.
+- **Route 215:** Marill 25→20 %; Treecko 5 %. **Valor Lakefront:** Bibarel 30→25 %; Turtwig 5 %.
+- **Fuego Ironworks:** Magnemite 30→20 %; Charmander 5, Torchic 5 %.
 - **Route 218:** Floatzel 30→20 %; Glameow 10 %.
 - **Iron Island B1F–B3F (5 rooms):** Graveler −10 % each; Sableye 5, Mawile 5 %.
 - **Mt. Coronet 2F, 3F:** by day Graveler 30→20 % (Solrock 10 %), at night Golbat 15→5 % (Lunatone 10 %).
+- **Lake Valor surfing:** Golduck 10→5 %; Mudkip 5 %. **Lake Acuity surfing:** Golduck 10→5 %; Piplup 5 %.
 - **Route 219 Good Rod:** Lumineon 5→1 %; Clamperl 4 %. **Route 221 Super Rod:** Gyarados 55→40 %; Clamperl 15 %.
 - **Victory Road post-game rooms 1 and 3:** Steelix 5→0 % (still in the other Victory Road rooms); Shieldon / Cranidos 5 %.
-- **Route 224:** Gloom 5→0 % (still Route 230), Dustox 5→1 %; Bulbasaur 5, Shuckle 4 %.
-- **Route 225 surfing:** Psyduck 10→5 %; Totodile 5 %. **Resort Area surfing:** Psyduck 10→5 %; Mudkip 5 %.
-- **Route 227:** Graveler 15→10 %, Numel and Rhyhorn 5→0 % (both still on Stark Mountain, Route 214…);
-  Charmander, Cyndaquil, Chimchar 5 % each. **Stark Mountain outside:** Graveler 15→10 %; Torchic 5 %.
-- **Route 228:** Dugtrio 30→20 %; Trapinch 10 %.
-- **Route 229:** Roselia 45→40 %, Beautifly and Dustox 5→0 % (still Route 224, Eterna Forest…); Turtwig, Treecko,
-  Chikorita 5 % each; surfing Surskit 95→90 %, Squirtle 5 %.
-- **Route 230 surfing:** Tentacruel 10→5 %; Piplup 5 %.
+- **Route 224 (post-game):** Dustox 5→1 %; Shuckle 4 %. **Route 228 (post-game):** Dugtrio 30→20 %; Trapinch 10 %.
+
+## The Pokédex "Area" map
+
+The Pokédex's area screen has its own file, which Nintendo builds from the same wild lists. YellowLink now updates it
+too, exactly the way Nintendo's own build would: every new spot appears (with its time of day — e.g. Murkrow in
+Eterna Forest only on the night map, Solrock only by day), and the 5 spots where a Pokémon no longer lives disappear
+(Bidoof, and at night Kricketot and Hoothoot, in Eterna Forest). That is 123 small changes to the area lists.
+Swarms, Poké Radar and the GBA slots work as before on the area screen.
 
 ## The GBA dual-slot Pokémon
 
@@ -161,26 +179,18 @@ they live where the game designers wanted them — just without the cartridge an
 instead of only after the National Dex. The one exception is Growlithe (its only spots are Routes 201/202, which we
 keep vanilla) → Route 207 next door. The unused GBA slots themselves are left as they are (harmless).
 
-## Legendaries from other regions — options for Ilias
+## Legendaries from other regions and mythicals → raids (later)
 
-None of these are in the plan yet; pick per group.
+Mewtwo, Lugia, Ho-Oh, Raikou, Entei, Suicune, Latias, Latios, Kyogre, Groudon, Rayquaza and the mythicals (Mew,
+Celebi, Jirachi, Deoxys, Manaphy, Phione) stay out of the wild lists: they will come with the YellowLink **raids**
+feature later. (Mewtwo, Lugia, Ho-Oh and the three dogs can also already come from Yellow/Crystal through
+YellowLink's PC.) Articuno, Zapdos and Moltres already roam Sinnoh after the National Dex (Oak in Eterna).
 
-1. **Mewtwo, Lugia, Ho-Oh, Raikou, Entei, Suicune (Kanto/Johto):** these can *already* be caught in Yellow (Mewtwo)
-   and Crystal (Lugia, Ho-Oh, the three dogs) and moved to Platinum with YellowLink's PC. **Proposal: nothing to do**
-   (maybe a hint in the help text). Articuno/Zapdos/Moltres already roam Sinnoh after the National Dex (Oak in
-   Eterna).
-2. **Regirock, Regice, Registeel, Regigigas — Platinum has the events but they lock each other:** the three Regi
-   statues (Rock Peak Ruins, Iceberg Ruins, Iron Ruins) only open with an **event** Regigigas in the party (a
-   "fateful encounter" one from a real distribution), and the Snowpoint Temple Regigigas only wakes up with all three
-   Regis in the party. Options:
-   - **A (recommended):** after the Hall of Fame YellowLink gives each player one event-style Regigigas (like the
-     real distribution). Then the game's own ruins work (Regis at level 30) and the temple's own Regigigas too.
-   - **B:** keep them for the future YellowLink raid feature.
-3. **Latias, Latios, Kyogre, Groudon, Rayquaza (Hoenn):** no YellowLink game has them and Platinum has no event for
-   them. Options: **A** raid feature later (with the mythicals); **B** a one-time YellowLink gift at a milestone
-   (e.g. Kyogre + Groudon after catching Dialga + Palkia, Rayquaza after Giratina, Latias/Latios after the National
-   Dex); **C** put them in post-game wild lists at 1 % (not recommended: they would be catchable many times and feel
-   like normal Pokémon).
+**Regirock, Regice, Registeel, Regigigas:** in normal Platinum they lock each other — the three Regi statues
+(Rock Peak Ruins, Iceberg Ruins, Iron Ruins) only open with an *event* Regigigas in the party, and the Snowpoint
+Temple Regigigas only wakes up with all three Regis. YellowLink opens this loop (the ruins work without the event
+Regigigas, or a character gives one), so after the Hall of Fame all four can be caught through the game's own
+ruins and temple.
 
 ## Special events (Mystery-Gift content already inside Platinum)
 
@@ -193,30 +203,30 @@ runs. The game itself also requires the Hall of Fame and the National Dex for th
 | Secret Key | Secret Key | Rotom's room in the Galactic building in Eterna: Rotom's five appliance forms | Galactic left the Eterna building | When you **catch your first Rotom** (Old Chateau TV, at night) or get the National Dex, whichever is first |
 | Oak's Letter | Oak's Letter | Route 224: Oak and the tablet → Seabreak Path → **Shaymin** (lv 30) in Flower Paradise | Hall of Fame + National Dex | When you get the **National Dex** |
 | Member Card | Member Card | Sleep in the Canalave Harbor Inn → Newmoon Island → **Darkrai** (lv 50) | Hall of Fame + National Dex + the Lunar Wing quest (Cresselia, the sailor's son) | When you get the **National Dex** (Darkrai then waits for the Cresselia quest, as in the real event) |
-| Azure Flute | Azure Flute | Play it at the top of Spear Pillar → Hall of Origin → **Arceus** (lv 80) | Hall of Fame + National Dex | National Dex **and** Dialga + Palkia caught — the finale of the Spear Pillar story (or simply National Dex, if you prefer) |
+| Azure Flute | Azure Flute | Play it at the top of Spear Pillar → Hall of Origin → **Arceus** (lv 80) | Hall of Fame + National Dex | National Dex **and** Dialga + Palkia caught — the finale of the Spear Pillar story |
 
 There is no other Mystery-Gift-gated content in Platinum's scripts. Other real-life distributions were Pokémon sent
 as data (for example the Manaphy egg from Pokémon Ranger) — mythicals, left for the raid.
 
-## Open questions for Ilias
+## Decisions (Ilias, version 2)
 
-1. Happy with the rules (early game vanilla, starters post-game at 5 %, GBA species on the game's own GBA maps)?
-2. **Swarm-only and Poké-Radar-only families** (46, listed above) stay as Nintendo made them: obtainable, but swarms
-   are one random route per day, so collecting all 22 can take weeks. Leave them (my proposal), or also give each a
-   rare normal post-game slot?
-3. Legendaries from other regions: options 1 / 2A or 2B / 3A, 3B or 3C?
-4. Event moments: OK as proposed (Azure Flute after Dialga + Palkia, or plain National Dex)?
-5. The Pokédex "Area" map is a separate file that we don't change, so it won't show the new spots (it keeps
-   showing Nintendo's). Fine, or should YellowLink also update that file?
+1. Starters: before the League (mid-game), 5 %, early game unchanged. ✔
+2. Swarms change every 2 hours for everyone; swarm-only and Poké-Radar-only Pokémon stay as they are. ✔
+3. The Pokédex area map shows the new spots. ✔
+4. Other-region legendaries and mythicals: raids later. Regis/Regigigas: opened by YellowLink. ✔
+5. Event moments as proposed above. ✔
 
 ## How it is checked
 
 - `python dev/sinnoh/check_plan.py` — compares all 183 wild lists of pret with the real ROM, then proves with the
-  edits applied (through the same code the ROM builder uses): every non-mythical family is obtainable (the
-  legendaries above reported as "pending your decision"), the Sinnoh Pokédex can be completed, and no Pokémon lost
-  access (same way or easier, no later in the story). `--audit` prints the per-family audit, `--changes` the
+  edits applied (through the same code the ROM builder uses): every non-mythical family is obtainable (the raid
+  legendaries and the Regis reported separately), the Sinnoh Pokédex can be completed, no Pokémon lost access (same
+  way or easier, no later in the story), and the Pokédex area map: our copy of Nintendo's area builder gives exactly
+  the ROM's file, and with our changes it shows every new spot with its time of day. `--audit` prints the per-family audit, `--changes` the
   before→after list per area.
 - `client/tests/test_sinnoh_complete.py` — spec sanity: valid Pokémon / list / slot numbers, levels within the
   slot's own level band, rarity weights sum to 100 %, no legendary/mythical in wild lists, base forms only, early
-  areas untouched, starters post-game and ≤ 5 %, the patcher changes exactly the intended bytes.
-- The machine-readable spec is `client/yellowlink/sinnoh_complete.py` (version 1, 79 slot changes).
+  areas untouched, starters mid-game and ≤ 5 %, every added spot on the area map, the patchers change exactly the
+  intended bytes.
+- The machine-readable spec is `client/yellowlink/sinnoh_complete.py` (version 2: 77 slot changes, 123 area-map
+  changes).

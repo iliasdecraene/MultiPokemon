@@ -184,8 +184,9 @@ def test_rarity_fits_strength():
     for (name, kind, sp), pct in share.items():
         assert 1 <= pct <= 15, (name, sp, pct)                 # an addition never dominates an area
         if sp in STARTER_BASES:
-            assert name in sc.POST_GAME, (name, sp)            # starters: post-game only ...
-            assert pct <= 5, (name, sp, pct)                   # ... and rare
+            # starters (Ilias, v2): before the League but not on the first routes, and rare
+            assert name not in sc.POST_GAME and name not in sc.EARLY_UNTOUCHED, (name, sp)
+            assert pct <= 5, (name, sp, pct)
     # every starter family that Platinum lacks (or gives only as 1 of 3) is somewhere
     assert STARTER_BASES <= {sp for (_n, _k, sp) in share}
 
@@ -199,3 +200,69 @@ def test_chances_helper():
     for time in ('morning', 'day', 'night'):
         assert sum(sc.chances(t, 'land', time).values()) == 100
     assert sum(sc.chances(t, 'surf').values()) == 100
+
+
+# ------------------------------------------------------------------------------------ Pokedex area map
+def _area_list(maps):
+    return struct.pack(f'<{len(maps) + 1}I', *maps, 0)
+
+
+def test_area_layout_constants():
+    assert sc.AREA_MEMBER_COUNT == 4954 and len(sc.AREA_CATEGORIES) == 10
+    assert sc.area_member(0, 'dungeon_morning') == 4
+    assert sc.area_member(494, 'field_special_natdex') == sc.AREA_MEMBER_COUNT - 1
+    for a in sc.AREA_EDITS:
+        assert 4 <= sc.area_member(a.species, a.category) < sc.AREA_MEMBER_COUNT
+
+
+def test_every_added_placement_is_on_the_area_map():
+    adds = {(a.species, a.category, a.map) for a in sc.AREA_EDITS if a.op == 'add'}
+    for e in sc.EDITS:
+        mtype, num = sc.AREA_MAP_OF[e.name]
+        if e.kind == 'day':
+            times = ('day',)
+        elif e.kind == 'night':
+            times = ('night',)
+        elif e.kind == 'land' and e.slot in (2, 3):
+            times = ('morning',)
+        else:
+            times = ('morning', 'day', 'night')
+        for tm in times:
+            assert (e.species, f'{mtype}_{tm}', num) in adds, (e, tm)
+    # and nothing is added that is not one of our placements
+    placed = set()
+    for e in sc.EDITS:
+        mtype, num = sc.AREA_MAP_OF[e.name]
+        placed |= {(e.species, f'{mtype}_{tm}', num) for tm in ('morning', 'day', 'night')}
+    assert adds <= placed
+
+
+def test_area_removals_only_for_replaced_species():
+    replaced = {e.old_species for e in sc.EDITS}
+    for a in sc.AREA_EDITS:
+        if a.op == 'remove':
+            assert a.species in replaced, a
+
+
+def test_apply_area_add_remove_sorted():
+    for m in sc.area_members()[:40]:
+        edits = sc.area_edits_for(m)
+        have = sorted({a.map for a in edits if a.op == 'remove'} | {250})
+        new = sc.apply_area(m, _area_list(have))
+        words = list(struct.unpack(f'<{len(new) // 4}I', new))
+        assert words[-1] == 0 and words[:-1] == sorted(words[:-1])
+        for a in edits:
+            assert (a.map in words[:-1]) == (a.op == 'add')
+        assert 250 in words
+
+
+def test_apply_area_refuses_mismatch():
+    a = next(x for x in sc.AREA_EDITS if x.op == 'add')
+    m = sc.area_member(a.species, a.category)
+    already = sorted({x.map for x in sc.area_edits_for(m) if x.op == 'remove'} | {a.map})
+    with pytest.raises(ValueError):
+        sc.apply_area(m, _area_list(already))
+    with pytest.raises(ValueError):
+        sc.apply_area(m, b'\x01\x00\x00\x00')               # no terminator
+    untouched = next(i for i in range(4, sc.AREA_MEMBER_COUNT) if not sc.area_edits_for(i))
+    assert sc.apply_area(untouched, _area_list([3, 9])) == _area_list([3, 9])

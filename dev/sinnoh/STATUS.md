@@ -84,8 +84,8 @@ Details (exact flags/vars/items from pret scripts) follow below once researched.
 - [x] table layout verified against the ROM (183 x 424, pret JSON == ROM, 0 mismatches)
 - [x] obtainability audit (`python dev/sinnoh/check_plan.py --audit`)
 - [x] PLAN.md (dev/sinnoh/PLAN.md) — for Ilias to review
-- [x] sinnoh_complete.py — **SPEC_VERSION 1, 79 slot edits, 0 rate edits, digest a85b14a0371a7726c480184e1e73b90d193054b1**
-- [x] check_plan.py (exit 0) + client/tests/test_sinnoh_complete.py (15 tests)
+- [x] sinnoh_complete.py — **SPEC_VERSION 2 (final): 77 slot edits, 123 area edits, digest 7480f186adbfd87f8d5139aad63dabcac4388906**
+- [x] check_plan.py (exit 0) + client/tests/test_sinnoh_complete.py (20 tests)
 
 ### sinnoh-design -> engine (2026-10-26)
 - **Spec v1 is final from my side** (until Ilias reviews PLAN.md; any change = SPEC_VERSION bump + note here).
@@ -137,3 +137,23 @@ Details (exact flags/vars/items from pret scripts) follow below once researched.
   `client/tests/test_sinnoh_rom.py::test_shipped_spec_has_a_checked_rom` fails until the SHA1 is recorded — that
   is on purpose. **Tell me here when the spec is final**; I run `build_rom.py --update` then (and again after every
   later change). Meanwhile my e2e runs use the test spec (YL_SINNOH_SPEC=test).
+
+### sinnoh-design -> engine: **spec v2 is FINAL** (2026-10-26, after Ilias's review)
+- `SPEC_VERSION = 2`, **77 slot edits** (32 tables), 0 rate edits, **123 Pokédex area edits** (111 area members).
+  `sinnoh_complete.digest()` = `7480f186adbfd87f8d5139aad63dabcac4388906` (now covers AREA_EDITS too). Please
+  run `build_rom.py --update`, and make your `spec_digest` include `AREA_EDITS` as well.
+- Slot changes vs v1: the 12 starters moved from post-game routes to mid-game spots (Routes 206/208/209/211E/212N/
+  215, Valor Lakefront, Fuego Ironworks, Lake Valor + Lake Acuity surf); Routes 224/225/227/229/230, Resort Area and
+  Stark Mountain no longer change except Shuckle (224) and Trapinch (228). Same kinds as before (land/day/night/
+  surf/good_rod/super_rod).
+- **New: Pokédex area map** `/application/zukanlist/zkn_data/zukan_enc_platinum.narc` (4954 members). Members 0-3
+  untouched; member `4 + species + 495*category` (`sc.area_member(species, category)`, categories in
+  `sc.AREA_CATEGORIES`) = u32 map numbers, sorted, terminated by one 0 word. `sc.apply_area(member, data)` is pure,
+  returns the new bytes (add/remove, re-sorted; raises ValueError if an add is already there / a remove is missing /
+  bad terminator). `sc.area_members()` = the 111 members that change. **Members change size → the NARC (FAT + file
+  in the ROM's FNT/FAT) has to be rebuilt**, unlike pl_enc_data. check_plan.py proves our re-implementation of
+  Nintendo's area builder reproduces the ROM file exactly and that AREA_EDITS == builder(edited tables).
+- Great Marsh: surf lists are never reachable (no field moves in the Safari game) — validate() rejects marsh surf edits.
+- Ilias's other decisions that touch you: swarms rotate every 2 hours (shared), Regis/Regigigas loop opened by you,
+  event moments as I proposed (Secret Key at first Rotom or NatDex; Oak's Letter + Member Card at NatDex; Azure
+  Flute at NatDex + FLAG_CAUGHT_DIALGA + FLAG_CAUGHT_PALKIA).

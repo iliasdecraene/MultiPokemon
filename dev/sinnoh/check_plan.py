@@ -17,11 +17,14 @@ Sources (read-only):
 
 What it proves (exit code 0 only if all hold):
   1. every non-mythical evolution family has at least one way in single-player Platinum with the edits
-     (wild / special wild / gift / static / event), except the other-region legendaries that wait for Ilias's
-     decision (LEGENDARY_PENDING; they are reported, not failed);
+     (wild / special wild / gift / static / event), except the other-region legendaries (YellowLink raids, later)
+     and the Regis/Regigigas (opened by the engine) - reported, not failed;
   2. no species lost access: every species that vanilla offers in a wild category is still offered in the
      same category (or a more available one) somewhere no later in the story than before;
-  3. the spec itself is sane (sinnoh_complete.validate()).
+  3. the spec itself is sane (sinnoh_complete.validate());
+  4. the Pokedex area map: our re-implementation of Nintendo's area builder reproduces the ROM's
+     zukan_enc_platinum.narc exactly, and AREA_EDITS turn it into what the builder makes from the edited
+     tables - so every placement we add shows on the area map (with its time of day) and removed ones vanish.
 """
 import json
 import os
@@ -107,10 +110,12 @@ FAMILIES, EVOLUTIONS = families()
 FAMILY_OF = {m: root for root, ms in FAMILIES.items() for m in ms}
 
 MYTHICAL = {sid(n) for n in ('MEW', 'CELEBI', 'JIRACHI', 'DEOXYS', 'PHIONE', 'MANAPHY')}
-# Other-region legendaries + the Regi/Regigigas loop: options for Ilias, not in wild tables without asking.
-LEGENDARY_PENDING = {sid(n) for n in (
-    'MEWTWO', 'RAIKOU', 'ENTEI', 'SUICUNE', 'LUGIA', 'HO_OH', 'REGIROCK', 'REGICE', 'REGISTEEL', 'LATIAS',
-    'LATIOS', 'KYOGRE', 'GROUDON', 'RAYQUAZA', 'REGIGIGAS')}
+# Ilias: other-region legendaries (and the mythicals) come from YellowLink raids later - never wild lists.
+RAIDS_LATER = {sid(n) for n in (
+    'MEWTWO', 'RAIKOU', 'ENTEI', 'SUICUNE', 'LUGIA', 'HO_OH', 'LATIAS', 'LATIOS', 'KYOGRE', 'GROUDON', 'RAYQUAZA')}
+# The Regi ruins / Snowpoint Regigigas loop is opened by the engine (sinnoh_events), not by wild lists.
+ENGINE_UNLOCK = {sid(n) for n in ('REGIROCK', 'REGICE', 'REGISTEEL', 'REGIGIGAS')}
+LEGENDARY_PENDING = RAIDS_LATER | ENGINE_UNLOCK
 
 # ------------------------------------------------------------------------------------------ story stages
 # Rough story point at which a table's map can first be visited (0 = start ... 8 = 8 badges/Victory Road,
@@ -176,7 +181,8 @@ def pret_tables():
     out = []
     for name in order:
         d = json.load(open(os.path.join(ENC_DIR, name + '.json')))
-        t = {'name': name[len('encounters_'):], 'rates': {}, 'slots': {}}
+        t = {'name': name[len('encounters_'):], 'rates': {}, 'slots': {},
+             'map': (d['map_category']['map_type'], d['map_category']['map_number'])}
         t['rates'] = {'land': d['land_rate'], 'surf': d['surf_rate'], 'old_rod': d['old_rod_rate'],
                       'good_rod': d['good_rod_rate'], 'super_rod': d['super_rod_rate']}
         t['forms'] = [d['rate_form0'], d['rate_form1'], d['rate_form2'], d['rate_form3'], d['rate_form4'],
@@ -333,6 +339,8 @@ def sources(tables, extra):
                 for s in t['slots'][v]:
                     add(s, 'gba', n, POST_NATDEX)
         for kind in ('surf', 'old_rod', 'good_rod', 'super_rod'):
+            if marsh and kind == 'surf':
+                continue                    # no field moves in the Safari game: the marsh can't be surfed
             if t['rates'][kind]:
                 for (_lo, _hi, s) in t['slots'][kind]:
                     add(s, 'wild', f'{n} ({kind})', stage_of(n, kind))
@@ -399,6 +407,96 @@ def fam_name(root):
     return '/'.join(pretty(m) for m in FAMILIES[root])
 
 
+# ----------------------------------------------------------------------------------- Pokedex area map
+# map numbers the area script hard-codes (pret tools/scripts/make_pokedex_enc_platinum.py)
+AREA_HONEY_DUNGEONS = (21,)
+AREA_HONEY_FIELDS = (6, 7, 17, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 29, 30, 31, 34, 36, 37, 50)
+AREA_GREAT_MARSH = 4
+
+
+def area_data(tables, extra_json):
+    """The Pokedex area lists exactly as pret's tools/scripts/make_pokedex_enc_platinum.py builds them:
+    {member index: sorted map numbers} for members 4.. of zukan_enc_platinum.narc."""
+    n = sc.AREA_SPECIES_STRIDE
+    sets = [[set() for _ in range(n)] for _ in sc.AREA_CATEGORIES]
+    cat = {c: i for i, c in enumerate(sc.AREA_CATEGORIES)}
+    ht, gm, fb, tg = extra_json
+    for sp in [sid(x) for k in ('common', 'uncommon') for x in ht[k]]:
+        for m in AREA_HONEY_DUNGEONS:
+            sets[cat['dungeon_special']][sp].add(m)
+            sets[cat['dungeon_special_natdex']][sp].add(m)
+        for m in AREA_HONEY_FIELDS:
+            sets[cat['field_special']][sp].add(m)
+            sets[cat['field_special_natdex']][sp].add(m)
+    for x in gm['before_national_dex']:
+        sets[cat['dungeon_special']][sid(x)].add(AREA_GREAT_MARSH)
+    for x in gm['after_national_dex']:
+        sets[cat['dungeon_special_natdex']][sid(x)].add(AREA_GREAT_MARSH)
+    for t in tables:
+        mtype, num = t['map']
+        if mtype not in ('dungeon', 'field'):
+            continue
+        land = t['slots']['land']
+        for i, (_lv, sp) in enumerate(land):
+            sets[cat[mtype + '_morning']][sp].add(num)
+            if i in (2, 3):
+                sets[cat[mtype + '_day']][t['slots']['day'][i - 2]].add(num)
+                sets[cat[mtype + '_night']][t['slots']['night'][i - 2]].add(num)
+            else:
+                sets[cat[mtype + '_day']][sp].add(num)
+                sets[cat[mtype + '_night']][sp].add(num)
+        for kind in ('surf', 'old_rod', 'good_rod', 'super_rod'):
+            for (_mn, _mx, sp) in t['slots'][kind]:
+                for tm in ('_morning', '_day', '_night'):
+                    sets[cat[mtype + tm]][sp].add(num)
+        sets[cat[mtype + '_special']][0].add(num)
+        for sp in t['slots']['radar']:
+            sets[cat[mtype + '_special_natdex']][sp].add(num)
+        if t['name'] == 'mt_coronet_b1f':
+            sets[cat['dungeon_special']][sid(fb['species'])].add(num)
+            sets[cat['dungeon_special_natdex']][sid(fb['species'])].add(num)
+        if t['name'] == 'trophy_garden':
+            for x in tg['daily_encounters']:
+                sets[cat['dungeon_special_natdex']][sid(x)].add(num)
+    out = {}
+    for ci in range(len(sc.AREA_CATEGORIES)):
+        for sp in range(n):
+            out[sc.area_member(sp, sc.AREA_CATEGORIES[ci])] = sorted(sets[ci][sp])
+    return out
+
+
+def load_extra_json():
+    ht = json.load(open(os.path.join(ENC_DIR, 'encounters_honey_tree.json')))
+    gm = json.load(open(os.path.join(ENC_DIR, 'encounters_great_marsh_lookout.json')))
+    fb = json.load(open(os.path.join(ENC_DIR, 'encounters_mt_coronet_b1f.json')))['elusive_rod_encounter']
+    tg = json.load(open(os.path.join(ENC_DIR, 'encounters_trophy_garden.json')))
+    return ht, gm, fb, tg
+
+
+def area_bytes(maps):
+    return struct.pack(f'<{len(maps) + 1}I', *maps, 0)
+
+
+def rom_area_members():
+    if not os.path.exists(ROM):
+        return None
+    from yellowlink.ndsrom import NDSRom
+    narc = NDSRom(ROM).narc(sc.AREA_NARC_PATH)
+    return [narc.member(i) for i in range(len(narc))]
+
+
+def area_diff(van_area, new_area):
+    """AreaEdit-like tuples (species, category, map, op) turning van_area into new_area."""
+    out = []
+    for ci, c in enumerate(sc.AREA_CATEGORIES):
+        for sp in range(sc.AREA_SPECIES_STRIDE):
+            m = sc.area_member(sp, c)
+            a, b = set(van_area[m]), set(new_area[m])
+            out += [(sp, c, x, 'add') for x in sorted(b - a)]
+            out += [(sp, c, x, 'remove') for x in sorted(a - b)]
+    return out
+
+
 # ----------------------------------------------------------------------------------- change report
 def change_report(tables, new_tables):
     """Markdown: per edited table, every species whose chance changed (morning/day/night or water kind)."""
@@ -446,6 +544,7 @@ def apply_edits_to_tables(tables):
         new = sc.apply(i, raw)
         nt = sc.parse_table(new)
         nt['name'] = t['name']
+        nt['map'] = t['map']
         out.append(nt)
     return out
 
@@ -494,6 +593,36 @@ def main(argv):
     for e in sc.EDITS:
         if e.name in UNUSED:
             problems.append(f'edit on unused table {e.name}')
+    # 4. Pokedex area map: our generator reproduces the ROM's file, and the spec's AREA_EDITS turn it into exactly
+    #    what the game's own build would make from the edited tables (every new spot shown, removed spots gone).
+    ej = load_extra_json()
+    van_area = area_data(tables, ej)
+    new_area = area_data(new_tables, ej)
+    area_members = rom_area_members()
+    if area_members is not None:
+        if len(area_members) != sc.AREA_MEMBER_COUNT:
+            problems.append(f'area NARC has {len(area_members)} members, expected {sc.AREA_MEMBER_COUNT}')
+        for m, maps in van_area.items():
+            if area_members[m] != area_bytes(maps):
+                problems.append(f'area member {m}: our generator differs from the ROM')
+                break
+    if sorted(area_diff(van_area, new_area)) != sorted(tuple(a) for a in sc.AREA_EDITS):
+        problems.append('sinnoh_complete.AREA_EDITS out of date (regenerate from check_plan.area_diff)')
+    for m, maps in van_area.items():
+        if sc.apply_area(m, area_bytes(maps)) != area_bytes(new_area[m]):
+            problems.append(f'apply_area on member {m} does not give the expected list')
+            break
+    for e in sc.EDITS:
+        t = new_tables[e.table]
+        mtype, num = t['map']
+        if e.kind in ('land', 'day', 'night'):
+            times = {'land': ('morning', 'day', 'night') if e.slot not in (2, 3) else ('morning',),
+                     'day': ('day',), 'night': ('night',)}[e.kind]
+        else:
+            times = ('morning', 'day', 'night')
+        for tm in times:
+            if num not in new_area[sc.area_member(e.species, f'{mtype}_{tm}')]:
+                problems.append(f'{pretty(e.species)} at {e.name} ({tm}) missing from the Pokedex area map')
     # 3. no species lost access
     for s in range(1, 494):
         old = [x for x in van_src.get(s, []) if x[0] in PLAYABLE]
@@ -521,11 +650,15 @@ def main(argv):
     for g, label in AUDIT_GROUPS + [('mythical (excluded)', 'mythical (excluded: Mew, Celebi, Jirachi, '
                                                             'Deoxys, Manaphy/Phione)')]:
         print(f'  {label[:68]:<68} {cv[g]:>7}  {cn[g]:>9}')
-    print(f'edits: {len(sc.EDITS)} slot edits, {len(sc.RATE_EDITS)} rate edits, spec v{sc.SPEC_VERSION}')
+    print(f'edits: {len(sc.EDITS)} slot edits, {len(sc.RATE_EDITS)} rate edits, {len(sc.AREA_EDITS)} Pokedex '
+          f'area edits, spec v{sc.SPEC_VERSION}' + ('' if area_members is None else
+                                                    ' (area map generator == ROM)'))
     print(f'Sinnoh dex: {len(sinnoh)} entries; not catchable in vanilla single-player: '
           + ', '.join(pretty(m) for m in sinnoh_missing_vanilla) + ' (+ one of Cranidos/Shieldon per save)')
     if pending:
-        print('pending Ilias decision: ' + ', '.join(fam_name(r) for r in pending))
+        print('raids (later): ' + ', '.join(fam_name(r) for r in pending if r in RAIDS_LATER))
+        print('engine unlock (Regi ruins + Snowpoint Temple): '
+              + ', '.join(fam_name(r) for r in pending if r in ENGINE_UNLOCK))
     if '--audit' in argv or '--markdown' in argv:
         md = '--markdown' in argv
         for g, label in AUDIT_GROUPS:

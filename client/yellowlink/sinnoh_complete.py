@@ -4,8 +4,9 @@ Ilias's rule: normal Platinum stays normal Platinum, but every Pokemon family (e
 YellowLink raid later) can be found in Sinnoh. The design and the reasons are in dev/sinnoh/PLAN.md; the proof
 that it works is dev/sinnoh/check_plan.py. This module holds only our own data (table numbers, slot numbers,
 national dex numbers, levels) - no bytes from the ROM. The engine (sinnoh_rom.py) applies EDITS to the
-player's own vanilla ROM: one file, /fielddata/encountdata/pl_enc_data.narc, 183 members x 424 bytes, edited in
-place (no size change).
+player's own vanilla ROM: /fielddata/encountdata/pl_enc_data.narc (183 members x 424 bytes, edited in place, no
+size change) and, so the Pokedex "Area" screen shows the new spots, AREA_EDITS to
+/application/zukanlist/zkn_data/zukan_enc_platinum.narc (variable-size lists, see below).
 
 Table layout (verified against the real US ROM rev 0 and pret/pokeplatinum: all 183 tables identical):
     off  size  field
@@ -22,14 +23,15 @@ Table layout (verified against the real US ROM rev 0 and pret/pokeplatinum: all 
     292  4+40  old rod  (weights 60,30,5,4,1 %)
     336  4+40  good rod (weights 40,40,15,4,1 %)
     380  4+40  super rod(weights 40,40,15,4,1 %)
-Great Marsh tables: land slots 6,7 are always replaced by the daily marsh Pokemon (never edit them).
+Great Marsh tables: land slots 6,7 are always replaced by the daily marsh Pokemon (never edit them), and its
+surf lists are never used (no field moves in the Safari game; fishing works).
 Trophy Garden: land slots 6,7 are replaced by Mr. Backlot's daily Pokemon after the National Dex.
 """
 import hashlib
 import struct
 from typing import NamedTuple
 
-SPEC_VERSION = 1
+SPEC_VERSION = 2
 NARC_PATH = '/fielddata/encountdata/pl_enc_data.narc'
 TABLE_COUNT = 183
 TABLE_SIZE = 424
@@ -126,15 +128,15 @@ class RateEdit(NamedTuple):
 # Species used by the design (national dex numbers; names only for people, logs and tests).
 SPECIES = {
     'BULBASAUR': 1, 'CHARMANDER': 4, 'SQUIRTLE': 7, 'CATERPIE': 10, 'WEEDLE': 13, 'EKANS': 23, 'SANDSHREW': 27,
-    'VULPIX': 37, 'GOLBAT': 42, 'GLOOM': 44, 'DUGTRIO': 51, 'PSYDUCK': 54, 'GROWLITHE': 58, 'MACHOP': 66,
-    'MACHOKE': 67, 'TENTACRUEL': 73, 'GEODUDE': 74, 'GRAVELER': 75, 'PONYTA': 77, 'RHYHORN': 111, 'GYARADOS': 130,
-    'CHIKORITA': 152, 'CYNDAQUIL': 155, 'TOTODILE': 158, 'HOOTHOOT': 163, 'MURKROW': 198, 'MISDREAVUS': 200,
+    'VULPIX': 37, 'GOLBAT': 42, 'DUGTRIO': 51, 'GOLDUCK': 55, 'GROWLITHE': 58, 'MACHOP': 66, 'MACHOKE': 67,
+    'GEODUDE': 74, 'GRAVELER': 75, 'PONYTA': 77, 'MAGNEMITE': 81, 'RHYHORN': 111, 'GYARADOS': 130, 'CHIKORITA': 152,
+    'CYNDAQUIL': 155, 'TOTODILE': 158, 'HOOTHOOT': 163, 'MARILL': 183, 'MURKROW': 198, 'MISDREAVUS': 200,
     'PINECO': 204, 'STEELIX': 208, 'SHUCKLE': 213, 'TEDDIURSA': 216, 'HOUNDOUR': 228, 'TREECKO': 252,
-    'TORCHIC': 255, 'MUDKIP': 258, 'BEAUTIFLY': 267, 'DUSTOX': 269, 'LOTAD': 270, 'SEEDOT': 273, 'RALTS': 280,
-    'SURSKIT': 283, 'SABLEYE': 302, 'MAWILE': 303, 'ROSELIA': 315, 'NUMEL': 322, 'TRAPINCH': 328, 'ZANGOOSE': 335,
-    'SEVIPER': 336, 'LUNATONE': 337, 'SOLROCK': 338, 'CLAMPERL': 366, 'TURTWIG': 387, 'CHIMCHAR': 390,
-    'PIPLUP': 393, 'BIDOOF': 399, 'BIBAREL': 400, 'KRICKETOT': 401, 'BUDEW': 406, 'CRANIDOS': 408, 'SHIELDON': 410,
-    'FLOATZEL': 419, 'SHELLOS': 422, 'BUNEARY': 427, 'GLAMEOW': 431, 'STUNKY': 434, 'LUMINEON': 457,
+    'TORCHIC': 255, 'MUDKIP': 258, 'DUSTOX': 269, 'LOTAD': 270, 'SEEDOT': 273, 'RALTS': 280, 'KIRLIA': 281,
+    'SABLEYE': 302, 'MAWILE': 303, 'ROSELIA': 315, 'TRAPINCH': 328, 'ZANGOOSE': 335, 'SEVIPER': 336,
+    'LUNATONE': 337, 'SOLROCK': 338, 'CLAMPERL': 366, 'TURTWIG': 387, 'CHIMCHAR': 390, 'PIPLUP': 393, 'BIDOOF': 399,
+    'BIBAREL': 400, 'KRICKETOT': 401, 'BUDEW': 406, 'CRANIDOS': 408, 'SHIELDON': 410, 'FLOATZEL': 419,
+    'SHELLOS': 422, 'BUNEARY': 427, 'GLAMEOW': 431, 'STUNKY': 434, 'BRONZOR': 436, 'LUMINEON': 457,
 }
 
 # (table name, kind, slot, new species, new level | (min, max), old species, old level | (min, max))
@@ -216,35 +218,251 @@ _DESIGN = (
     ('victory_road_1f_room_1', 'land', 10, 'SHIELDON', 48, 'STEELIX', 50),
     ('victory_road_1f_room_3', 'land', 8, 'CRANIDOS', 48, 'STEELIX', 50),
     ('victory_road_1f_room_3', 'land', 10, 'CRANIDOS', 48, 'STEELIX', 50),
+    # Starters (before the League)
+    ('route_209', 'land', 7, 'CHIKORITA', 19, 'ROSELIA', 20),
+    ('route_212_north', 'land', 6, 'BULBASAUR', 23, 'KIRLIA', 24),
+    ('route_215', 'land', 8, 'TREECKO', 21, 'MARILL', 22),
+    ('route_215', 'land', 10, 'TREECKO', 21, 'MARILL', 22),
+    ('valor_lakefront', 'land', 7, 'TURTWIG', 26, 'BIBAREL', 26),
+    ('route_206', 'land', 6, 'CYNDAQUIL', 17, 'MACHOP', 18),
+    ('fuego_ironworks_outside', 'land', 6, 'CHARMANDER', 28, 'MAGNEMITE', 28),
+    ('fuego_ironworks_outside', 'land', 7, 'TORCHIC', 29, 'MAGNEMITE', 30),
+    ('route_211_east', 'land', 9, 'CHIMCHAR', 28, 'BRONZOR', 29),
+    ('route_211_east', 'land', 11, 'CHIMCHAR', 28, 'BRONZOR', 29),
+    ('route_212_north', 'surf', 2, 'SQUIRTLE', (20, 30), 'GOLDUCK', (20, 40)),
+    ('route_208', 'surf', 2, 'TOTODILE', (20, 30), 'GOLDUCK', (20, 40)),
+    ('lake_valor', 'surf', 2, 'MUDKIP', (20, 30), 'GOLDUCK', (20, 40)),
+    ('lake_acuity', 'surf', 2, 'PIPLUP', (20, 30), 'GOLDUCK', (20, 40)),
     # Route 224
-    ('route_224', 'land', 6, 'BULBASAUR', 49, 'GLOOM', 51),
     ('route_224', 'land', 9, 'SHUCKLE', 50, 'DUSTOX', 52),
-    # Route 225
-    ('route_225', 'surf', 2, 'TOTODILE', (35, 45), 'PSYDUCK', (35, 45)),
-    # Route 227 and Stark Mountain
-    ('route_227', 'land', 7, 'CHIMCHAR', 50, 'GRAVELER', 53),
-    ('route_227', 'land', 8, 'CHARMANDER', 50, 'NUMEL', 51),
-    ('route_227', 'land', 10, 'CHARMANDER', 50, 'NUMEL', 51),
-    ('route_227', 'land', 9, 'CYNDAQUIL', 50, 'RHYHORN', 52),
-    ('route_227', 'land', 11, 'CYNDAQUIL', 50, 'RHYHORN', 52),
-    ('stark_mountain_outside', 'land', 7, 'TORCHIC', 50, 'GRAVELER', 53),
     # Route 228
     ('route_228', 'land', 6, 'TRAPINCH', 49, 'DUGTRIO', 52),
     ('route_228', 'land', 7, 'TRAPINCH', 49, 'DUGTRIO', 50),
-    # Route 229
-    ('route_229', 'land', 7, 'TURTWIG', 48, 'ROSELIA', 50),
-    ('route_229', 'land', 8, 'TREECKO', 48, 'BEAUTIFLY', 48),
-    ('route_229', 'land', 10, 'TREECKO', 48, 'BEAUTIFLY', 48),
-    ('route_229', 'land', 9, 'CHIKORITA', 48, 'DUSTOX', 48),
-    ('route_229', 'land', 11, 'CHIKORITA', 48, 'DUSTOX', 48),
-    ('route_229', 'surf', 2, 'SQUIRTLE', (35, 45), 'SURSKIT', (35, 45)),
-    # Resort Area
-    ('resort_area', 'surf', 2, 'MUDKIP', (35, 45), 'PSYDUCK', (35, 45)),
-    # Route 230
-    ('route_230', 'surf', 2, 'PIPLUP', (35, 45), 'TENTACRUEL', (35, 55)),
 )
 
 RATE_EDITS: tuple = ()
+
+# ------------------------------------------------------------------------------------ Pokedex area map
+# The Pokedex "Area" screen reads its own file, built by Nintendo from the same wild lists. Layout (pret
+# tools/scripts/make_pokedex_enc_platinum.py, verified against the ROM by check_plan.py): members 0-3 = map
+# positions (never touched); member 4 + species + 495 * category = the list of map numbers where that species
+# shows up in that category: u32 map numbers, sorted, ending with a 0 word. Members change size, so the
+# engine rebuilds this NARC (only these lists change). Map numbers are the encounter table's "map number"
+# (dungeon or field numbering, see AREA_CATEGORIES); several tables share one number (e.g. all Iron Island rooms).
+AREA_NARC_PATH = '/application/zukanlist/zkn_data/zukan_enc_platinum.narc'
+AREA_SPECIES_STRIDE = 495            # species 0..494 per category (pret: len(Species) - 1)
+AREA_FIRST_LIST = 4
+AREA_CATEGORIES = ('dungeon_morning', 'dungeon_day', 'dungeon_night', 'dungeon_special', 'dungeon_special_natdex',
+                   'field_morning', 'field_day', 'field_night', 'field_special', 'field_special_natdex')
+AREA_MEMBER_COUNT = AREA_FIRST_LIST + AREA_SPECIES_STRIDE * len(AREA_CATEGORIES)     # 4954
+
+
+class AreaEdit(NamedTuple):
+    species: int
+    category: str               # one of AREA_CATEGORIES
+    map: int                    # map number in that category's numbering
+    op: str                     # 'add' (must not be there yet) or 'remove' (must be there)
+
+
+def area_member(species: int, category: str) -> int:
+    return AREA_FIRST_LIST + species + AREA_SPECIES_STRIDE * AREA_CATEGORIES.index(category)
+
+
+# Generated from EDITS by dev/sinnoh/check_plan.py --area-edits (the same rules as Nintendo's own build):
+# every new placement is added with its time of day, and a species that no longer lives in a map loses it.
+_AREA = (
+    ('BULBASAUR', 'field_day', 27, 'add'),
+    ('BULBASAUR', 'field_morning', 27, 'add'),
+    ('BULBASAUR', 'field_night', 27, 'add'),
+    ('CHARMANDER', 'field_day', 7, 'add'),
+    ('CHARMANDER', 'field_morning', 7, 'add'),
+    ('CHARMANDER', 'field_night', 7, 'add'),
+    ('SQUIRTLE', 'field_day', 27, 'add'),
+    ('SQUIRTLE', 'field_morning', 27, 'add'),
+    ('SQUIRTLE', 'field_night', 27, 'add'),
+    ('CATERPIE', 'dungeon_day', 2, 'add'),
+    ('CATERPIE', 'dungeon_morning', 2, 'add'),
+    ('CATERPIE', 'dungeon_night', 2, 'add'),
+    ('WEEDLE', 'dungeon_day', 2, 'add'),
+    ('WEEDLE', 'dungeon_morning', 2, 'add'),
+    ('WEEDLE', 'dungeon_night', 2, 'add'),
+    ('EKANS', 'field_day', 28, 'add'),
+    ('EKANS', 'field_morning', 28, 'add'),
+    ('EKANS', 'field_night', 28, 'add'),
+    ('SANDSHREW', 'dungeon_day', 12, 'add'),
+    ('SANDSHREW', 'dungeon_morning', 12, 'add'),
+    ('SANDSHREW', 'dungeon_night', 12, 'add'),
+    ('VULPIX', 'field_day', 22, 'add'),
+    ('VULPIX', 'field_day', 30, 'add'),
+    ('VULPIX', 'field_morning', 22, 'add'),
+    ('VULPIX', 'field_morning', 30, 'add'),
+    ('VULPIX', 'field_night', 22, 'add'),
+    ('VULPIX', 'field_night', 30, 'add'),
+    ('GROWLITHE', 'field_day', 20, 'add'),
+    ('GROWLITHE', 'field_morning', 20, 'add'),
+    ('GROWLITHE', 'field_night', 20, 'add'),
+    ('CHIKORITA', 'field_day', 22, 'add'),
+    ('CHIKORITA', 'field_morning', 22, 'add'),
+    ('CHIKORITA', 'field_night', 22, 'add'),
+    ('CYNDAQUIL', 'field_day', 19, 'add'),
+    ('CYNDAQUIL', 'field_morning', 19, 'add'),
+    ('CYNDAQUIL', 'field_night', 19, 'add'),
+    ('TOTODILE', 'field_day', 21, 'add'),
+    ('TOTODILE', 'field_morning', 21, 'add'),
+    ('TOTODILE', 'field_night', 21, 'add'),
+    ('MURKROW', 'dungeon_night', 2, 'add'),
+    ('MISDREAVUS', 'dungeon_night', 2, 'add'),
+    ('PINECO', 'field_day', 23, 'add'),
+    ('PINECO', 'field_morning', 23, 'add'),
+    ('PINECO', 'field_night', 23, 'add'),
+    ('SHUCKLE', 'field_day', 38, 'add'),
+    ('SHUCKLE', 'field_morning', 38, 'add'),
+    ('SHUCKLE', 'field_night', 38, 'add'),
+    ('TEDDIURSA', 'field_day', 25, 'add'),
+    ('TEDDIURSA', 'field_day', 26, 'add'),
+    ('TEDDIURSA', 'field_morning', 25, 'add'),
+    ('TEDDIURSA', 'field_morning', 26, 'add'),
+    ('TEDDIURSA', 'field_night', 25, 'add'),
+    ('TEDDIURSA', 'field_night', 26, 'add'),
+    ('TREECKO', 'field_day', 31, 'add'),
+    ('TREECKO', 'field_morning', 31, 'add'),
+    ('TREECKO', 'field_night', 31, 'add'),
+    ('TORCHIC', 'field_day', 7, 'add'),
+    ('TORCHIC', 'field_morning', 7, 'add'),
+    ('TORCHIC', 'field_night', 7, 'add'),
+    ('MUDKIP', 'dungeon_day', 18, 'add'),
+    ('MUDKIP', 'dungeon_morning', 18, 'add'),
+    ('MUDKIP', 'dungeon_night', 18, 'add'),
+    ('LOTAD', 'field_day', 18, 'add'),
+    ('LOTAD', 'field_morning', 18, 'add'),
+    ('LOTAD', 'field_night', 18, 'add'),
+    ('SEEDOT', 'dungeon_day', 2, 'add'),
+    ('SEEDOT', 'dungeon_morning', 2, 'add'),
+    ('SEEDOT', 'dungeon_night', 2, 'add'),
+    ('SEEDOT', 'field_day', 23, 'add'),
+    ('SEEDOT', 'field_morning', 23, 'add'),
+    ('SEEDOT', 'field_night', 23, 'add'),
+    ('SABLEYE', 'dungeon_day', 15, 'add'),
+    ('SABLEYE', 'dungeon_morning', 15, 'add'),
+    ('SABLEYE', 'dungeon_night', 15, 'add'),
+    ('MAWILE', 'dungeon_day', 15, 'add'),
+    ('MAWILE', 'dungeon_morning', 15, 'add'),
+    ('MAWILE', 'dungeon_night', 15, 'add'),
+    ('TRAPINCH', 'field_day', 41, 'add'),
+    ('TRAPINCH', 'field_morning', 41, 'add'),
+    ('TRAPINCH', 'field_night', 41, 'add'),
+    ('ZANGOOSE', 'field_day', 21, 'add'),
+    ('ZANGOOSE', 'field_morning', 21, 'add'),
+    ('ZANGOOSE', 'field_night', 21, 'add'),
+    ('SEVIPER', 'field_day', 21, 'add'),
+    ('SEVIPER', 'field_morning', 21, 'add'),
+    ('SEVIPER', 'field_night', 21, 'add'),
+    ('LUNATONE', 'dungeon_night', 3, 'add'),
+    ('SOLROCK', 'dungeon_day', 3, 'add'),
+    ('CLAMPERL', 'field_day', 35, 'add'),
+    ('CLAMPERL', 'field_day', 36, 'add'),
+    ('CLAMPERL', 'field_morning', 35, 'add'),
+    ('CLAMPERL', 'field_morning', 36, 'add'),
+    ('CLAMPERL', 'field_night', 35, 'add'),
+    ('CLAMPERL', 'field_night', 36, 'add'),
+    ('TURTWIG', 'field_day', 10, 'add'),
+    ('TURTWIG', 'field_morning', 10, 'add'),
+    ('TURTWIG', 'field_night', 10, 'add'),
+    ('CHIMCHAR', 'field_day', 26, 'add'),
+    ('CHIMCHAR', 'field_morning', 26, 'add'),
+    ('CHIMCHAR', 'field_night', 26, 'add'),
+    ('PIPLUP', 'dungeon_day', 19, 'add'),
+    ('PIPLUP', 'dungeon_morning', 19, 'add'),
+    ('PIPLUP', 'dungeon_night', 19, 'add'),
+    ('CRANIDOS', 'dungeon_day', 6, 'add'),
+    ('CRANIDOS', 'dungeon_morning', 6, 'add'),
+    ('CRANIDOS', 'dungeon_night', 6, 'add'),
+    ('SHIELDON', 'dungeon_day', 6, 'add'),
+    ('SHIELDON', 'dungeon_morning', 6, 'add'),
+    ('SHIELDON', 'dungeon_night', 6, 'add'),
+    ('GLAMEOW', 'field_day', 34, 'add'),
+    ('GLAMEOW', 'field_morning', 34, 'add'),
+    ('GLAMEOW', 'field_night', 34, 'add'),
+    ('STUNKY', 'field_day', 19, 'add'),
+    ('STUNKY', 'field_day', 30, 'add'),
+    ('STUNKY', 'field_morning', 19, 'add'),
+    ('STUNKY', 'field_morning', 30, 'add'),
+    ('STUNKY', 'field_night', 19, 'add'),
+    ('STUNKY', 'field_night', 30, 'add'),
+    ('HOOTHOOT', 'dungeon_night', 2, 'remove'),
+    ('BIDOOF', 'dungeon_day', 2, 'remove'),
+    ('BIDOOF', 'dungeon_morning', 2, 'remove'),
+    ('BIDOOF', 'dungeon_night', 2, 'remove'),
+    ('KRICKETOT', 'dungeon_night', 2, 'remove'),
+)
+AREA_EDITS = tuple(AreaEdit(SPECIES[n], c, m, op) for n, c, m, op in _AREA)
+# (map type, map number) of every table we edit, as the area file numbers them (for tests and people).
+AREA_MAP_OF = {
+    'eterna_forest': ('dungeon', 2),
+    'fuego_ironworks_outside': ('field', 7),
+    'iron_island_b1f_left_room': ('dungeon', 15),
+    'iron_island_b1f_right_room': ('dungeon', 15),
+    'iron_island_b2f_left_room': ('dungeon', 15),
+    'iron_island_b2f_right_room': ('dungeon', 15),
+    'iron_island_b3f': ('dungeon', 15),
+    'lake_acuity': ('dungeon', 19),
+    'lake_valor': ('dungeon', 18),
+    'mt_coronet_2f': ('dungeon', 3),
+    'mt_coronet_3f': ('dungeon', 3),
+    'route_205_north': ('field', 18),
+    'route_206': ('field', 19),
+    'route_207': ('field', 20),
+    'route_208': ('field', 21),
+    'route_209': ('field', 22),
+    'route_210_south': ('field', 23),
+    'route_211_east': ('field', 26),
+    'route_211_west': ('field', 25),
+    'route_212_north': ('field', 27),
+    'route_212_south': ('field', 28),
+    'route_214': ('field', 30),
+    'route_215': ('field', 31),
+    'route_218': ('field', 34),
+    'route_219': ('field', 35),
+    'route_221': ('field', 36),
+    'route_224': ('field', 38),
+    'route_228': ('field', 41),
+    'valor_lakefront': ('field', 10),
+    'victory_road_1f_room_1': ('dungeon', 6),
+    'victory_road_1f_room_3': ('dungeon', 6),
+    'wayward_cave_1f': ('dungeon', 12),
+}
+
+
+def area_edits_for(member_index: int) -> list:
+    return [a for a in AREA_EDITS if area_member(a.species, a.category) == member_index]
+
+
+def area_members() -> list:
+    """Member indexes the engine has to rewrite (sorted)."""
+    return sorted({area_member(a.species, a.category) for a in AREA_EDITS})
+
+
+def apply_area(member_index: int, data: bytes) -> bytes:
+    """Patch one area list. Pure; raises ValueError if the list is malformed or an add/remove does not match
+    vanilla (map already there / not there)."""
+    if len(data) % 4 or len(data) < 4:
+        raise ValueError(f'area member {member_index}: bad size {len(data)}')
+    words = list(struct.unpack(f'<{len(data) // 4}I', data))
+    if words[-1] != 0 or 0 in words[:-1]:
+        raise ValueError(f'area member {member_index}: list not terminated by a single 0')
+    maps = words[:-1]
+    for a in area_edits_for(member_index):
+        where = f'area member {member_index} (species {a.species} {a.category} map {a.map})'
+        if a.op == 'add':
+            if a.map in maps:
+                raise ValueError(f'{where}: already there')
+            maps.append(a.map)
+        else:
+            if a.map not in maps:
+                raise ValueError(f'{where}: not there')
+            maps.remove(a.map)
+    maps.sort()
+    return struct.pack(f'<{len(maps) + 1}I', *maps, 0)
 
 # Design guard rails (checked by client/tests/test_sinnoh_complete.py):
 # the first routes/caves of the game stay exactly vanilla ...
@@ -387,8 +605,18 @@ def validate() -> list:
             probs.append(f'{where}: species-only slot with a level')
         if e.name.startswith('great_marsh') and e.kind == 'land' and e.slot in (6, 7):
             probs.append(f'{where}: Great Marsh land slots 6/7 are always replaced by the daily mon')
+        if e.name.startswith('great_marsh') and e.kind == 'surf':
+            probs.append(f'{where}: no surfing in the Great Marsh (Safari game: no field moves)')
         if e.name == 'trophy_garden' and e.kind == 'land' and e.slot in (6, 7):
             probs.append(f'{where}: Trophy Garden slots 6/7 are replaced post-game')
+    seen_a = set()
+    for a in AREA_EDITS:
+        if (a.category not in AREA_CATEGORIES or a.op not in ('add', 'remove') or not 1 <= a.map <= 255
+                or not 1 <= a.species <= MAX_SPECIES):
+            probs.append(f'bad area edit {a}')
+        if (a.species, a.category, a.map) in seen_a:
+            probs.append(f'area edit twice: {a}')
+        seen_a.add((a.species, a.category, a.map))
     if sum(LAND_WEIGHTS) != 100 or any(sum(w) != 100 for w in WATER_WEIGHTS.values()):
         probs.append('rarity weights do not sum to 100')
     for r in RATE_EDITS:
@@ -400,7 +628,7 @@ def validate() -> list:
 def digest() -> str:
     """Stable digest of the edits (the engine pins the built ROM's SHA1 to SPEC_VERSION + this)."""
     h = hashlib.sha1()
-    h.update(repr((SPEC_VERSION, EDITS, RATE_EDITS)).encode())
+    h.update(repr((SPEC_VERSION, EDITS, RATE_EDITS, AREA_EDITS)).encode())
     return h.hexdigest()
 
 
