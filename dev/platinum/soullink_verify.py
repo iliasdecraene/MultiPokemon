@@ -360,7 +360,10 @@ def build_pc6(rig):
     """pt_pc (at the Sandgem PC) with the party and box 1 of pt_sl_party6 copied in (RAM, records made by the
     game) -> pt_sl_pc6.dsst."""
     rig.load("pt_sl_party6.dsst")
-    party = rig.pm.party_raw()
+    party = None
+    while party is None:            # the game works on the lead every few frames (decrypted in place)
+        party = rig.pm.party_checked()
+        rig.d.run(1)
     box = rig.pm.box_raw(0)
     rig.load("pt_pc.dsst")
     write_party(rig, party)
@@ -552,6 +555,9 @@ def faint_lead(rig, on=None, limit=25):
             watch()
             rig.d.run(1)
             if seen[-1] and seen[-1][1] == 0:
+                for _ in range(30):
+                    watch()
+                    rig.d.run(1)
                 return True
             if i > 150 and rig.menu_shown():
                 break
@@ -680,10 +686,111 @@ def game_withdraw(rig, pos):
     close_pc(rig)
 
 
+def stable_state(rig):
+    """(party count, party records via party_checked, all 18 boxes normalised, current box) - waits for a frame
+    where no party record is being worked on."""
+    from yellowlink.platinum_pc import normalise
+    pm = rig.pm
+    for _ in range(30):
+        p = pm.party_checked()
+        if p is not None:
+            break
+        rig.d.run(1)
+    boxes = [[normalise(r)[1] for r in pm.box_raw(b)] for b in range(18)]
+    return pm.party_count(), p, boxes, pm.current_box()
+
+
+def check_boxmoves(rig):
+    pm = rig.pm
+    for slot in (2, 5, 0):
+        rig.load("pt_sl_pc6.dsst")
+        key = party_keys(pm)[slot]
+        game_deposit(rig, slot)
+        a = stable_state(rig)
+        rig.load("pt_sl_pc6.dsst")
+        moved = pm.move_party_to_box(slot)
+        b = stable_state(rig)
+        ok(moved and a == b and a[0] == 5 and P.mon_key(pm.current_box_records()[-1]) == key,
+           "deposit party slot %d: move_party_to_box = the game's STORE byte for byte (party, count, all 18 boxes, "
+           "current box)" % (slot + 1))
+        if slot == 5:
+            rig.settle()
+            rig.save("pt_sl_pc5.dsst")
+    # withdraw: box 1 holds slots 0, 1 (catches) and 2 (the deposited 6th mon)
+    for pos in (0, 2):
+        rig.load("pt_sl_pc5.dsst")
+        recs = pm.current_box_records()
+        key = P.mon_key(recs[pos])
+        game_withdraw(rig, pos)
+        a = stable_state(rig)
+        rig.load("pt_sl_pc5.dsst")
+        moved = pm.move_box_to_party(pos)
+        b = stable_state(rig)
+        ok(moved and a == b and a[0] == 6 and party_keys(pm)[-1] == key,
+           "withdraw box slot %d: move_box_to_party = the game's WITHDRAW byte for byte (party record incl. "
+           "level/stats/HP from pk4.to_party, box slot cleared)" % (pos + 1))
+    # the game accepts our moves: open the PC on the result, the deposited mon is shown and can be withdrawn
+    rig.load("pt_sl_pc6.dsst")
+    key = party_keys(pm)[3]
+    pm.move_party_to_box(3)
+    rig.settle()
+    idx = len(pm.current_box_records()) - 1
+    game_withdraw(rig, idx)
+    ok(pm.party_count() == 6 and party_keys(pm)[-1] == key,
+       "the game's own WITHDRAW takes back a mon we deposited (box slot %d)" % (idx + 1))
+    # refusals
+    rig.load("pt_sl_route202.dsst")
+    ok(not pm.move_party_to_box(0) and pm.party_count() == 1, "move_party_to_box refuses the last party mon")
+    rig.load("pt_sl_pc6.dsst")
+    party = pm.party_checked()
+    others = []
+    for i, r in enumerate(party):
+        pk = pk4.PK4(pk4.decrypt(r))
+        if i != 1:
+            pk.hp = 0
+        others.append(pk.encrypted())
+    write_party(rig, others)
+    ok(not pm.move_party_to_box(1) and pm.party_count() == 6,
+       "refused when no OTHER non-egg party mon has HP > 0 (the game's 'last Pokémon' rule)")
+    ok(pm.move_party_to_box(0) and pm.party_count() == 5, "a fainted mon can be boxed while another can fight")
+    rig.load("pt_sl_pc6.dsst")
+    party = pm.party_checked()
+    pk = pk4.PK4(pk4.decrypt(party[2]))
+    pk.item = P.MAIL_FIRST
+    write_party(rig, party[:2] + [pk.encrypted()] + party[3:])
+    ok(not pm.move_party_to_box(2) and pm.party_count() == 6, "refused when the mon holds Mail (GRASS MAIL)")
+    # current box full -> next box with room becomes current
+    rig.load("pt_sl_pc6.dsst")
+    filler = pm.box_raw(0)[0]
+    for i in range(30):
+        if pm.box_raw(0)[i] == pk4.EMPTY_BOX:
+            pm.write_box_slot(0, i, filler)
+    key = party_keys(pm)[4]
+    ok(pm.move_party_to_box(4) and pm.current_box() == 1 and [P.mon_key(r) for r in pm.current_box_records()] == [key],
+       "current box full: stored in box 2, which becomes the current box (like a catch with a full party)")
+    ok(not pm.move_box_to_party(5) and pm.move_box_to_party(0) and pm.party_count() == 6
+       and not pm.move_box_to_party(0) and party_keys(pm)[-1] == key,
+       "move_box_to_party: bad index -> False; withdraw back; party full -> False")
+
+
+def check_keys(rig):
+    """mon_key survives deposit/withdraw (above) and here: the in-place-decrypted state, level up + evolution."""
+    rig.load("pt_sl_party6.dsst")
+    pm = rig.pm
+    raws = []
+    for _ in range(40):
+        raws.append(pm.party_raw()[0])
+        rig.d.run(1)
+    bad = [r for r in raws if not pk4.valid(r)]
+    ok(bad and len({P.mon_key(r) for r in raws}) == 1 and all(P.mon_info(r) for r in raws if pk4.valid(r)),
+       "the lead is decrypted in place every few frames in the overworld (%d of 40 frames unreadable as encrypted); "
+       "mon_key() reads the same key on every frame" % len(bad))
+
+
 # ---------------------------------------------------------------------------------------------------------
 SECTIONS = [("areas", check_areas), ("tutorial", check_tutorial), ("wild", check_wild), ("catch", check_catch),
             ("trainer", check_trainer), ("faint", check_faint), ("blackout", check_blackout),
-            ("party6", check_party6)]
+            ("party6", check_party6), ("boxmoves", check_boxmoves), ("keys", check_keys)]
 
 
 def main():
