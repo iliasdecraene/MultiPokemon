@@ -623,6 +623,22 @@ class App(ChallengeMixin, TradeMixin):
         if self.net.status == "rejected":
             self.sys_msg("Server refused connection: " + self.net.status_detail, ui.BAD)
 
+    def on_moved(self, msg):
+        """This server was merged into another one: take over its address + password (same saves, same player
+        id) and reconnect there. SPEC.md section 8."""
+        url, key = str(msg.get("url") or ""), str(msg.get("key") or "")
+        sid = self.cfg.server_id
+        try:
+            twin = self.cfg.move_server(sid, url, key)
+        except ValueError:
+            log.warning("ignoring a bad 'moved' message: %r", msg)
+            return
+        log.info("server moved to %s (twin entry: %s)", url, twin)
+        name = self.cfg.server_label(self.cfg.active_server)
+        if self.chal or self.trade or self.battle or self.live:
+            self.sys_msg(f"This server moved - reconnecting to {name}...", ui.ACCENT)
+        self._restart_on(sid, "This server moved - reconnecting...")
+
     def on_welcome(self, msg):
         self.server_name = str(msg.get("server_name") or "")[:30]
         entry = self.cfg.server(self.cfg.server_id)

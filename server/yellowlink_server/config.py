@@ -19,6 +19,10 @@ class Config:
     motd: str = "Welcome!"
     name: str = ""                 # shown to players (sidebar + welcome); e.g. "Vizkes Pokémon"
     data_dir: str = "data"
+    # Forwarding (after merging this server into another, SPEC.md section 8): clients >= 0.7.1 are told the new
+    # address + password and switch themselves; older clients only get the update notice.
+    moved_to: str = ""
+    moved_key: str = ""
 
 
 def load_config(path: str | None = None, *, host: str | None = None,
@@ -26,7 +30,8 @@ def load_config(path: str | None = None, *, host: str | None = None,
     """Build a Config.
 
     Precedence (lowest to highest): built-in defaults, the JSON file at
-    ``path``, environment variables (YL_KEY, YL_PORT, YL_DATA_DIR, YL_SERVER_NAME, YL_MOTD), and
+    ``path``, environment variables (YL_KEY, YL_PORT, YL_DATA_DIR, YL_SERVER_NAME, YL_MOTD,
+    YL_MOVED_TO, YL_MOVED_KEY), and
     finally explicit ``host``/``port`` arguments (from the command line).
     """
     env = os.environ if env is None else env
@@ -50,6 +55,10 @@ def load_config(path: str | None = None, *, host: str | None = None,
         cfg.name = env["YL_SERVER_NAME"]
     if env.get("YL_MOTD"):
         cfg.motd = env["YL_MOTD"]
+    if env.get("YL_MOVED_TO"):
+        cfg.moved_to = env["YL_MOVED_TO"]
+    if env.get("YL_MOVED_KEY"):
+        cfg.moved_key = env["YL_MOVED_KEY"]
     if host is not None:
         cfg.host = host
     if port is not None:
@@ -57,4 +66,8 @@ def load_config(path: str | None = None, *, host: str | None = None,
     cfg.port = int(cfg.port)
     cfg.key = str(cfg.key)
     cfg.name = str(cfg.name or "").strip()[:30]
+    cfg.moved_to = str(cfg.moved_to or "").strip()
+    if cfg.moved_to and "://" not in cfg.moved_to:
+        cfg.moved_to = "ws://" + cfg.moved_to
+    cfg.moved_key = str(cfg.moved_key or "")
     return cfg

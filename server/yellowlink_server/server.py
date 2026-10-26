@@ -46,6 +46,16 @@ SPRITE_BYTES = 384
 CLOSE_BAD_KEY = 4001
 CLOSE_REPLACED = 4002
 CLOSE_BAD_HELLO = 4003
+CLOSE_MOVED = 4005          # this server was merged into another one (Config.moved_to); see SPEC.md section 8
+MOVE_SUPPORTED = (0, 7, 1)  # clients from this version on follow a "moved" message by themselves
+
+
+def _version_tuple(v: str) -> tuple:
+    out = []
+    for part in str(v or "").split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out)
 
 NAME_RE = re.compile(r"^[A-Za-z0-9 ]{1,10}$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f​-‏ -‮⁦-⁩]")
@@ -160,6 +170,7 @@ class Client:
     _rate_count: int = 0
     _rate_warned: bool = False
     _crit_count: int = 0
+    limited: bool = False             # moved server + old client: only shown the update notice
 
     def allow(self, critical: bool = False) -> bool:
         """Per-second budget: RATE_LIMIT_PER_SEC general messages plus the same number of
@@ -396,6 +407,8 @@ class YellowLinkServer:
             await reject(f"protocol mismatch (server speaks {PROTOCOL_VERSION}); please update "
                          f"YellowLink: {self.config.download_url}", CLOSE_BAD_HELLO)
             return None
+        if self.config.moved_to:
+            return await self._moved_hello(ws, uid, name.strip(), version[:32])
         client = Client(ws=ws, uid=uid, name=name.strip(), version=version[:32])
 
         old = self.clients.get(uid)
@@ -432,6 +445,28 @@ class YellowLinkServer:
         await self.broadcast_roster()
         return client
 
+    async def _moved_hello(self, ws: ServerConnection, uid: str, name: str, version: str) -> Client | None:
+        """This server was merged into another one: send new clients there, show older ones the update notice."""
+        if _version_tuple(version) >= MOVE_SUPPORTED:
+            log.info("%s (%s) told the server moved to %s", name, uid, self.config.moved_to)
+            try:
+                await ws.send(json.dumps({"type": "moved", "url": self.config.moved_to,
+                                          "key": self.config.moved_key}))
+                await ws.close(CLOSE_MOVED, "server moved")
+            except ConnectionClosed:
+                pass
+            return None
+        log.info("%s (%s) on old client %s: update notice only (server moved)", name, uid, version or "?")
+        client = Client(ws=ws, uid=uid, name=name, version=version, limited=True)
+        await self.send(client, {
+            "type": "welcome", "you": uid, "players": [], "roster": [],
+            "latest_client": self.config.latest_client, "download_url": self.config.download_url,
+            "motd": "This server has moved. Press U to update YellowLink - it then moves you to the new server by "
+                    "itself, with all your saves.",
+            "server_name": self.config.name,
+        })
+        return client
+
     async def _disconnect(self, client: Client) -> None:
         if self.clients.get(client.uid) is not client:
             return  # already replaced; the replacement handled cleanup
@@ -460,6 +495,8 @@ class YellowLinkServer:
         return msg
 
     async def _dispatch(self, client: Client, msg) -> None:
+        if client.limited:
+            return                    # moved server: an old client can only read the update notice
         if not isinstance(msg, dict):
             msg = self._parse(msg)  # raw frame (kept for callers passing text)
         if isinstance(msg, str):

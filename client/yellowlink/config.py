@@ -159,6 +159,28 @@ class Config(dict):
             self["server_url"], self["room_key"] = s["url"], s["key"]
         self.save()
 
+    def move_server(self, sid: str, url: str, key: str) -> bool:
+        """The server told us it moved (merged into another): new address/password, same folder + player id.
+        Returns True if another entry already points there (the player was on both servers: two saves, two
+        characters on the merged server) - that entry keeps its own folder too."""
+        s = self.server(sid)
+        if s is None:
+            raise ValueError("That server is gone.")
+        url = normalize_url(url)
+        if not url_looks_ok(url):
+            raise ValueError("bad address")
+        self._sync_active()
+        twin = any(o["id"] != sid and _url_key(o.get("url", "")) == _url_key(url) for o in self["servers"])
+        if twin and not s.get("label"):
+            s["label"] = ((s.get("seen_name") or "Old server")[:22] + " (save)").strip()
+        s["url"], s["key"] = url, key or ""
+        if not twin:
+            s.pop("seen_name", None)      # the new server tells its own name on connect
+        if sid == self.server_id:
+            self["server_url"], self["room_key"] = s["url"], s["key"]
+        self.save()
+        return twin
+
     def remove_server(self, sid: str):
         """Forget a server (not the one you're on). Its saves stay on disk (servers/<id>/)."""
         if sid == self.server_id or len(self["servers"]) < 2:
