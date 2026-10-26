@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.join(ROOT, "client"))
 sys.path.insert(0, os.path.join(ROOT, "dev", "platinum"))
 sys.path.insert(0, HERE)
 os.environ.setdefault("YL_PT_ROM", "sinnoh")
-if os.environ["YL_PT_ROM"] != "sinnoh":
+if os.environ["YL_PT_ROM"] != "sinnoh" and sys.argv[1:2] != ["_area_shot"]:
     sys.exit("dev/sinnoh/verify.py runs the Complete Sinnoh ROM (YL_PT_ROM=sinnoh)")
 
 import ptrom  # noqa: E402
@@ -324,17 +324,29 @@ def give_events(d, pm):
 def check_events(d, pm):
     print("== Mystery Gift events")
     w = devwarp.DevWarp(d, ptrom.STATES)
-    # 1. before the National Dex nothing happens
+    ids = lambda evs: [e.id for e in evs]  # noqa: E731
+    # 1. a mid-game save: nothing
     w.boot("pt_title.dsst")
     P.fast_continue(d)
     walker.settle(d, pm)
-    ok(give_events(d, pm) == [] and not E.national_dex(pm), "no National Dex: no event is given")
-    # 2. with the National Dex (TEST SHORTCUT: Pokédex flag + game completed): all four, once
+    ok(give_events(d, pm) == [] and not E.national_dex(pm), "no National Dex, no Rotom: no event is given")
+    # 2. the first Rotom (TEST SHORTCUT: Pokédex "caught" bit 479): the Secret Key only
+    i = E.SPECIES_ROTOM - 1
+    a = pm.save_body() + E.PAGE_POKEDEX + E.POKEDEX_CAUGHT + i // 8
+    d.w8(a, d.r8(a) | 1 << i % 8)
+    got = give_events(d, pm)
+    ok(ids(got) == ["secret_key"] and E.given(pm, E.EVENTS_BY_ID["secret_key"]),
+       "Rotom caught before the National Dex: the unlocker gives %s" % ids(got))
+    # 3. National Dex (TEST SHORTCUT: Pokédex flag + game completed): Member Card + Oak's Letter, not the flute
     w.flag(E.FLAG_GAME_COMPLETED)
     w.national_dex()
     got = give_events(d, pm)
-    ok([e.id for e in got] == [e.id for e in E.EVENTS], "National Dex: the unlocker gives %s"
-       % ", ".join(e.item_name for e in got))
+    ok(ids(got) == ["member_card", "oaks_letter"], "National Dex: the unlocker gives %s" % ids(got))
+    w.flag(E.FLAG_CAUGHT_DIALGA)          # TEST SHORTCUT: Dialga caught at the Spear Pillar
+    ok(give_events(d, pm) == [], "Dialga alone: no Azure Flute yet")
+    w.flag(E.FLAG_CAUGHT_PALKIA)
+    got = give_events(d, pm)
+    ok(ids(got) == ["azure_flute"], "Dialga + Palkia caught: the unlocker gives %s" % ids(got))
     ok(all(E.given(pm, e) for e in E.EVENTS) and E.pending(pm) == [], "bag + distribution vars read back")
     ok(give_events(d, pm) == [], "nothing given twice")
     bag = [i for i, q in E.key_items(pm) if q]
@@ -350,9 +362,12 @@ def check_events(d, pm):
 
 
 def setup_postgame(w):
-    """TEST SHORTCUTS: Hall of Fame done + National Dex, and the events given by the real unlocker."""
+    """TEST SHORTCUTS: Hall of Fame done + National Dex + Dialga/Palkia caught, and the events given by the real
+    unlocker's give()."""
     w.flag(E.FLAG_GAME_COMPLETED)
     w.national_dex()
+    w.flag(E.FLAG_CAUGHT_DIALGA)
+    w.flag(E.FLAG_CAUGHT_PALKIA)
     for ev in E.EVENTS:
         E.give(w.pm, ev)
 
@@ -732,6 +747,60 @@ def check_swarm(d, pm):
        % (swarm_sp, len(got)))
 
 
+# ------------------------------------------------------------------------------------------- Pokédex area map
+AREA_SPECIES = 387                 # Turtwig: Sinnoh dex #1, in every test save, vanilla area "unknown" (a starter);
+AREA_BANNER = (96, 84, 224, 108)   # Complete Sinnoh adds Valor Lakefront (morning/day/night). "Area Unknown" box
+AREA_MAP = (80, 56, 248, 184)      # the area map on the top screen
+
+
+def dex_area_shot(d, pm, path):
+    """Start menu -> POKéDEX -> Turtwig -> AREA (touch), on whatever ROM `d` runs; saves both screens to `path`.
+    TEST SHORTCUT: Pokedex.pokedexObtained set in RAM (the test save is from before Professor Rowan's Pokédex)."""
+    w = devwarp.DevWarp(d, ptrom.STATES)
+    w.boot("pt_title.dsst")
+    P.fast_continue(d)
+    walker.settle(d, pm, 300)
+    d.w8(pm.save_body() + E.PAGE_POKEDEX + 0x31A, 1)
+    d.press("x", 60)
+    d.press("a", 600)                  # the first start menu entry: POKéDEX (list opens on #001)
+    d.press("a", 600)                  # Turtwig's page
+    d.touch(68, 21)                    # AREA
+    d.run(600)
+    return d.shot(path)
+
+
+def check_area(d, pm):
+    """The Pokédex AREA screen reads the moved, edited zukan_enc_platinum.narc: Turtwig is "Area Unknown" in vanilla
+    Platinum (other process, YL_PT_ROM=vanilla) and shows a place in Complete Sinnoh."""
+    import subprocess
+    import tempfile
+    print("== Pokédex area map")
+    tmp = tempfile.mkdtemp(prefix="yl_area_")
+    van = os.path.join(tmp, "vanilla.png")
+    env = dict(os.environ, YL_PT_ROM="vanilla")
+    subprocess.run([sys.executable, os.path.abspath(__file__), "_area_shot", van], env=env, check=False,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
+    ours = os.path.join(tmp, "sinnoh.png")
+    img = dex_area_shot(d, pm, ours)
+    if not ok(os.path.exists(van), "vanilla screenshot made (%s)" % van):
+        return
+    from PIL import Image
+    vimg = Image.open(van).convert("RGB")
+    img = img.convert("RGB")
+    print("     screens:", tmp)
+    # the AREA tab is lit on both (same pixels in the tab row at the top of the touch screen)
+    tabs = (0, 200, 256, 228)
+    ok(vimg.crop(tabs).tobytes() == img.crop(tabs).tobytes(), "both runs are on Turtwig's AREA page")
+    vb, sb = vimg.crop(AREA_BANNER).tobytes(), img.crop(AREA_BANNER).tobytes()
+    vm, sm = vimg.crop(AREA_MAP).tobytes(), img.crop(AREA_MAP).tobytes()
+    ok(vb != sb, "the \"Area Unknown\" box of vanilla is gone in Complete Sinnoh")
+    ok(vm != sm, "the area map differs from vanilla (Turtwig at Valor Lakefront)")
+    if SHOTS:
+        os.makedirs(SHOTS, exist_ok=True)
+        vimg.save(os.path.join(SHOTS, "area_vanilla.png"))
+        img.save(os.path.join(SHOTS, "area_sinnoh.png"))
+
+
 _PRET = os.environ.get("YL_PRET_PLATINUM", "/home/claude/pokeplatinum")
 _ENUMS = {}
 
@@ -770,6 +839,10 @@ def _map(name):
 
 
 def main():
+    if sys.argv[1:2] == ["_area_shot"]:          # helper for check_area: the same screen on vanilla Platinum
+        d = DS()
+        dex_area_shot(d, P.PlatinumMemory(d), sys.argv[2])
+        return
     which = [a for a in sys.argv[1:]] or ["rom", "compat", "wild", "events", "regis", "swarm", "area"]
     build_rom.ensure_dev_rom("test" if os.environ.get("YL_SINNOH_SPEC") == "test" else "auto")
     print("Complete Sinnoh verify:", ptrom.label(), "spec", spec().__name__, "v%s" % spec().SPEC_VERSION)
@@ -790,6 +863,8 @@ def main():
         check_regis(d, pm)
     if "swarm" in which:
         check_swarm(d, pm)
+    if "area" in which:
+        check_area(d, pm)
     bad = [w for c, w in RESULTS if not c]
     print("\n%d checks, %d failed" % (len(RESULTS), len(bad)))
     for w in bad:
