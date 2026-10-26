@@ -1058,3 +1058,14 @@ def area_name(key: str) -> str:
     if key.startswith("UNUSED_MAP_"):
         return "Unused map $" + key[11:]
     return key.replace("_", " ").title()
+
+
+# --- Exp Share All (modern rule) ---------------------------------------------------------------------------------
+def install_exp_share(pyboy, enabled):
+    """Install the Exp Share All hooks (Gen 6+ rule: participants 100 % each, other able party mons 50 %) on this
+    emulator; `enabled()` is asked at every experience award (False -> the original game for that award).
+    Returns a handle with `.remove()`. Hooks 0F:461C, 0F:4637 (FaintEnemyPokemon), 15:525F, 15:547B, 15:52EF,
+    15:545F (GainExperience / DivideExpDataByNumMonsGainingExp) -- details in expshare_gb.py. Only for the verified
+    Yellow ROM (the code bytes are checked first; RuntimeError otherwise)."""
+    from .expshare_gb import YellowExpShare
+    return YellowExpShare(pyboy, enabled)

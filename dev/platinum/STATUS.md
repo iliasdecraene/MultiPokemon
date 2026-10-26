@@ -258,3 +258,44 @@
   the referee also reads party HP while not safe. (4) move_box_to_party(i): i = index in current_box_records()
   (non-empty slots of the current box, slot order). (5) Partner battles heal the party after a win -> faints there
   only via battle_party_slot (works: battler 0 = player).
+## Exp Share All (2026-10-26 afternoon) - branch exp-share-all, checkout /home/claude/yl-exp
+- coordinator: modern rule (Gen 6+): participants 100% each (no split), non-participants 50%, fainted/eggs 0. Interface: each adapter module gets install_exp_share(emu, enabled) -> handle (handle.remove()); enabled() is checked at every exp award. Coordinator owns app.py/panels.py/ui.py/config.py (Settings panel + wiring).
+- 2026-10-26 gb-exp agent: Yellow + Crystal DONE (not committed). game.install_exp_share / crystal.install_exp_share ->
+  handle (.remove(), .awards); logic + hook docs in client/yellowlink/expshare_gb.py (SPEC.md section 6 table). Steers
+  the games' own EXP.ALL / Exp. Share second pass with PyBoy hooks (Yellow 0F:461C 0F:4637 15:525F 15:547B 15:52EF
+  15:545F, Crystal 0F:4E65 0F:4E88 0F:70D4 0F:6EF8 0F:70D1; opcode bytes checked before install). 50 % = floor(full/2)
+  after all x1.5 boosts, stat exp floor(base/2). enabled() read once per award (at the enemy faint). Passive in link
+  battles / Battle Tower. Real ROM: dev/e2e/expshare_gb.py ALL PASS (57 checks both games: solo/half/fainted/egg/
+  traded/Lucky Egg, 2 participants no split, trainer x1.5, level-up + stats + HP + "grew to level", learn move, forget
+  prompt, evolution, EXP.ALL/Exp. Share no stacking on + original off, hooks-off WRAM == no hooks). Unit:
+  client/tests/test_expshare_gb.py (14; suite 354 pass). Forced-on runs (dev/e2e/expshare_forced.py): pvp_e2e OK
+  (hook fired twice in the link battle, stayed passive), e2e.py OK, soullink_yellow ALL PASS. soullink_crystal.py is
+  FLAKY on this loaded box with or without the feature (failed also with --off and --none: "Cyndaquil fainted in a
+  real battle" / an assert) - not caused by Exp Share. Note: app default exp_share_all=True means plain e2e runs of
+  the app now have the rule on.
+- 2026-10-26 exp agent (Platinum): Exp. Share All done in client/yellowlink/platinum_exp.py (new module, no other
+  client file touched): install_exp_share(core, enabled) -> handle (.remove()). Two exec hooks in battle overlay 16
+  (HOOK_CALC 0x02241E30 inside BtlCmd_CalcExpGain: r0 = E; HOOK_TASK 0x02248E74 = BattleScript_GetExpTask entry),
+  guarded by 12-byte code signatures. At each award (enabled() asked once) the participant mask is widened to every
+  alive non-egg party slot, and per slot the task's gainedExp is set to E (participant) / max(E//2, 1) (others),
+  sharedExp 0; the game does multipliers, messages, level-up, moves, EVs, evolution. Addresses/how found:
+  MEMORY_MAP.md "Exp. Share All". Tests: client/tests/test_platinum_exp.py (16, no ROM: fake DS running a model of
+  the game's award code), dev/e2e/expshare_pt.py (real ROM, ON vs OFF from the same state: wild lead-alone, switch,
+  trainer Youngster Tristan, level-up + move-learn prompt + evolution on the bench, Exp. Share / Lucky Egg holders,
+  remove(); ALL PASS, ~4 min), dev/e2e/with_expshare.py runs verify.py (83/83) and platinum_boot.py (ALL PASS) with
+  the hooks installed. Fixture is built at run time from pt_pc (Route 202, VAR_ROUTE_202_STATE=1, battle style SET,
+  party written to save RAM) - no new files in dev/states.
+- 2026-10-26 gb-exp agent (review follow-up): YellowExpShare/CrystalExpShare.busy() -> True from the decide hook to the
+  award's end (phase != 0); clears itself when no battle runs (Yellow wIsInBattle D056 == 0, Crystal wBattleMode
+  1:D22D == 0) and on remove(). 5 new unit tests (incl. battle ended without the end hook, remove() mid-award); real
+  ROM: busy() True during the "gained" texts, False back in the overworld, never with the rule off (both games).
+  dev/e2e/expshare_gb.py ALL PASS (59), client suite 383 pass. Not committed.
+- 2026-10-26 exp agent (Platinum) review fixes: platinum_exp.handle.busy() = an award we changed is really in
+  progress (battle overlay signatures OK + child overlay 16 + ctx->taskData alive with taskData->battleCtx == ctx);
+  a stale `pending` (soft reset / state load / battle gone) is dropped there. remove()/_undo now writes only if that
+  award's task is alive (else drops pending, no write into freed heap) and keeps the mask bit of the slot the task
+  is processing (seqNum != START), so e.g. a benched mon at "Make it forget another move?" keeps its prompt.
+  _on_task checks the code signature before touching r1. Unit tests: fake game model now re-finds its slot every
+  frame like GetExpTask; new tests remove mid-slot, stale pending (4 ways), busy() (24 pass; 6 fail on the old
+  module). e2e expshare_pt.py: + busy() samples, + case F remove() at the real move-learn prompt -> Razor Leaf
+  still learnt by slot 1, Starly 0, lead 24; ALL PASS.

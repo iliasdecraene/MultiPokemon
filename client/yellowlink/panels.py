@@ -430,6 +430,58 @@ def draw_challenges(surf, f, app, game_w, game_h, offset):
     text(surf, f.small, "More challenges coming later.", (r.x + 18, r.bottom - 26), DIM)
 
 
+SETTINGS = [   # key, default, label, description, short description (small windows)
+    ("exp_share_all", True, "Exp Share All",
+     "Like the newer games: Pokémon that battle get full EXP, the rest of your party gets half. "
+     "Off = the original game's rules (Exp. All / Exp. Share items).",
+     "Battlers get full EXP, the rest half."),
+    ("show_names", True, "Name tags above friends", "", ""),
+    ("skip_intro", True, "Skip the intro",
+     "Start straight into your saved game (Continue is picked for you).", "Continue your save at once."),
+]
+
+
+def draw_settings(surf, f, app, game_w, game_h, offset):
+    r = _panel_frame(surf, app, f, game_w, game_h, "Settings", offset)
+    x, y = r.x + 18, r.y + 58
+    width = r.w - 36
+    small = width < 330
+    note = "Changes apply right away." if small else "Changes apply right away, also in the middle of your adventure."
+    note_lines = wrap(f.small, note, width)
+    bottom = r.bottom - 16 - 18 * len(note_lines)          # rows stop above the note
+    for key, default, label, desc, short in SETTINGS:
+        lines = wrap(f.small, short if small else desc, width - 56) if desc else []
+        n_desc = len(lines)
+        if key == "exp_share_all" and getattr(app, "exp_share", None) is None:
+            lines += wrap(f.small, "Not active for this game file." if small else
+                          "Not active for this game file (needs the supported Yellow, Crystal or Platinum).",
+                          width - 56)
+        if y + 32 > bottom:
+            break
+        on = bool(app.cfg.get(key, default))
+        row = pygame.Rect(x, y, width, 32)
+
+        def flip(k=key, d=default, lab=label):
+            new = not bool(app.cfg.get(k, d))
+            app.set_setting(k, new, f"{lab}: {'on' if new else 'off'}")
+        shown = label
+        if f.body.size(shown)[0] > width - 56:
+            shown = {"show_names": "Name tags"}.get(key, shown)
+        _toggle(surf, app, f, row, shown, on, flip, offset)
+        y += 34
+        for i, line in enumerate(lines):
+            if y + 18 > bottom:
+                break
+            warn = i >= n_desc
+            text(surf, f.small, line, (x + 56, y), BAD if warn else DIM)
+            y += 18
+        y += 10
+    yy = bottom + 8
+    for line in note_lines:
+        text(surf, f.small, line, (x, yy), DIM)
+        yy += 18
+
+
 def _toggle(surf, app, f, rect, label, on, cb, offset):
     hover = rect.move(offset).collidepoint(pygame.mouse.get_pos())
     sw = pygame.Rect(rect.x, rect.y + 4, 44, 24)

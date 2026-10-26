@@ -99,6 +99,16 @@ NUM_MOVES = 251
 HOOK_PC_OPEN = (0x03, 0x641C)    # _BillsPC.LogIn (only reached once the party check passed)
 HOOK_PC_CLOSE = (0x03, 0x643F)   # _BillsPC.LogOut
 
+
+def install_exp_share(pyboy, enabled):
+    """Install the Exp Share All hooks (Gen 6+ rule: participants 100 % each, other able party mons 50 %, eggs and
+    fainted mons 0; replaces the held Exp. Share while on) on this emulator; `enabled()` is asked at every experience
+    award (False -> the original game for that award). Returns a handle with `.remove()`. Hooks 0F:4E65, 0F:4E88
+    (UpdateBattleStateAndExperienceAfterEnemyFaint), 0F:70D4, 0F:6EF8, 0F:70D1 (GiveExperiencePoints) -- details in
+    expshare_gb.py. Only for the verified Crystal ROM (the code bytes are checked first; RuntimeError otherwise)."""
+    from .expshare_gb import CrystalExpShare
+    return CrystalExpShare(pyboy, enabled)
+
 # --- SRAM ------------------------------------------------------------------------------------------------
 SRAM_CHECK_VALUE_1 = (1, 0xA008)
 SRAM_GAME_DATA = (1, 0xA009, 0xAB83)      # sGameData .. sGameDataEnd, 16-bit sum at sChecksum
