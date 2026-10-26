@@ -47,6 +47,15 @@ def _panel_frame(surf, app, f, game_w, game_h, title, offset):
 def draw_multiplayer(surf, f, app, game_w, game_h, offset):
     r = _panel_frame(surf, app, f, game_w, game_h, "Multiplayer", offset)
     others = [e for e in app.sorted_roster() if e.get("uid") != app.cfg["uid"]]
+    # which server (group of friends) you're on + the way to another one
+    sw = 150
+    sb = pygame.Rect(r.right - 52 - sw, r.y + 10, sw, 30)
+    button(surf, app, f, sb, "Switch server", lambda: app.toggle_panel("servers"), offset=offset)
+    name = app.cfg.server_label(app.cfg.active_server)
+    tx = r.x + 18 + f.title.size("Multiplayer")[0] + 14
+    while name and tx + f.small.size("on " + name)[0] > sb.x - 10:
+        name = name[:-1]
+    text(surf, f.small, "on " + name, (tx, r.y + 20), DIM)
     y = r.y + 56
     if not app.full:
         text(surf, f.small, f"Battles don't work in {app.game_info.title} - trades and gifts do (they use your PC).",
@@ -105,6 +114,55 @@ def draw_multiplayer(surf, f, app, game_w, game_h, offset):
             y += 44
     text(surf, f.small, "Trade/Gift: Pokémon from your PC, any game  ·  Practice: their team vs the AI",
          (r.x + 18, r.bottom - 26), DIM)
+
+
+def draw_servers(surf, f, app, game_w, game_h, offset):
+    r = _panel_frame(surf, app, f, game_w, game_h, "Servers", offset)
+    y = r.y + 56
+    text(surf, f.small, "One server per group of friends. Each has its own saves, PC and challenges.",
+         (r.x + 18, y), DIM)
+    y += 28
+    busy = bool(app.trade or app.battle or app.live or app.chal)
+    tip = "Pause your Soul Link first." if app.chal else "Finish your trade or battle first."
+    row_h = 58
+    for s in app.cfg.servers:
+        if y + row_h > r.bottom - 60:
+            text(surf, f.small, "(more servers - remove one to see the rest)", (r.x + 18, y), DIM)
+            break
+        here = s["id"] == app.cfg.server_id
+        card = pygame.Rect(r.x + 12, y, r.w - 24, row_h - 6)
+        box(surf, card, PANEL_HI if here else PANEL, ACCENT if here else PANEL_HI, 8)
+        bw = 84
+        right = card.right - 10
+        buttons = []
+        if not here:
+            buttons.append(("Sure?" if app.confirming_remove(s["id"]) else "Remove",
+                            lambda sid=s["id"]: app.remove_server(sid), True, False, ""))
+        buttons.append(("Edit", lambda sid=s["id"]: app.server_dialog(sid), True, False, ""))
+        if not here:
+            buttons.append(("Switch", lambda sid=s["id"]: app.switch_server(sid), not busy, True, tip))
+        x = right
+        for label, cb, enabled, primary, t in buttons:
+            x -= bw
+            button(surf, app, f, pygame.Rect(x, card.y + 9, bw - 6, 34), label, cb, enabled=enabled, offset=offset,
+                   primary=primary, tip=t)
+        name = app.cfg.server_label(s)
+        maxw = x - card.x - 24
+        while name and f.body.size(name)[0] > maxw:
+            name = name[:-1]
+        text(surf, f.body, name, (card.x + 14, card.y + 6), ACCENT if here else TEXT)
+        sub = "you are here" if here else s.get("url", "").split("://", 1)[-1]
+        if here:
+            st = app.net.status
+            sub += " · " + {"online": "connected"}.get(st, st) + \
+                (f" ({app.net.status_detail})" if st != "online" and app.net.status_detail else "")
+        while sub and f.small.size(sub)[0] > maxw:
+            sub = sub[:-1]
+        text(surf, f.small, sub, (card.x + 14, card.y + 29), GOOD if here and app.net.status == "online" else DIM)
+        y += row_h
+    button(surf, app, f, pygame.Rect(r.x + 18, r.bottom - 48, 180, 36), "Add a server...", app.server_dialog,
+           offset=offset, primary=True)
+    text(surf, f.small, "Your name and game files are shared by all servers.", (r.x + 210, r.bottom - 40), DIM)
 
 
 def _region_game(app, region_id, installed_here):
