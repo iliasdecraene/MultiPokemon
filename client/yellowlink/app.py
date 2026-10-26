@@ -187,6 +187,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         # Same method names. The DS game runs in nds_core.NDSCore (DeSmuME) instead of PyBoy.
         self.ds = self.game_info.platform == "nds"
         self.sinnoh_problem = None
+        self.sinnoh_events = None
+        self._wild_refresh = None     # set after resuming a snapshot of another ROM build (see _sinnoh_step)
         if self.ds:
             # Complete Sinnoh: everybody plays our own version, made here from the player's own Platinum
             cfg["rom_path"] = self._complete_sinnoh_rom(cfg["rom_path"])
@@ -2335,9 +2337,9 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
     def _sinnoh_step(self):
         """Complete Sinnoh: Mystery Gift events once the save qualifies; the loaded wild table after a resume from
         another ROM build (see _try_resume)."""
-        if getattr(self, "_wild_refresh", None) is not None and self.game.is_safe():
+        if self._wild_refresh is not None and self.game.is_safe():
             self._wild_refresh_now()
-        if getattr(self, "sinnoh_events", None) is None or self.trade:
+        if self.sinnoh_events is None or self.trade:
             return
         for ev in self.sinnoh_events.step():
             self.toast(f"Mystery Gift: {ev.item_name}! {ev.hint}", 9, ui.GOOD)

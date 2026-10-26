@@ -609,3 +609,25 @@ def test_waiting_for_the_partner_keeps_ds_sound_paused():
     fake._ds_chal_paused = False
     appmod.App._pause_ds_audio(fake, False)
     assert calls == [False]
+
+
+def test_platinum_soul_link_needs_the_same_complete_sinnoh(plat_helpers, monkeypatch):
+    """Complete Sinnoh (SPEC.md section 10): clients advertise `sinnoh_v<spec>` in challenge_rules; Platinum runs
+    only between players with the same wild Pokémon (same version, or both plain Platinum)."""
+    sha = "ab" * 20
+    monkeypatch.setitem(platinum.VARIANTS, sha, platinum.Variant("sinnoh", sha, "Complete Sinnoh", 3))
+    same = {"uid": "same", "games": ["platinum"], "challenge_games": ["platinum"],
+            "challenge_rules": ["exp_share", "sinnoh_v3", "trade_evo"]}
+    older = {"uid": "older", "games": ["platinum"], "challenge_games": ["platinum"],
+             "challenge_rules": ["exp_share", "trade_evo"]}                        # 0.7.6: plain Platinum
+    other = {"uid": "other", "games": ["platinum"], "challenge_games": ["platinum"],
+             "challenge_rules": ["sinnoh_v4"]}
+    app = FakeApp(["yellow", "platinum"], [same, older, other])
+    app.complete_sinnoh, app.rom_sha1 = True, sha
+    assert app._sinnoh_caps() == ["sinnoh_v3"]
+    assert app.shared_games("same") == ["platinum"]
+    assert app.shared_games("older") == [] and app.shared_games("other") == []
+    app.chal_on_connected()
+    assert app.net.sent[-1]["challenge_rules"] == ["exp_share", "trade_evo", "sinnoh_v3"]
+    app.complete_sinnoh = False                                                   # plain Platinum (build failed)
+    assert app._sinnoh_caps() == [] and app.shared_games("older") == ["platinum"]

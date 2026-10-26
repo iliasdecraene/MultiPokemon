@@ -173,3 +173,18 @@ Starly Lv5 (E 40) → lead 60, bench 30 / 30 (OFF 60 / 0 / 0); Exp. Share holder
 holder 12); Lucky Egg on the bench → 18. EVs: every mon that gets exp gets the full yield.
 After a battle the field keeps working on party records for ~2 s: a record reads alternately valid / half
 re-encrypted (flags 0) on every other frame — read the party only when two *valid* reads agree.
+
+## Complete Sinnoh (SPEC.md section 10) — verified 2026-10-26 by dev/sinnoh/verify.py
+
+| what | value | how found / verified |
+|---|---|---|
+| `sMapHeaders[map].wildEncountersArchiveID` | u16 at +0x0E of the 24-byte header (0xFFFF = no wild Pokémon) | pret MapHeader struct; Route 201 (342) -> 140, Route 202 (343) -> 141, Twinleaf (411) -> 176 = pret encounters.order |
+| `FieldSystem.mapHeaderData` | +0x14 (MapHeaderData*) | pret struct order; its `wildEncounters` (+0x920: 4 counts, 4 ptrs, tmpEventsBuf[512], initScripts[64]) = the NARC member byte for byte after every map load (CONTINUE, walking Twinleaf -> Route 201) and the vanilla member in a vanilla snapshot loaded into the Complete Sinnoh ROM |
+| land rate in RAM | wildEncounters +0 | raising it to 100 (test shortcut) gives a battle within a few steps; slots/levels follow the table (dev/sinnoh/verify.py `wild`: 24 battles per map, every species/level in the table) |
+| `sLCRNGState` (math_util.c) | **0x021BFB14** (ARM9 .bss; the literal pool of LCRNG_Next at 0x0201D2E8 holds 0x021BFB10, the state is stored at +4) | disassembled (`ldr r1,=0x021BFB10; ldr r2,[r1,#4]; mul 0x41C64E6D; add 0x6073; str [r1,#4]`); writing different seeds gives different wild slots. Dev/test only. (Writing 0x021BFB10 itself corrupts a pointer - don't) |
+| Bag (body + 0x630) | items[165], **keyItems[50] at +0x294** (body + 0x8C4), tmHms[100], mail[12], medicine[40], berries[64], balls[15] (+0x6BC), battleItems[30], **registeredItem u32 at +0x770** | pret include/bag.h; the four event items written there show in the bag and pass the scripts' CheckItem; registeredItem = 455 puts the Azure Flute on Y |
+| VarsFlags (body + 0xDAC) | vars[288] u16 from 0x4000, flags at +0x240 | VAR_DISTRIBUTION_EVENT_DARKRAI..ROTOM 0x4043-0x4046, VAR_SHAYMIN_EVENT_STATE 0x4057, VAR_HALL_OF_ORIGIN_STATE 0x4118 (=1 after the Spear Pillar OnTransition with the flute + magic), VAR_DARKRAI_EVENT_STATE 0x40F8 |
+| Pokedex.nationalDexObtained | body + 0x1328 + **0x31B** (u8) | after recordedLanguages[496] at +0x128: canDetectForms, canDetectLanguages, pokedexObtained, nationalDexObtained; setting it makes the scripts' GetNationalDexEnabled true |
+| FieldOverworldState (body + 0x1280) | Location player +0, entrance +0x14, previous +0x28, **special +0x3C**, exit +0x50 (each {map, warpId, x, z, dir} s32) | with FLAG_COMMUNICATION_CLUB_ACCESSIBLE (2406) set in the saved game, CONTINUE puts the player at `special` with fresh map objects (field_map_change.c FieldTask_LoadSavedGameMap) - used by dev/sinnoh/devwarp.py |
+| CONTINUE re-reads the battery | game_start.c TryLoadingSave | RAM edits on the title screen are lost; devwarp writes the RAM save image into the battery: general block 0..0xCF18 + footer {saveCounter, blockCounter, size 0xCF2C, signature 0x20060623, u8 id, u16 CRC16-CCITT (init 0xFFFF) at +0x12} in the valid sector, counters unchanged (pt_saved.sav: sector 0x40000, CRC 0x3AFF recomputed exactly) |
+| savestates across ROM builds | a vanilla DeSmuME savestate loads into the Complete Sinnoh ROM (same header/code; only the NARC differs) and runs on: pt_town, pt_pc, pt_battle, pt_sl_route202 + the whole Platinum suite with YL_PT_ROM=sinnoh |

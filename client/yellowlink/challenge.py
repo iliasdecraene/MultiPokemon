@@ -18,6 +18,7 @@ FINISHED = ("completed", "failed", "abandoned")
 CHALLENGE_GAMES = ("yellow", "crystal", "platinum")     # order of the buttons in the new-challenge form
 CHALLENGE_RULES = ("exp_share",)        # optional run rules this client applies (`library.challenge_rules`)
 CHALLENGE_CAPS = ("trade_evo",)         # ...and what else it can do in a run (same list; SPEC.md section 7)
+SINNOH_CAP = "sinnoh_v"                 # + Complete Sinnoh spec version, also in `challenge_rules` (SPEC.md 10)
 LEGACY_GAMES = ("yellow", "crystal")    # every challenge client (0.6.0+) plays these; others need `challenge_games`
 # What the referee needs from a game adapter's memory class (crystal.py / platinum.py "Soul Link" sections)
 REFEREE_HELPERS = ("battle_info", "battle_party_slot", "has_poke_balls", "current_box_records", "move_party_to_box",
@@ -84,7 +85,7 @@ class ChallengeMixin:
         # Soul Link, so the server only allows Platinum for clients that send it - SPEC.md section 7)
         self.net.send({"type": "library", "games": sorted(g for g in self.lib.games if self._game_supported(g)),
                        "challenge_games": self.challenge_games(),
-                       "challenge_rules": list(CHALLENGE_RULES) + list(CHALLENGE_CAPS)})
+                       "challenge_rules": list(CHALLENGE_RULES) + list(CHALLENGE_CAPS) + self._sinnoh_caps()})
         if self.chal:
             if self.chal_wait == "offline":
                 self.chal_wait = "load"           # back online: wait until the server says both are in
@@ -416,9 +417,25 @@ class ChallengeMixin:
                 ok = theirs is None or g in theirs
             else:
                 ok = g in their_chal and (theirs is None or g in theirs)
+            if g == "platinum" and ok:
+                # both must play the same Sinnoh: the same Complete Sinnoh version (or both plain Platinum)
+                mine = self._sinnoh_caps()
+                ok = sorted(c for c in (e.get("challenge_rules") or []) if c.startswith(SINNOH_CAP)) == mine
             if ok:
                 out.append(g)
         return out
+
+    def _sinnoh_caps(self) -> list:
+        """["sinnoh_v<spec version>"] when this client plays Complete Sinnoh (sent in `library.challenge_rules`, so
+        a Platinum Soul Link is only offered between players with the same wild Pokémon), else []."""
+        if not getattr(self, "complete_sinnoh", False):
+            return []
+        try:
+            from . import platinum
+            v = platinum.variant_of(getattr(self, "rom_sha1", ""))
+        except Exception:  # noqa: BLE001
+            return []
+        return [f"{SINNOH_CAP}{v.spec_version}"] if v and v.spec_version is not None else []
 
     def challenge_games(self) -> list:
         """Games this client can run a challenge in: added, the verified ROM, and an adapter with the referee's

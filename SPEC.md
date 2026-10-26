@@ -777,3 +777,84 @@ toasts it when its own roster entry shows a new or better Soul Link badge (the r
 doesn't mention the badge). A server without the `badges` feature: friends' badges show "Badges need a server
 update" instead of empty sockets. A badge book that isn't valid JSON of the right shape is kept aside as
 `badges.bad-<time>.json` and a fresh one is started (detection fills it again). `merge.py` (section 8) copies badges.json entries like players.
+
+## 10. Complete Sinnoh — our own version of Platinum (added in 0.7.7, client only; no protocol change)
+
+Ilias's rule: normal Platinum stays normal Platinum (story, trainers, difficulty, trade evolutions), but every
+Pokémon family except the mythicals can be found in Sinnoh, and the Mystery-Gift-only events are on. Always on,
+for everybody (main game and Soul Link runs), versioned.
+
+### The ROM (`client/yellowlink/sinnoh_rom.py`, spec `sinnoh_complete.py`, plan `dev/sinnoh/PLAN.md`)
+- The player adds their own Pokémon Platinum (USA rev 0, `ce81046e…`) as before (`roms/platinum.nds`). At every
+  Platinum start the app makes sure `roms/platinum-sinnoh.nds` (data folder, shared by all servers like the ROMs)
+  is the Complete Sinnoh build of the current spec: if it isn't (missing, damaged, older spec), it copies the
+  vanilla file and edits ONE file inside the copy in place: `/fielddata/encountdata/pl_enc_data.narc` (183 wild
+  tables x 424 bytes; same size, nothing moves). The original is only read. Then it runs that file.
+- Checks on every build: the source is the supported vanilla SHA1; every table = `spec.apply(i, vanilla table)`
+  (`apply` refuses when a vanilla value isn't what the spec expects); the copy is compared byte by byte with the
+  original outside the NARC (equal); the result's SHA1 = `sinnoh_rom.EXPECTED[spec_digest(spec)]` (deterministic:
+  one SHA1 per spec version; `spec_digest` = SHA1 over version + EDITS + RATE_EDITS; recompute with
+  `python dev/sinnoh/build_rom.py --update`, a unit test fails while it's missing). Written as `.part` and renamed.
+  Afterwards only the SHA1 is checked (~0.3 s, cached per path/size/mtime).
+- If it can't be made (disk full, a broken install), the app runs plain Platinum and says so in the chat (red line)
+  - never a reason not to play.
+- `platinum.VARIANTS` (sha1 -> Variant(key "vanilla"|"sinnoh", sha1, title, spec_version)) lists vanilla and every
+  `EXPECTED` build; `SUPPORTED_SHA1S` = all of them -> `App.full` (every Platinum feature: same code, the builder
+  proves only the NARC differs). `variant_of(sha1)`, `same_code(a, b)`.
+- Nothing about the ROM goes to the server or into the repo (CLAUDE.md "Never distribute ROMs"): the spec is our
+  own numbers (table, slot, species id, levels) only.
+
+### Wild tables (`client/yellowlink/encdata.py`)
+Member i of the NARC = the table of every map whose `sMapHeaders[map].wildEncountersArchiveID` (u16 at +0x0E,
+0xFFFF = none) is i (pret `res/field/encounters/encounters.order`). Layout (pret `tools/jsoncnv/encounter.py`,
+checked: all 183 members equal pret's JSONs):
+
+| off | size | field |
+|---|---|---|
+| 0 | 4 | land rate |
+| 4 | 96 | 12 land slots (level u32, species u32): 20 20 10 10 10 10 5 5 4 4 1 1 % |
+| 100 | 8 | swarm x2 -> land slots 0,1 while today's swarm is on this map |
+| 108 / 116 | 8 / 8 | day x2 / night x2 -> land slots 2,3 (morning: the land slots) |
+| 124 | 16 | Poké Radar x4 -> land slots 4,5,10,11 in a shaking patch |
+| 140 | 24 | form rates x5 + Unown table (never edited) |
+| 164 | 40 | GBA dual-slot Ruby/Sapphire/Emerald/FireRed/LeafGreen x2 -> land slots 8,9 (National Dex + cartridge) |
+| 204 | 4+40 | surf: rate, 5 x (max u8, min u8, pad u16, species u32): 60 30 5 4 1 % |
+| 248 | 44 | unused water table |
+| 292 / 336 / 380 | 44 each | old / good / super rod (rate + 5 slots): 60 30 5 4 1 / 40 40 15 4 1 / 40 40 15 4 1 % |
+
+In RAM the current map's table is a copy: `FieldSystem->mapHeaderData` (+0x14) `->wildEncounters` (+0x920), 424
+bytes, copied from the NARC by `MapHeaderData_LoadWildEncounters` on every map load (`PlatinumMemory.wild_table_id
+/ wild_table / write_wild_table`). Not edited (separate files): honey trees, Great Marsh / Trophy Garden daily
+lists (`encdata_ex.narc`) and the Pokédex AREA map (`zukan_enc_platinum.narc`: it won't show the new spots).
+
+### Resume snapshots
+A DS snapshot is written with `<resume>.rom` = SHA1 of the ROM it was taken on (none = before 0.7.7 = vanilla).
+On resume: a snapshot of any verified variant is loaded (identical code; verified: vanilla savestates run on in the
+Complete Sinnoh ROM, dev/sinnoh/verify.py `compat`); if it came from another build, the current map's table in RAM
+is the old one, so at the first safe frame the app copies the ROM's member over it (`write_wild_table`, exactly
+what the next map load does). A snapshot of an unknown ROM is moved aside (`.other-rom`) and the game starts from
+the battery save. Saves (battery) are the same format for every variant: nothing to convert, per-server saves
+unchanged.
+
+### Soul Link
+Areas are map labels (`platinum_areas.py`), not encounter tables: new species in existing tables change nothing.
+Both players of a Platinum run play Complete Sinnoh (always on). Clients put `"sinnoh_v<spec version>"` into
+`library.challenge_rules` (an existing free-form capability list, server unchanged); the Soul Link form only offers
+Platinum when both lists hold the same `sinnoh_v*` entry (or neither), with the tip "different versions of Sinnoh's
+wild Pokémon - update YellowLink". A run made on plain Platinum (0.7.4-0.7.6) continues on Complete Sinnoh.
+
+### Mystery Gift events (`client/yellowlink/sinnoh_events.py`)
+What pret's Mystery Gift deliveryman writes (`src/scrcmd_mystery_gift.c`), given by the app once the save has the
+**National Dex** (`Pokedex.nationalDexObtained`, body + 0x1328 + 0x31B, with the Pokédex magic 0xBEEFCAFE), at a
+safe frame, after two identical checks a second apart, with a toast + chat line; main game and Soul Link runs:
+
+| event | key item (`Bag_TryAddItem`, Key Items pocket body + 0x8C4, 50 x {u16 item, u16 qty}) | vars (body + 0xDAC + 2*(var-0x4000)) | then the game's own scripts |
+|---|---|---|---|
+| member_card | MEMBER CARD 454 | VAR_DISTRIBUTION_EVENT_DARKRAI 0x4043 = 0x1209 | Canalave Harbor Inn (game completed + National Dex + the sailor's son woken up) -> dream -> Newmoon Island -> Darkrai Lv50 |
+| oaks_letter | OAK'S LETTER 452 | VAR_DISTRIBUTION_EVENT_SHAYMIN 0x4044 = 0x1112; VAR_SHAYMIN_EVENT_STATE 0x4057 0 -> 1 | Route 224 (Oak, tablet) -> Seabreak Path -> Flower Paradise -> Shaymin Lv30 |
+| azure_flute | AZURE FLUTE 455 | VAR_DISTRIBUTION_EVENT_ARCEUS 0x4045 = 0x1123 | play it at Spear Pillar (31,52) -> Hall of Origin -> Arceus Lv80 |
+| secret_key | SECRET KEY 467 | VAR_DISTRIBUTION_EVENT_ROTOM 0x4046 = 0x1103 | the wall in the Galactic Eterna Building 1F -> Rotom's room (forms) |
+
+"Given" = item in the bag and var = magic, so it is idempotent (state in the save; never twice). An item already in
+the bag isn't added again; VAR_SHAYMIN_EVENT_STATE is only raised from 0. The items are never taken away by any
+script. Not given: the Manaphy egg (mythicals: a later YellowLink feature).

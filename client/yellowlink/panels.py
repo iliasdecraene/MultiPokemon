@@ -574,6 +574,12 @@ def _game_tip(app, form, g) -> str:
         if "challenge_games" not in e:            # the server doesn't send it at all: it's the server that's old
             return f"The server needs updating for a {title} Soul Link (ask the host)."
         return f"{form['name']} needs to update YellowLink (press U) for a {title} Soul Link."
+    if g == "platinum" and g in (e.get("challenge_games") or []):
+        mine = app._sinnoh_caps() if hasattr(app, "_sinnoh_caps") else []
+        theirs = sorted(c for c in (e.get("challenge_rules") or []) if c.startswith("sinnoh_v"))
+        if mine != theirs:      # different wild Pokémon (Complete Sinnoh version) - one of you must update
+            return (f"You and {form['name']} have different versions of Sinnoh's wild Pokémon - "
+                    "update YellowLink (press U) on both computers.")
     return f"{form['name']} doesn't have {title} added" + (" (v1.0)." if g == "crystal" else ".")
 
 

@@ -32,6 +32,7 @@ FILE_NAME = "platinum-sinnoh.nds"
 # lines stay: platinum.VARIANTS lists every build as a verified variant, so older resume snapshots stay loadable).
 # A unit test checks that the spec in the repo has an entry here. Recompute: python dev/sinnoh/build_rom.py --update
 EXPECTED = {
+    "8f9e2816b06feb3be17f1772ef41b35c769d639e": ("a12d1e9c5b96aede5805b52f4a75852f40a8d8b2", 1),
 }
 # Dev only (YL_SINNOH_SPEC=test): the tiny stand-in spec dev/sinnoh/test_spec.py, for the harnesses.
 DEV_TEST_EXPECTED = {"c207175fa670fd19861a9c54d5abb1d0ff4d916f": ("b8f5ef8f60e28745c3938705fa310100c6beefe1", 0)}

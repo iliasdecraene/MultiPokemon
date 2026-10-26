@@ -113,9 +113,13 @@ class DevWarp:
         self.d.write(self.body + SPECIAL_LOCATION, struct.pack("<5i", map_id, -1, x, z, facing))
         self.flag(FLAG_COMMUNICATION_CLUB_ACCESSIBLE)
         self.commit()
-        self.d.emu.reset()
-        self.d.run(2)
-        r = P.fast_continue(self.d)
+        for attempt in range(2):
+            self.d.emu.reset()
+            self.d.run(2)
+            r = P.fast_continue(self.d)
+            if r != "loaded" or self.pm.map_id() == map_id:
+                break
+            print("     (devwarp: CONTINUE didn't take the special location - map %d; once more)" % self.pm.map_id())
         return r
 
 
