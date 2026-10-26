@@ -427,4 +427,58 @@ LOCATIONS = (
     ('floaroma_town', 'Floaroma Town'), ('solaceon_town', 'Solaceon Town'), ('celestic_town', 'Celestic Town'),
     ('jubilife_city', 'Jubilife City'), ('canalave_city', 'Canalave City'), ('oreburgh_city', 'Oreburgh City'),
     ('eterna_city', 'Eterna City'), ('hearthome_city', 'Hearthome City'), ('pastoria_city', 'Pastoria City'),
+    ('veilstone_city', 'Veilstone City'), ('sunyshore_city', 'Sunyshore City'),
+    ('snowpoint_city', 'Snowpoint City'), ('pokemon_league', 'Pokémon League'), ('route_201', 'Route 201'),
+    ('route_202', 'Route 202'), ('route_203', 'Route 203'), ('route_204', 'Route 204'), ('route_205', 'Route 205'),
+    ('route_206', 'Route 206'), ('route_207', 'Route 207'), ('route_208', 'Route 208'), ('route_209', 'Route 209'),
+    ('route_210', 'Route 210'), ('route_211', 'Route 211'), ('route_212', 'Route 212'), ('route_213', 'Route 213'),
+    ('route_214', 'Route 214'), ('route_215', 'Route 215'), ('route_216', 'Route 216'), ('route_217', 'Route 217'),
+    ('route_218', 'Route 218'), ('route_219', 'Route 219'), ('route_220', 'Route 220'), ('route_221', 'Route 221'),
+    ('route_222', 'Route 222'), ('route_223', 'Route 223'), ('route_224', 'Route 224'), ('route_225', 'Route 225'),
+    ('route_226', 'Route 226'), ('route_227', 'Route 227'), ('route_228', 'Route 228'), ('route_229', 'Route 229'),
+    ('route_230', 'Route 230'), ('oreburgh_mine', 'Oreburgh Mine'), ('valley_windworks', 'Valley Windworks'),
+    ('eterna_forest', 'Eterna Forest'), ('fuego_ironworks', 'Fuego Ironworks'), ('mt_coronet', 'Mt. Coronet'),
+    ('spear_pillar', 'Spear Pillar'), ('great_marsh', 'Great Marsh'), ('solaceon_ruins', 'Solaceon Ruins'),
+    ('victory_road', 'Victory Road'), ('pal_park', 'Pal Park'), ('amity_square', 'Amity Square'),
+    ('ravaged_path', 'Ravaged Path'), ('floaroma_meadow', 'Floaroma Meadow'), ('oreburgh_gate', 'Oreburgh Gate'),
+    ('fullmoon_island', 'Fullmoon Island'), ('sendoff_spring', 'Sendoff Spring'),
+    ('turnback_cave', 'Turnback Cave'), ('flower_paradise', 'Flower Paradise'),
+    ('snowpoint_temple', 'Snowpoint Temple'), ('wayward_cave', 'Wayward Cave'),
+    ('ruin_maniac_cave', 'Ruin Maniac Cave'), ('maniac_tunnel', 'Maniac Tunnel'),
+    ('trophy_garden', 'Trophy Garden'), ('iron_island', 'Iron Island'), ('old_chateau', 'Old Chateau'),
+    ('galactic_hq', 'Galactic HQ'), ('verity_lakefront', 'Verity Lakefront'),
+    ('valor_lakefront', 'Valor Lakefront'), ('acuity_lakefront', 'Acuity Lakefront'),
+    ('spring_path', 'Spring Path'), ('lake_verity', 'Lake Verity'), ('lake_valor', 'Lake Valor'),
+    ('lake_acuity', 'Lake Acuity'), ('newmoon_island', 'Newmoon Island'), ('battle_tower', 'Battle Tower'),
+    ('fight_area', 'Fight Area'), ('survival_area', 'Survival Area'), ('resort_area', 'Resort Area'),
+    ('stark_mountain', 'Stark Mountain'), ('seabreak_path', 'Seabreak Path'), ('hall_of_origin', 'Hall of Origin'),
+    ('verity_cavern', 'Verity Cavern'), ('valor_cavern', 'Valor Cavern'), ('acuity_cavern', 'Acuity Cavern'),
+    ('jubilife_tv', 'Jubilife TV'), ('poketch_co', 'Pokétch Co.'), ('gts', 'GTS'),
+    ('trainers_school', 'Trainers’ School'), ('mining_museum', 'Mining Museum'), ('flower_shop', 'Flower Shop'),
+    ('cycle_shop', 'Cycle Shop'), ('contest_hall', 'Contest Hall'), ('poffin_house', 'Poffin House'),
+    ('foreign_building', 'Foreign Building'), ('pokemon_day_care', 'Pokémon Day Care'),
+    ('veilstone_store', 'Veilstone Store'), ('game_corner', 'Game Corner'),
+    ('canalave_library', 'Canalave Library'), ('vista_lighthouse', 'Vista Lighthouse'),
+    ('sunyshore_market', 'Sunyshore Market'), ('pokemon_mansion', 'Pokémon Mansion'),
+    ('footstep_house', 'Footstep House'), ('cafe', 'Café'), ('grand_lake', 'Grand Lake'),
+    ('restaurant', 'Restaurant'), ('battle_park', 'Battle Park'), ('battle_frontier', 'Battle Frontier'),
+    ('battle_factory', 'Battle Factory'), ('battle_castle', 'Battle Castle'), ('battle_arcade', 'Battle Arcade'),
+    ('battle_hall', 'Battle Hall'), ('distortion_world', 'Distortion World'),
+    ('global_terminal', 'Global Terminal'), ('villa', 'Villa'), ('battleground', 'Battleground'),
+    ('rotoms_room', 'ROTOM’s Room'), ('team_galactic_eterna_building', 'T.G. Eterna Bldg'),
+    ('iron_ruins', 'Iron Ruins'), ('iceberg_ruins', 'Iceberg Ruins'), ('rock_peak_ruins', 'Rock Peak Ruins'),
+)
+MAP_LOCATION = bytes.fromhex(
+    "00000006060606065b5b5b5a5a5a5a5a5a5a5a060606060606060606765d0606060707070707676767070707070808080808"
+    "0808080808080808085e0808080808090909090909607a7a7a7a090909091509090909090a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+    "0a0a0a0a0a0a0a0a0a17181b0a0a0a0a626161630b0b0b0b0b0b0b0b0b0b0b0b0c0c0c0c666565656565650c0c0c0c0c0c1e"
+    "0d0d0d0d0d0d0d690d0d0d0d0d0d680e0e0e0e0e0e0e0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f515151516f285151002e2e2e"
+    "2f2f3030313100323232323232323232323232323333000b0035353535353535353535353535353535353500363636363636"
+    "0037003839003a3a3b3b3c3c54545454003d3e3e3e3e3e3e3f00000040404040404041414244454545454545454646464646"
+    "46464646004747474747474c4c574d4d584e4e594f4f6f6f000050505050505000004848496e6d6d4a4b1011121313141414"
+    "1515001617171818181818181919191a1a1b6a6a6a1b1b1c1c6b6d6d6d6d1d1d1e1f1f202020212121222437242525252527"
+    "2800002a00002b2c000000010101010101010202020202020202030303035f03030404040464040404040505050505050505"
+    "5252525278525253535353535353775300232629002d5500060708090a0b0c0d0e0f51020304055253076c50470f0f472829"
+    "2a2b2b2b34343434343456564243453568063e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e"
+    "3e3e3e3e3e3e3e3e61707050717472736576764775797a7575757575757575757575333306457b327c2b7d"
 )
