@@ -1,8 +1,8 @@
 """Exp. Share All (the Gen 6+ rule) for Pokémon Platinum (US rev 0), done through the game's own battle code.
 
     handle = install_exp_share(core, enabled)   # core: nds_core.NDSCore (or dev/platinum/ds.DS for tests)
-    ...
-    handle.remove()
+    handle.busy()      # True while an award we changed is in progress (don't take a resume snapshot then)
+    handle.remove()    # mid-award: the rest goes back to the game's rule; the slot being processed is kept
 
 THE RULE (Pokémon X/Y onward): when an enemy Pokémon faints in a wild or trainer battle, every party Pokémon that
 took part gets the FULL experience the game would give a single participant (no division by the number of

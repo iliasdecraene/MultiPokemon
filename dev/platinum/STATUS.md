@@ -234,3 +234,12 @@
   1:D22D == 0) and on remove(). 5 new unit tests (incl. battle ended without the end hook, remove() mid-award); real
   ROM: busy() True during the "gained" texts, False back in the overworld, never with the rule off (both games).
   dev/e2e/expshare_gb.py ALL PASS (59), client suite 383 pass. Not committed.
+- 2026-10-26 exp agent (Platinum) review fixes: platinum_exp.handle.busy() = an award we changed is really in
+  progress (battle overlay signatures OK + child overlay 16 + ctx->taskData alive with taskData->battleCtx == ctx);
+  a stale `pending` (soft reset / state load / battle gone) is dropped there. remove()/_undo now writes only if that
+  award's task is alive (else drops pending, no write into freed heap) and keeps the mask bit of the slot the task
+  is processing (seqNum != START), so e.g. a benched mon at "Make it forget another move?" keeps its prompt.
+  _on_task checks the code signature before touching r1. Unit tests: fake game model now re-finds its slot every
+  frame like GetExpTask; new tests remove mid-slot, stale pending (4 ways), busy() (24 pass; 6 fail on the old
+  module). e2e expshare_pt.py: + busy() samples, + case F remove() at the real move-learn prompt -> Razor Leaf
+  still learnt by slot 1, Starly 0, lead 24; ALL PASS.
