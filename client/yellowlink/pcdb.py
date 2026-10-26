@@ -36,6 +36,23 @@ def empty_store() -> dict:
     return {"version": 1, "rev": 0, "boxes": [[] for _ in range(STORE_BOXES)], "linked": []}
 
 
+LEFT_MAX = 1000       # ids of entries that left the store (withdrawn, traded, released) - never resurrected
+
+
+def _ids(st: dict) -> set:
+    return {e["id"] for b in st.get("boxes", []) for e in b} | {e["id"] for e in st.get("incoming", [])}
+
+
+def _note_left(st: dict, ids):
+    """Remember entries that left this store, so a merge with an outdated server copy (an upload whose
+    confirmation got lost, or another server sharing this save) never brings them back."""
+    left = st.setdefault("left", [])
+    for i in ids:
+        if i not in left:
+            left.append(i)
+    del left[:-LEFT_MAX]
+
+
 def _strip_server(st: dict) -> dict:
     return {k: copy.deepcopy(v) for k, v in st.items() if k not in ("srv_rev", "inbox", "srv_trades", "srv_gone")}
 
@@ -252,13 +269,19 @@ class Gen1PC:
 class PCSync:
     """Holds the committed store, pending changes and the last view written to each game."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, server_key: str = "", home_key: str = ""):
+        """server_key: the server this session talks to; home_key: the server whose folder holds this store.
+        A store can be shared by several servers (one save on two servers, SPEC.md section 8): each server has its
+        own server_rev/synced copy (`sync`), and trade locks remember their server (`lock_servers`) so a trade
+        that's still open on one server is never released by another one."""
         self.path = path
+        self.server_key = server_key or home_key or ""
+        self.home_key = home_key or self.server_key
         self.committed = empty_store()
         self.last_view_committed = {}          # game_id -> [[ [entry_id, b64 record], ... ] x boxes]
-        self.server_rev = 0                    # the server's revision our committed store is based on
-        self.synced = None                     # the server's copy at server_rev (base for 3-way merges)
+        self.sync = {}                         # server key -> {"server_rev": int, "synced": store | None}
         self.locks = {}                        # trade_id -> [entry ids] offered in a trade with unknown outcome
+        self.lock_servers = {}                 # trade_id -> server key it belongs to
         self.deferred = None                   # a server copy to merge once nothing is pending
         self.uploading = None
         self.refused = None                    # (mons, free space) when a game couldn't be linked (store full)
@@ -286,9 +309,39 @@ class PCSync:
             log.warning("PC store repaired (overfull boxes moved to incoming)")
         self.committed = store
         self.last_view_committed = data.get("last_view", {})
-        self.server_rev = int(data.get("server_rev", 0) or 0)
-        self.synced = data.get("synced") if valid_store(data.get("synced")) else None
+        sync = data.get("sync") if isinstance(data.get("sync"), dict) else {}
+        self.sync = {str(k): v for k, v in sync.items() if isinstance(v, dict)}
+        if self.home_key not in self.sync:      # older file: the top-level copy belongs to its own server
+            self.sync[self.home_key] = {"server_rev": int(data.get("server_rev", 0) or 0),
+                                        "synced": data.get("synced")}
         self.locks = data.get("locks") if isinstance(data.get("locks"), dict) else {}
+        ls = data.get("lock_servers") if isinstance(data.get("lock_servers"), dict) else {}
+        self.lock_servers = {t: ls.get(t, self.home_key) for t in self.locks}
+
+    # this server's sync state (see __init__)
+    def _mine(self) -> dict:
+        return self.sync.setdefault(self.server_key, {"server_rev": 0, "synced": None})
+
+    @property
+    def server_rev(self) -> int:
+        return int(self._mine().get("server_rev", 0) or 0)
+
+    @server_rev.setter
+    def server_rev(self, v):
+        self._mine()["server_rev"] = int(v or 0)
+
+    @property
+    def synced(self):
+        s = self._mine().get("synced")
+        return s if valid_store(s) else None
+
+    @synced.setter
+    def synced(self, v):
+        self._mine()["synced"] = v
+
+    def locks_here(self) -> list:
+        """Trade ids of locks that belong to the server we're talking to (only it can tell how they ended)."""
+        return [t for t in self.locks if self.lock_servers.get(t, self.home_key) == self.server_key]
 
     def _keep_bad_copy(self, why):
         """Never silently replace a damaged store with an empty one: keep the file for the host."""
@@ -304,9 +357,13 @@ class PCSync:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         try:
+            home = self.sync.get(self.home_key, {})
             tmp.write_text(json.dumps({"store": self.committed, "last_view": self.last_view_committed,
-                                       "server_rev": self.server_rev, "synced": self.synced,
-                                       "locks": self.locks}), encoding="utf-8")
+                                       # top-level copy = the home server's, so older versions still read it
+                                       "server_rev": int(home.get("server_rev", 0) or 0),
+                                       "synced": home.get("synced"), "sync": self.sync,
+                                       "locks": self.locks, "lock_servers": self.lock_servers}),
+                           encoding="utf-8")
             os.replace(tmp, self.path)
             return True
         except OSError:
@@ -318,6 +375,7 @@ class PCSync:
         if not self.pending or self.session_open:
             return None
         self.working["rev"] = self.committed.get("rev", 0) + 1
+        _note_left(self.working, _ids(self.committed) - _ids(self.working))
         self.committed = copy.deepcopy(self.working)
         self.last_view_committed = copy.deepcopy(self.last_view)
         self.pending = False
@@ -361,7 +419,9 @@ class PCSync:
         local = self.committed
         ids = lambda st: {e["id"]: (bi, e) for bi, b in enumerate(st["boxes"]) for e in b}  # noqa: E731
         b_ids, l_ids, r_ids = ids(base), ids(local), ids(remote)
-        removed_here = set(b_ids) - set(l_ids)
+        # removed here since the last sync - or ever: an outdated server copy (lost confirmation, another server
+        # sharing this save) must not bring back a Pokémon this store already let go
+        removed_here = (set(b_ids) - set(l_ids)) | ((set(r_ids) & set(local.get("left") or [])) - set(l_ids))
         added_here = [l_ids[i] for i in l_ids if i not in b_ids]
         server_gone = set(remote.get("srv_gone") or [])
         merged = _strip_server(remote)
@@ -386,6 +446,8 @@ class PCSync:
                 gone.append(i)
         for key in ("trades", "linked"):
             merged[key] = sorted(set(merged.get(key, [])) | set(local.get(key, [])))
+        merged["left"] = list(local.get("left") or [])
+        _note_left(merged, [i for i in remote.get("left") or [] if i not in {e["id"] for _, e in added_here}])
         del gone[:-500]
         merged["rev"] = max(local.get("rev", 0), remote.get("rev", 0)) + 1
         self.committed = merged
@@ -405,9 +467,11 @@ class PCSync:
     # locks: offered entries stay put until we know how the trade ended --------------------------------
     def lock(self, trade_id: str, entry_ids: list):
         self.locks[trade_id] = list(entry_ids)
+        self.lock_servers[trade_id] = self.server_key
         self.save()
 
     def unlock(self, trade_id: str):
+        self.lock_servers.pop(trade_id, None)
         if self.locks.pop(trade_id, None) is not None:
             self.save()
 
@@ -429,6 +493,10 @@ class PCSync:
                 gone = st.setdefault("gone", [])
                 gone.append(eid)
                 del gone[:-500]
+            _note_left(st, delta.get("remove", []))
+            if st.get("left"):                      # one that comes back in a trade is ours again
+                back = {e.get("id") for e in delta.get("add", [])}
+                st["left"] = [i for i in st["left"] if i not in back]
             have = {e["id"] for b in st["boxes"] for e in b} | {e["id"] for e in st.get("incoming", [])}
             for entry in delta.get("add", []):
                 if entry.get("id") in have:
@@ -445,6 +513,7 @@ class PCSync:
         self.committed["rev"] = self.committed.get("rev", 0) + 1
         self.working["rev"] = self.committed["rev"]
         self.locks.pop(tid, None)
+        self.lock_servers.pop(tid, None)
         self.save()
         log.info("applied trade %s: -%s +%s", tid, delta.get("remove"), [e.get("nick") for e in delta.get("add", [])])
         return True

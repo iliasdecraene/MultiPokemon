@@ -15,6 +15,9 @@ services:
       # Optional: the server's name players see (sidebar + welcome) and the welcome message.
       YL_SERVER_NAME: ${YL_SERVER_NAME:-}
       YL_MOTD: ${YL_MOTD:-}
+      # Optional: after merging this server into another one, forward players there (see DEPLOY.md "Merging").
+      YL_MOVED_TO: ${YL_MOVED_TO:-}
+      YL_MOVED_KEY: ${YL_MOVED_KEY:-}
     volumes:
       # players.json (and optionally config.json) live here on the host.
       - ./data:/data

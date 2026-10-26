@@ -243,3 +243,60 @@ def test_damaged_file_is_kept_and_overfull_repaired(tmp_path):
     p.write_text(json.dumps({"store": st}))
     sync = pcdb.PCSync(p)
     assert len(sync.committed["boxes"][0]) == 20 and len(sync.committed["incoming"]) == 1
+
+
+def test_pc_store_keeps_sync_state_per_server(tmp_path):
+    import json as _json
+    from yellowlink import pcdb as _pcdb
+    path = tmp_path / "pc.json"
+    path.write_text(_json.dumps({"store": _pcdb.empty_store(), "server_rev": 7, "synced": None, "locks": {"t1": ["a"]}}))
+    main = _pcdb.PCSync(path, "main", "main")           # an older file: its sync state belongs to its own server
+    assert main.server_rev == 7 and main.locks_here() == ["t1"]
+    main.lock("t2", ["b"])
+    main.save()
+    fly = _pcdb.PCSync(path, "fly", "main")             # the same store used from another server
+    assert fly.server_rev == 0 and fly.locks_here() == []          # Fly knows nothing; main's trades stay locked
+    assert fly.locked_ids() == {"a", "b"}
+    fly.server_rev = 3
+    fly.lock("t3", ["c"])
+    fly.save()
+    again = _pcdb.PCSync(path, "main", "main")
+    assert again.server_rev == 7 and sorted(again.locks_here()) == ["t1", "t2"]
+    assert _json.loads(path.read_text())["server_rev"] == 7          # older versions still read main's state
+    assert _pcdb.PCSync(path, "fly", "main").server_rev == 3
+
+
+def test_outdated_server_copy_never_brings_back_a_pokemon_that_left(tmp_path):
+    """Shared save: deposit on Main (its confirmation is lost), give the mon away on Fly, come back to Main."""
+    import copy as _copy
+    from yellowlink import pcdb as _pcdb
+    path = tmp_path / "pc.json"
+    main = _pcdb.PCSync(path, "main", "main")
+    x = {"id": "x1", "origin": "yellow", "dex": 16, "level": 5, "nick": "PIDGEY", "ot": "ASH", "otid": 1,
+         "gen1": None, "gen2": None}
+    main.working["boxes"][0].append(x)
+    main.pending = True
+    main.commit()
+    main.upload()                                 # Main stores it as srv_rev 2 - but we never see pc_saved
+    server_copy = _copy.deepcopy(main.uploading)
+    server_copy["srv_rev"] = 2
+    main.save()
+    fly = _pcdb.PCSync(path, "fly", "main")      # on Fly: the mon is traded away
+    fly.apply_trade({"trade_id": "t1", "remove": ["x1"], "add": [], "srv_rev": 3})
+    assert fly.count() == 0
+    back = _pcdb.PCSync(path, "main", "main")    # back on Main: its copy (srv_rev 2) is newer than our base
+    assert back.server_rev != 2
+    back.merge_remote(server_copy)
+    assert back.count() == 0, "the traded-away Pokémon came back"
+    # and a mon withdrawn into the party on another server (no trade involved) stays gone too
+    y = dict(x, id="y1", nick="RATTATA")
+    back.working["boxes"][0].append(y)
+    back.pending = True
+    back.commit()
+    stale = _copy.deepcopy(back.committed)
+    stale["srv_rev"] = 9
+    back.working["boxes"][0][:] = []
+    back.pending = True
+    back.commit()                                 # withdrawn
+    back.merge_remote(stale)
+    assert back.count() == 0

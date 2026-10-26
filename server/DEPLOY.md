@@ -176,3 +176,37 @@ Update it like the first one: `cd /opt/yellowlink2 && git pull && cd server && d
 ### Name and welcome message
 `YL_SERVER_NAME` (shown in every player's sidebar and when they connect) and `YL_MOTD` (welcome line in the chat) can be
 set in a server's `.env`. Apply a change with `docker compose up -d` in that server's `server` folder.
+
+## Merging two servers into one
+
+Everything a player has (saves, PC, Soul Link runs) stays: the second server's data is copied into the first, and
+the second server becomes a *forwarder* that tells every game (0.7.1 or newer) the new address and password - the
+game switches over by itself, keeping its save folder. Games older than 0.7.1 get the "press U to update" notice
+there first. Example: the second server in `/opt/yellowlink2` goes into the first one in `/opt/yellowlink`.
+
+1. Publish the release with the merge support (0.7.1 or newer) and update both servers (`sudo yl-update`, or the
+   update command in each folder).
+2. Stop both, merge, fix the file owner, start the first one again:
+   ```bash
+   cd /opt/yellowlink2/server && sudo docker compose stop
+   cd /opt/yellowlink/server && sudo docker compose stop
+   sudo python3 /opt/yellowlink/server/yellowlink_server/merge.py /opt/yellowlink2/server/data /opt/yellowlink/server/data
+   sudo chown -R 1000:1000 /opt/yellowlink/server/data
+   cd /opt/yellowlink/server && sudo docker compose up -d
+   ```
+   The merge prints what it copied and where it put a backup of the old data
+   (`/opt/yellowlink/server/data.before-merge-<time>`). If it says a trade is still being finished: start the
+   second server once (`sudo docker compose up -d` in its folder), stop it again and repeat.
+3. Turn the second server into a forwarder (this copies the first server's password into its settings, nothing to
+   type) and start it:
+   ```bash
+   echo "YL_MOVED_TO=ws://91.107.193.182:8765" | sudo tee -a /opt/yellowlink2/server/.env
+   sudo grep '^YL_KEY=' /opt/yellowlink/server/.env | sed 's/^YL_KEY=/YL_MOVED_KEY=/' | sudo tee -a /opt/yellowlink2/server/.env > /dev/null
+   cd /opt/yellowlink2/server && sudo docker compose up -d
+   ```
+4. Leave the forwarder running for a few weeks so everyone gets moved (it uses almost nothing). Then
+   `cd /opt/yellowlink2/server && sudo docker compose down` removes it.
+
+Someone who was on both servers gets their second save as an extra entry in the server list ("<name> (save)"), now
+pointing to the merged server - two characters with the same name. Remove that entry in the game (Multiplayer →
+Servers → Remove) if you don't want it; its saves stay in the YellowLink folder.

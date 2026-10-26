@@ -131,3 +131,50 @@ def test_address_typos_are_caught():
     for u in bad:
         assert not url_looks_ok(normalize_url(u)), u
     assert normalize_url("https://91.107.193.182:8765") == "ws://91.107.193.182:8765"
+
+
+def test_server_moved_keeps_folder_and_player(home):
+    c = make(home, {"server_url": "ws://1.2.3.4:8765", "room_key": "one", "name": "Ilias", "uid": "u-main"})
+    fly = c.add_server("", "ws://1.2.3.4:8766", "two")
+    fly["seen_name"] = "Fly"
+    c.switch_server(fly["id"])
+    folder, uid = c.data_dir, c["uid"]
+    twin = c.move_server(fly["id"], "ws://1.2.3.4:8765", "one")
+    assert twin                                         # Ilias also has the main server: two saves, two characters
+    assert (c["server_url"], c["room_key"]) == ("ws://1.2.3.4:8765", "one")
+    assert c.data_dir == folder and c["uid"] == uid     # same saves, same player id
+    assert Config.server_label(c.server(fly["id"])) == "Fly (save)"
+
+
+def test_server_moved_for_a_fly_only_player(home):
+    c = make(home, {"server_url": "ws://1.2.3.4:8766", "room_key": "two", "name": "Bea", "uid": "u-bea"})
+    c.active_server["seen_name"] = "Fly"
+    assert not c.move_server(c.server_id, "1.2.3.4:8765", "one")
+    assert (c["server_url"], c["room_key"], c["uid"]) == ("ws://1.2.3.4:8765", "one", "u-bea")
+    assert c.data_dir == home and "seen_name" not in c.active_server   # the new server will tell its name
+    with pytest.raises(ValueError):
+        c.move_server(c.server_id, "not an address", "x")
+
+
+def test_shared_save_uses_the_owners_folder_and_pc(home):
+    c = make(home, {"server_url": "ws://1.2.3.4:8765", "room_key": "one", "name": "Ilias", "uid": "u-main",
+                    "current_game": "yellow"})
+    fly = c.add_server("Fly", "ws://1.2.3.4:8766", "two")
+    c.share_save(fly["id"], "main")
+    c.switch_server(fly["id"])
+    assert c.data_dir == home and c.save_path == home / "saves" / "yellow.sav"   # the main save
+    assert c.pc_path == home / "pc" / "u-main.json"                             # the main PC store
+    assert c["uid"] == fly["uid"] != "u-main"                                   # own player on Fly
+    assert c.pc_keys == (fly["id"], "main")
+    assert c.save_owner(c.active_server)["id"] == "main"
+    third = c.add_server("", "ws://1.2.3.4:8767", "x")
+    with pytest.raises(ValueError):
+        c.share_save("main", third["id"])      # main's save is used by Fly: main can't switch to another save
+    c.share_save("main", fly["id"])            # Fly's save IS main's save: nothing changes
+    assert "save_dir" not in c.server("main")
+    c.share_save(third["id"], fly["id"])       # no chains: Fly's save is main's save
+    assert c.server(third["id"])["save_dir"] == "main"
+    c.share_save(fly["id"], None)              # back to its own save
+    assert c.data_dir == home / "servers" / fly["id"] and c.pc_path.name == f"{fly['uid']}.json"
+    c2 = Config()                              # persisted
+    assert c2.server(third["id"])["save_dir"] == "main"

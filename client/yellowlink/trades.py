@@ -102,6 +102,8 @@ class TradeMixin:
             return "Finish what you're doing first."
         if self.pcsync.session_open:
             return "Close your in-game PC first."
+        if not getattr(self, "pc_ready", True):
+            return "Syncing your PC with this server - try again in a moment."
         if not self.trade_entries():
             return "Your PC is empty - trades use Pokémon from your PC (deposit one first, then wait a few seconds)."
         return None
@@ -122,7 +124,8 @@ class TradeMixin:
         self.action_trade(e, gift=True)
 
     def on_trade_request(self, msg):
-        if (self.chal or self.trade or self.battle or self.live or self.prompt or self.pcsync.session_open):
+        if (self.chal or self.trade or self.battle or self.live or self.prompt or self.pcsync.session_open
+                or not getattr(self, "pc_ready", True)):
             self.net.send({"type": "trade_respond", "trade_id": msg["trade_id"], "accept": False})
             return
         self.prompt = {"kind": "gift" if msg.get("gift") else "trade", "id": msg["trade_id"],
@@ -130,7 +133,7 @@ class TradeMixin:
         self._maybe_show_prompt()
 
     def on_trade_started(self, msg):
-        if self.battle or self.live or self.chal or self.pcsync.session_open:
+        if self.battle or self.live or self.chal or self.pcsync.session_open or not getattr(self, "pc_ready", True):
             self.net.send({"type": "trade_cancel", "trade_id": msg["trade_id"]})
             self.toast("Trade cancelled: close your in-game PC (or finish your battle) first.", 5, ui.BAD)
             return
@@ -247,7 +250,8 @@ class TradeMixin:
         return f"{names[0]}, {names[1]} and {len(names) - 2} more"
 
     def on_trade_cancelled(self, msg):
-        self.pcsync.unlock(msg.get("trade_id"))           # the server says it didn't happen
+        if msg.get("trade_id") in self.pcsync.locks_here():
+            self.pcsync.unlock(msg.get("trade_id"))       # the server says it didn't happen
         t = self.trade
         if not t or t.trade_id != msg.get("trade_id"):
             if not t:
@@ -266,6 +270,8 @@ class TradeMixin:
     def on_trade_status(self, msg):
         """Answer to our question about a trade we lost track of (connection dropped mid-trade)."""
         tid, state = msg.get("trade_id"), msg.get("state")
+        if tid not in self.pcsync.locks_here():
+            return                                          # another server's trade: only that server can tell
         if state == "failed":
             self.pcsync.unlock(tid)
         elif state == "complete":
@@ -276,7 +282,7 @@ class TradeMixin:
     def trades_step(self):
         if getattr(self, "_status_retry", 0) and time.time() > self._status_retry and self.net.status == "online":
             self._status_retry = 0
-            for tid in list(self.pcsync.locks):
+            for tid in self.pcsync.locks_here():
                 if not self.trade or self.trade.trade_id != tid:
                     self.net.send({"type": "trade_status", "trade_id": tid})
 

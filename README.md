@@ -68,7 +68,9 @@ in the `backups` folder next to it, and the last 15 are kept. It's a standard 32
 **More than one group of friends?** Open **Multiplayer → Switch server → Add a server...** and enter the other
 group's address and password. Each server keeps its own saves, PC and challenges (saves of extra servers live in
 `%APPDATA%\YellowLink\servers\`), so a different group means a different adventure. Switch back any time from the
-same list; your game is saved first and continues where you left off.
+same list; your game is saved first and continues where you left off. Want the **same game on two servers**
+(two groups of friends, one adventure)? In the server's window pick *Save: Same save as …* - both servers then
+use one save and one PC, and each group still sees you as their own player.
 
 **After a trade, save in-game.**
 

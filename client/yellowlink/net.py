@@ -85,17 +85,17 @@ class NetClient:
                     await self._pump(ws)
                     # Normal close (e.g. server restart): still a disconnect.
                     self._closed(ws.close_code, ws.close_reason)
-                    if ws.close_code in (4001, 4002, 4003):
+                    if ws.close_code in (4001, 4002, 4003, 4005):
                         return
             except websockets.exceptions.ConnectionClosedError as e:
                 code = e.rcvd.code if e.rcvd else None
                 self._closed(code, e.rcvd.reason if e.rcvd else str(e))
-                if code in (4001, 4002, 4003):
+                if code in (4001, 4002, 4003, 4005):
                     return
             except websockets.exceptions.ConnectionClosedOK as e:
                 code = e.rcvd.code if e.rcvd else None
                 self._closed(code, e.rcvd.reason if e.rcvd else "closed")
-                if code in (4001, 4002, 4003):
+                if code in (4001, 4002, 4003, 4005):
                     return
             except Exception as e:  # noqa: BLE001 - network errors of all kinds
                 self._closed(None, str(e) or e.__class__.__name__)
@@ -113,6 +113,9 @@ class NetClient:
         elif code == 4002:
             self.status = "rejected"
             self.status_detail = "logged in from another window"
+        elif code == 4005:
+            self.status = "rejected"
+            self.status_detail = "server moved"
         elif code == 4003:
             self.status = "rejected"
             self.status_detail = reason or "client/server version mismatch"

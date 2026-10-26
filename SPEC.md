@@ -487,3 +487,25 @@ game files (ROMs) and settings are shared.
 - Switching = save + close + reopen (like travelling between regions). Refused during a trade, battle or challenge;
   `active_challenge` is cleared. Adding a server with an address already in the list is refused. Removing a server
   only forgets it: its folder stays on disk.
+- **Merging servers** (0.7.1): `python -m yellowlink_server.merge FROM INTO` (or the file directly with python3)
+  copies players.json entries, pc/<uid>.json, challenges.json records and reports; never overwrites (ids that exist
+  in both are kept as in INTO and reported), backs INTO up first, refuses while FROM has a trade journal. The old
+  server then runs with `YL_MOVED_TO` (+ `YL_MOVED_KEY`): after a valid hello from a client >= 0.7.1 it sends
+  `{"type": "moved", "url", "key"}` and closes with **4005**; older clients get a welcome with an empty roster, the
+  update notice (`latest_client`) and a motd, and all their messages are ignored (no roster, PC, trades or chat).
+  The client (`App.on_moved` → `Config.move_server`) replaces the active entry's url/key, keeping its id, folder and
+  uid, and restarts on it. If another entry already has that address (the player was on both servers), the moved
+  entry keeps its own save as a second character and gets the label "<old name> (save)". net.py treats 4005 as final
+  ("server moved") instead of reconnecting.
+- **One save on several servers** (0.7.2): an entry can use another entry's save (`save_dir` = that entry's id,
+  `save_uid` = its player id; `Config.share_save`, no chains, an entry whose save others use can't switch to another
+  save). `data_dir` follows `save_dir`; `pc_path` = that folder's `pc/<save_uid>.json`; the player keeps their own
+  `uid` per server (each group sees its own player). The PC store then syncs with several servers: `PCSync(path,
+  server_key, home_key)` keeps `sync[server_key] = {server_rev, synced}` per server (older files: the top-level copy
+  belongs to the home server, and is still written for older versions), and trade locks remember their server
+  (`lock_servers`): only that server's `trade_status`/`trade_cancelled` can release them. While the active entry
+  shares a save, trades wait until this server confirmed our PC (`pc_ready`, set by `pc_saved`). Every entry that
+  leaves the store (commit, trade) is listed in `left` (last 1000); a merge never brings a `left` entry back, so an
+  outdated server copy (lost upload confirmation, another server sharing the save) can't duplicate a Pokémon. On
+  close the client waits up to 3 s for the last upload's confirmation. Changing the save of the server you're on is
+  applied after the game closed (`App.pending_share` in `_main`).
