@@ -116,3 +116,19 @@ announcement/toast wording). Not touching badges.py / adapters / challenge_view.
 7. Referee HoF text neutral again (toast comes from the roster); friends' badges on an old server: "Badges need a
    server update"; first report / old earn times -> one "X has N badges" line.
 Tests: client 545, server 127, pyflakes clean; badges_flow (34 checks), challenge_flow, servertest, sharetest ALL PASS.
+
+## 2026-10-26 badges-game (review fixes done)
+1. Badge keys (see note above): Yellow OT ID + DVs + family root; Crystal + raw caught data; numbered per reading
+   (number_keys); badgesync `_pc_shiny_keys` returns numbered store keys (game + store merge = max per source).
+   Tests: hatched shiny Chikorita + Charmander same Atk DV -> 2 keys; two 255-catch-rate species -> 2; same mon after
+   evolution (incl. Pichu -> Pikachu) and after Yellow -> Crystal -> Yellow (also on the ROM, Time Capsule catch-rate
+   byte 19 -> item 92 -> 23) -> 1; identical twins -> key, key-2.
+2. Yellow battle_info()["shiny"] = Gen-2 rule on the wild mon's DVs (GameMemory.wild_dvs, Transform-aware);
+   ChallengeView.battle() returns None on a Yellow battle's first frame (DVs may still be the previous battle's).
+   Real ROM: 6 encounters, view None on frame 0, then shiny == rule on the final DVs; soullink_yellow.py 3b: Alex's
+   shiny Route 1 encounter -> shiny clause, logged ROUTE_1*1, usable.
+3. platinum.progress: only slots whose plain PID could be shiny for the player's TID/SID are read/decrypted
+   (one r32 per slot). NDSCore median 9.7 ms -> 1.3 ms (max 27 -> 4.1) on pt_sl_pc6 / pt_sl_daycare.
+4. Page-table checksums: pret SavePageInfo.checksum is computed at load only and never compared; the save block
+   footers are recomputed on save. ROM: entries 2/7/37 unchanged through a real catch while the Pokédex page
+   changed -> nothing to fix in mark_dex or write_boxes.
