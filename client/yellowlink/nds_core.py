@@ -452,4 +452,11 @@ def selftest(rom_path=None) -> str:
         out.write("battery candidates: " + ", ".join(
             f"{p} ({'exists' if os.path.exists(p) else 'missing'})" for p in battery_file_candidates(rom_path)) + "\n")
         core.close()
+        for p in battery_file_candidates(rom_path):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                    out.write(f"after close: {p} could be removed now\n")
+                except OSError as e:
+                    out.write(f"after close: {p} still there ({e})\n")
     return out.getvalue()

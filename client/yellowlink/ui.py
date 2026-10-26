@@ -323,15 +323,16 @@ def draw_help(surf, f, game_w, game_h, ds=False):
     if ds:
         lines = [
             ("Nintendo DS controls", ACCENT),
-            "  A: X or A     B: Z or S     X: D     Y: C",
-            "  L: Q     R: W     Start: Enter     Select: Backspace",
-            "  D-pad: arrow keys     Touch screen: mouse (lower screen)",
-            "",
+            "  A: X or A     B: Z or S",
+            "  X: D     Y: C     L: Q     R: W",
+            "  Start: Enter     Select: Backspace",
+            "  D-pad: arrows     Touch: mouse",
+            ("  (click / drag on the lower screen)", DIM),
             ("YellowLink", ACCENT),
-            "  Tab: multiplayer     T: chat     M: mute",
-            "  Space: fast-forward     F5/F6: window size",
-            "  -/+: volume     F3: report a problem",
-            "",
+            "  Tab: multiplayer     T: chat",
+            "  Space: fast-forward     M: mute",
+            "  -/+: volume     F5/F6: window size",
+            "  F3: report a problem",
             ("Save in-game as usual (X > Save).", DIM),
         ]
         modal(surf, f, game_w, game_h, "How to play", lines, "[Esc / Enter / F1] close")

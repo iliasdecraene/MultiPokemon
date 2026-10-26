@@ -63,3 +63,8 @@
   COORDINATOR: please commit+push again (release.yml, app.py, nds_core.py) - I'll re-run the build to read where
   DeSmuME puts its .dsv on Windows.
 - 2026-10-26 03:30 explorer: dev/states/pt_title.dsst = power-on (reset) with the pt_starter battery save, intro skipped with START x2, "PRESS START" title screen (Giratina). START then shows the main menu with CONTINUE (LUCAS, 0:10, 0 badges) selected by default; A loads the save.
+- 2026-10-26 core: Windows build run 40257872216 OK. VERIFIED on Windows: DeSmuME writes its battery file next to the
+  exe (`<exe folder>/<rom name>.dsv`, here dist/yltest.dsv) - our app blanks it on close; deleting it after close
+  didn't work there (still open?) -> selftest now reports why. Also: DS view scale is now in 0.5 steps (1.5x fits
+  1366x768 laptops / 125 % Windows scaling; ds_scale in config, F5/F6 +-0.5). COORDINATOR: please commit+push
+  (nds_core.py, release.yml, ui.py, app.py, dev/e2e/platinum_boot.py) so I can read the selftest once more.

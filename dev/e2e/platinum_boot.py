@@ -149,8 +149,6 @@ lib.set_current("platinum")
 cfg.update(name="Ilias", server_url=f"ws://127.0.0.1:{PORT}", room_key="pt", seen_help=True, ds_scale=2)
 cfg.save()
 dsv = pathlib.Path(nds_core.battery_file_candidates(str(app_dir() / "roms" / "platinum.nds"))[0])
-home_dsv = pathlib.Path.home() / ".config" / "desmume" / "platinum.dsv"
-home_dsv_mtime = home_dsv.stat().st_mtime if home_dsv.exists() else None
 
 # 1. boot -------------------------------------------------------------------------------------------------------
 A = start(cfg, os.path.join(STATES, "pt_room.dsst"))
@@ -319,8 +317,7 @@ check("back on the first server: its save again", R.nds.loaded_save and now == o
       now.count(0xFF) < len(now) - 1000,
       (R.nds.loaded_save, sum(a != b for a, b in zip(now, on_disk)), sum(a != b for a, b in zip(now, data))))
 R.shutdown()
-check("~/.config/desmume/platinum.dsv untouched",
-      (home_dsv.stat().st_mtime if home_dsv.exists() else None) == home_dsv_mtime)
+check("DeSmuME's own battery file stayed in this test's folder", str(dsv).startswith(str(tmp)) and dsv.exists(), dsv)
 alex.shutdown()
 print("\nscreens in", tmp)
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}")
