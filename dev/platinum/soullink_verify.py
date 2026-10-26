@@ -8,7 +8,6 @@ See dev/notes/soullink_platinum.md for what each check proves. Runs in a private
 battery file is not touched). RAM writes used to save time are listed in the notes ("Fixtures").
 """
 import os
-import struct
 import sys
 import tempfile
 
@@ -372,8 +371,19 @@ def build_pc6(rig):
     rig.save("pt_sl_pc6.dsst")
 
 
+def build_pc5(rig):
+    """pt_sl_pc6 after move_party_to_box(5) (checked against the game's own STORE in check_boxmoves) ->
+    pt_sl_pc5.dsst: 5 in the party, 3 in box 1, at the PC."""
+    rig.load("pt_sl_pc6.dsst")
+    while rig.pm.party_checked() is None:
+        rig.d.run(1)
+    rig.pm.move_party_to_box(5)
+    rig.settle()
+    rig.save("pt_sl_pc5.dsst")
+
+
 FIXTURES = [("pt_sl_route202.dsst", build_route202), ("pt_sl_caught.dsst", build_caught),
-            ("pt_sl_party6.dsst", build_party6), ("pt_sl_pc6.dsst", build_pc6)]
+            ("pt_sl_party6.dsst", build_party6), ("pt_sl_pc6.dsst", build_pc6), ("pt_sl_pc5.dsst", build_pc5)]
 
 
 def fixtures(rig):
@@ -697,7 +707,20 @@ def stable_state(rig):
             break
         rig.d.run(1)
     boxes = [[normalise(r)[1] for r in pm.box_raw(b)] for b in range(18)]
-    return pm.party_count(), p, boxes, pm.current_box()
+    return pm.party_count(), [mask_mail_ids(r) for r in p], boxes, pm.current_box()
+
+
+MAIL_SENTENCE_IDS = (0xBE, 0xC6, 0xCE)    # plain party offsets of Mail.sentences[0..2].id
+
+
+def mask_mail_ids(rec):
+    """Party record with the 3 Easy-Chat sentence ids of its (empty) mail zeroed: Pokemon_FromBoxPokemon ->
+    Mail_New -> EasyChatSentence_Init never sets `id`, so a withdrawn mon gets whatever was on the heap there
+    (seen: 0x157, 0x12B, 0x36 / 0x9C). pk4.to_party writes 0 - the game never reads them (mail type NONE)."""
+    plain = bytearray(pk4.decrypt(rec))
+    for o in MAIL_SENTENCE_IDS:
+        plain[o:o + 2] = b"\0\0"
+    return bytes(plain)
 
 
 def check_boxmoves(rig):
@@ -713,9 +736,6 @@ def check_boxmoves(rig):
         ok(moved and a == b and a[0] == 5 and P.mon_key(pm.current_box_records()[-1]) == key,
            "deposit party slot %d: move_party_to_box = the game's STORE byte for byte (party, count, all 18 boxes, "
            "current box)" % (slot + 1))
-        if slot == 5:
-            rig.settle()
-            rig.save("pt_sl_pc5.dsst")
     # withdraw: box 1 holds slots 0, 1 (catches) and 2 (the deposited 6th mon)
     for pos in (0, 2):
         rig.load("pt_sl_pc5.dsst")
@@ -728,7 +748,8 @@ def check_boxmoves(rig):
         b = stable_state(rig)
         ok(moved and a == b and a[0] == 6 and party_keys(pm)[-1] == key,
            "withdraw box slot %d: move_box_to_party = the game's WITHDRAW byte for byte (party record incl. "
-           "level/stats/HP from pk4.to_party, box slot cleared)" % (pos + 1))
+           "level/stats/HP from pk4.to_party, box slot cleared), except the 3 uninitialised mail sentence ids"
+           % (pos + 1))
     # the game accepts our moves: open the PC on the result, the deposited mon is shown and can be withdrawn
     rig.load("pt_sl_pc6.dsst")
     key = party_keys(pm)[3]
@@ -774,23 +795,252 @@ def check_boxmoves(rig):
 
 
 def check_keys(rig):
-    """mon_key survives deposit/withdraw (above) and here: the in-place-decrypted state, level up + evolution."""
+    """The game decrypts the lead of a big party in place every few frames in the overworld (box part and/or
+    party section); party_checked() only returns frames where every record (incl. its party section) reads
+    clean, and those always give the same keys and HP."""
     rig.load("pt_sl_party6.dsst")
     pm = rig.pm
-    raws = []
-    for _ in range(40):
+    raws, checked = [], []
+    for _ in range(120):
         raws.append(pm.party_raw()[0])
+        c = pm.party_checked()
+        if c is not None:
+            checked.append(c)
         rig.d.run(1)
-    bad = [r for r in raws if not pk4.valid(r)]
-    ok(bad and len({P.mon_key(r) for r in raws}) == 1 and all(P.mon_info(r) for r in raws if pk4.valid(r)),
-       "the lead is decrypted in place every few frames in the overworld (%d of 40 frames unreadable as encrypted); "
-       "mon_key() reads the same key on every frame" % len(bad))
+    bad = [r for r in raws if not (pk4.valid(r) and P.party_section_ok(r))]
+    sec_only = [r for r in raws if pk4.valid(r) and not P.party_section_ok(r)]
+    infos = {tuple(sorted((k, str(v)) for k, v in P.mon_info(c[0]).items())) for c in checked}
+    ok(bad and sec_only and checked and len(infos) == 1 and len({tuple(P.mon_key(r) for r in c) for c in checked}) == 1,
+       "lead decrypted in place on %d of 120 frames (%d with only the party section decrypted - checksum still "
+       "valid!); party_checked() rejects all of them: %d clean frames, one key/HP/level reading"
+       % (len(bad), len(sec_only), len(checked)))
+
+
+def daycare_deposit(rig, slot, extra=0):
+    """Talk to the Day-Care Lady (player stands below her): YES -> party menu -> slot -> STORE. `extra` = one more
+    text when a mon is already there ("We can raise two...")."""
+    pm = rig.pm
+    for _ in range(3 + extra):
+        rig.press("a", 60)
+    rig.press("a", 80)
+    rig.run(60)
+    if slot % 2:
+        rig.press("right", 20)
+    for _ in range(slot // 2):
+        rig.press("down", 20)
+    rig.press("a", 40)
+    rig.press("a", 80)                      # STORE
+    for _ in range(20):                     # B advances the texts without talking to her again
+        if pm.is_safe():
+            break
+        rig.press("b", 40)
+    rig.settle(300)
+
+
+def check_daycare(rig):
+    """Warp trick from the Sandgem Pokémon Center door to the Solaceon Day Care (map 437), leave 2 mons with the
+    Day-Care Lady, take one back."""
+    pm = rig.pm
+    rig.load("pt_sl_pc6.dsst")
+    ok(pm.daycare_records() == [], "daycare_records() = [] while the Day Care is empty")
+    warp_patch(rig, MAP_DAY_CARE, 0)
+    rig.step("down", 3)
+    rig.step("left", 4)
+    rig.step("down", 6)
+    rig.settle()
+    ok(pm.map_id() == MAP_DAY_CARE and P.area_of(pm.map_id()) == "solaceon_town",
+       "warped into the Pokémon Day Care (map 437, area solaceon_town)")
+    rig.step("up", 6)
+    party = None
+    while party is None:
+        party = pm.party_checked()
+        rig.d.run(1)
+    keys = [P.mon_key(r) for r in party]
+    daycare_deposit(rig, 1)
+    recs = pm.daycare_records()
+    ok(pm.party_count() == 5 and [P.mon_key(r) for r in recs] == [keys[1]] and recs[0] == party[1][:P.BOX_MON_SIZE],
+       "1st mon left with the lady: daycare_records() = [its box part], byte-identical to the party record's "
+       "first 136 bytes (BoxPokemon_FromPokemon), same mon_key")
+    daycare_deposit(rig, 1, extra=1)
+    recs = pm.daycare_records()
+    ok(pm.party_count() == 4 and [P.mon_key(r) for r in recs] == [keys[1], keys[2]]
+       and recs[1] == party[2][:P.BOX_MON_SIZE],
+       "2nd mon: second Day Care slot (body+0x1654+0xEC), both returned in order")
+    rig.save("pt_sl_daycare.dsst")
+    rig.step("down", 2)
+    rig.step("up", 2)                        # 4 steps: the Day Care adds exp
+    exp_before = pk4.PK4(pk4.decrypt(recs[0])).exp
+    for _ in range(12):
+        if pm.is_safe() and _ > 0:
+            break
+        rig.press("a", 60)
+    rig.settle()
+    after = party_keys(pm)
+    back = pk4.PK4(pk4.decrypt(pm.party_checked()[-1]))
+    ok(pm.party_count() == 5 and after[-1] == keys[1] and [P.mon_key(r) for r in pm.daycare_records()] == [keys[2]]
+       and back.exp > exp_before,
+       "taking the 1st mon back: same mon_key in the party (exp %d -> %d from the steps), the other one moves to "
+       "the first Day Care slot" % (exp_before, back.exp))
+
+
+def check_double(rig):
+    """Walking with a partner (FLAG_HAS_PARTNER + VAR_PARTNER_TRAINER_ID = Cheryl, set in RAM like the Eterna
+    Forest script does): grass encounters are double battles BATTLE_TYPE_AI_PARTNER (0x4A)."""
+    rig.load("pt_sl_caught.dsst")
+    pm = rig.pm
+    set_flag(rig, P.FLAG_HAS_PARTNER)
+    set_var(rig, P.VAR_PARTNER_TRAINER_ID, TRAINER_CHERYL_ETERNA_FOREST)
+    ok(pm.has_partner(), "has_partner(): FLAG_HAS_PARTNER (2401) read back")
+    rig.walk_to_battle()
+    info = pm.battle_info()
+    rig.wait_menu()
+    _bs, _cx = ctx_addr(rig)
+    e1, e2 = battle_mon(rig, 1), battle_mon(rig, 3)
+    p2 = battle_mon(rig, 2)
+    ok(info and info["kind"] == "wild" and info["battle_type"] == (P.BATTLE_TYPE_DOUBLES | P.BATTLE_TYPE_2VS2
+                                                                   | P.BATTLE_TYPE_AI)
+       and info["dex"] == e1[0] and info["pid"] == e1[1] and info["others"] == [e2[0]],
+       "double wild battle with Cheryl: kind 'wild', battle_type 0x4A, dex = the FIRST wild mon (battler 1), "
+       "others = [battler 3's species]: %s" % {x: info and info[x] for x in ("dex", "others", "battle_type")})
+    ok(pm.battle_party_slot() == (0, battle_mon(rig, 0)[2]) and p2[1] not in pm._save_party_pids(),
+       "battle_party_slot(): the player's mon (battler 0); the partner's mon (battler 2, Cheryl's species %d) "
+       "is never reported" % p2[0])
+    rig.save("pt_sl_double.dsst")
+    rig.run_away()
+    ok(pm.battle_info() is None and pm.is_safe(), "ran from the double battle")
+
+
+def check_evolve(rig):
+    """mon_key survives a real level-up evolution (TURTWIG -> GROTLE at Lv 18 after a won battle). RAM write:
+    the lead's exp set 1 short of Lv 18 (level byte 17, stats recomputed)."""
+    rig.load("pt_sl_route202.dsst")
+    pm = rig.pm
+    party = pm.party_checked()
+    pk = pk4.PK4(pk4.decrypt(party[0]))
+    key = P.mon_key(party[0])
+    pk.exp = rig.rom.exp_for_level(pk.species, 18) - 1
+    pk.party_level = 17
+    pk.stats = pk4.calc_stats(pk, rig.rom, 17)
+    pk.hp = pk.stats[0]
+    write_party(rig, [pk.encrypted()])
+    rig.walk_to_battle()
+    for _ in range(20):
+        if not rig.pm.in_battle():
+            break
+        if rig.wait_menu(1500) is None:
+            break
+        rig.use_move(0)                         # TACKLE
+        rig.run(200)
+    rig.finish()
+    p = party_infos(pm)[0]
+    ok(p["dex"] == SPECIES["grotle"] and p["key"] == key and p["level"] == 18,
+       "TURTWIG evolved into GROTLE (Lv 18): mon_key unchanged (%s)" % key)
+
+
+def check_hof(rig):
+    """Warp trick into the Hall of Fame room (map 187): its OnFrame script runs the real thing (Rowan + Cynthia,
+    ClearGame: FLAG_GAME_COMPLETED, TrainerInfo.isMainStoryCleared, RECORD_TIMES_ENTERED_HALL_OF_FAME + 1, HoF
+    screen, in-game save, credits). Then power off during the credits and CONTINUE: the flags are saved."""
+    rig.load("pt_sl_pc6.dsst")
+    pm, d = rig.pm, rig.d
+    ok(not pm.entered_hall_of_fame() and pm.hall_of_fame_count() == 0 and not pm.in_hall_of_fame(),
+       "before: entered_hall_of_fame() False, hall_of_fame_count() 0, in_hall_of_fame() False")
+    warp_patch(rig, P.HALL_OF_FAME_MAP, 0)
+    rig.step("down", 3)
+    rig.step("left", 4)
+    rig.step("down", 6)
+    log = []
+    credits = None
+    for f in range(12000):
+        log.append((pm.in_game(), pm.in_hall_of_fame(), pm.entered_hall_of_fame(), pm.hall_of_fame_count(),
+                    pm.child_overlay()))
+        if log[-1][4] == 99 and credits is None:
+            credits = f
+        if credits is not None and f > credits + 300:
+            break
+        if f % 60 == 0:
+            rig.hold("a", 6)
+        else:
+            d.run(1)
+    first = next(i for i, e in enumerate(log) if e[2])
+    ok(all(e[1] for e in log) and all(e[0] for e in log),
+       "in_hall_of_fame() (map 187) and in_game() stay True through the scene, the HoF screen and the credits")
+    ok(log[first][3] == 1 and all(e[2] and e[3] == 1 for e in log[first:]) and credits,
+       "ClearGame (during the scene) sets the saved proof: entered_hall_of_fame() True, hall_of_fame_count() = 1 "
+       "(GameRecords, decrypted); then HoF screen app (overlay 86), in-game save, credits (overlay 99)")
+    d.emu.reset()
+    r = P.fast_continue(d)
+    ok(r == "loaded" and pm.entered_hall_of_fame() and pm.hall_of_fame_count() == 1 and pm.flag(P.FLAG_GAME_COMPLETED)
+       and not pm.in_hall_of_fame(),
+       "power off during the credits + CONTINUE: still entered_hall_of_fame()/count 1/FLAG_GAME_COMPLETED "
+       "(the game saved them), player back at map %d" % pm.map_id())
+
+
+def check_gift(rig):
+    """A gift Pokémon outside battle (Bebe's EEVEE, Hearthome City; warp trick from the Sandgem Pokémon Center):
+    it appears in the party with no battle around it, while the player is in Hearthome City's area; the game
+    gives it the player's OT (TID/SID) and its key is final at once."""
+    rig.load("pt_sl_pc5.dsst")
+    pm = rig.pm
+    warp_patch(rig, 115, 0)                     # MAP_HEADER_HEARTHOME_CITY_NORTHWEST_HOUSE
+    rig.step("down", 3)
+    rig.step("left", 4)
+    rig.step("down", 6)
+    rig.settle()
+    rig.step("up", 3)                           # arrive at (5, 9); Bebe stands at (5, 5)
+    n0 = pm.party_count()
+    battle = []
+    for _ in range(40):
+        if pm.party_count() > n0:
+            break
+        rig.press("a", 40, lambda: battle.append(pm.battle_info()))
+    for _ in range(30):
+        if pm.is_safe():
+            break
+        rig.press("b", 40, lambda: battle.append(pm.battle_info()))
+    rig.settle()
+    infos = party_infos(pm)
+    tid, sid = pm.trainer_id(), pm.secret_id()
+    ok(pm.party_count() == n0 + 1 and infos[-1]["dex"] == 133 and infos[-1]["level"] == 20
+       and infos[-1]["key"].endswith("%04x%04x" % (tid, sid)) and all(b is None for b in battle)
+       and P.area_of(pm.map_id()) == "hearthome_city" and pm.is_safe(),
+       "gift EEVEE Lv20 from Bebe: new party mon (key %s, the player's TID/SID), no battle_info() at any time, "
+       "area hearthome_city (map %d)" % (infos[-1]["key"], pm.map_id()))
+    rig.press("x", 30)
+    rig.press("b", 30)
+    rig.settle()
+    ok(party_infos(pm)[-1]["key"] == infos[-1]["key"], "the gift's key is stable afterwards")
+
+
+def check_safari(rig):
+    """Great Marsh rules on Route 202 (RAM: FLAG_SAFARI_GAME_ACTIVE + 30 Safari Balls in FieldOverworldState,
+    body+0x1280+0x98): grass battles are BATTLE_TYPE_SAFARI (0x20) -> wild + safari True, no player mon out."""
+    rig.load("pt_sl_route202.dsst")
+    pm = rig.pm
+    b = body(pm) + P.PAGE_BAG + P.BAG_BALLS
+    for i in range(P.BALL_POCKET_SIZE):           # empty the ball pocket: only the safari game gives balls now
+        rig.d.w32(b + 4 * i, 0)
+    ok(not pm.has_poke_balls() and not pm.in_safari_game(), "ball pocket emptied: has_poke_balls() False")
+    set_flag(rig, P.FLAG_SAFARI_GAME_ACTIVE)
+    rig.d.w16(body(pm) + P.PAGE_FIELD_PLAYER + 0x98, 30)
+    rig.d.w16(body(pm) + P.PAGE_FIELD_PLAYER + 0x96, 0)
+    ok(pm.has_poke_balls() and pm.in_safari_game(), "safari game running: has_poke_balls() True (Safari Balls are a "
+                                                    "counter, not a bag item)")
+    slots = []
+    rig.walk_to_battle()
+    info = pm.battle_info()
+    rig.run(600, lambda: slots.append(pm.battle_party_slot()))
+    ok(info and info["kind"] == "wild" and info["safari"] and info["battle_type"] == P.BATTLE_TYPE_SAFARI
+       and set(slots) == {None},
+       "safari battle: kind 'wild', safari True, battle_type 0x20, battle_party_slot() None (no mon sent out)")
 
 
 # ---------------------------------------------------------------------------------------------------------
 SECTIONS = [("areas", check_areas), ("tutorial", check_tutorial), ("wild", check_wild), ("catch", check_catch),
             ("trainer", check_trainer), ("faint", check_faint), ("blackout", check_blackout),
-            ("party6", check_party6), ("boxmoves", check_boxmoves), ("keys", check_keys)]
+            ("party6", check_party6), ("boxmoves", check_boxmoves), ("keys", check_keys),
+            ("daycare", check_daycare), ("double", check_double), ("evolve", check_evolve),
+            ("safari", check_safari), ("gift", check_gift), ("hof", check_hof)]
 
 
 def main():

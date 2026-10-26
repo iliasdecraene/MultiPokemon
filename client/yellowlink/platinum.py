@@ -138,7 +138,7 @@ FLAG_GAME_COMPLETED = 2404        # set by ClearGame (the Hall of Fame script)
 FLAG_SAFARI_GAME_ACTIVE = 2407    # Great Marsh
 VAR_PARTNER_TRAINER_ID = 16447
 PAGE_DAYCARE = 0x1654             # Daycare: DaycareMon[2] {BoxPokemon 136, DaycareMail, u32 steps}, ...
-DAYCARE_MON_SIZE = 0xF0
+DAYCARE_MON_SIZE = 0xEC           # 236 (2 x 236 + offspring PID u32 + step counter, padded: page 0x1E8)
 PAGE_GAME_RECORDS = 0x61B0        # GameRecords: u32[71], u16[77], pad, EncodingSeed {u16 byteSum, u16 modifier}
 GAME_RECORDS_SIZE = 0x1BC
 RECORD_TIMES_ENTERED_HALL_OF_FAME = 73
@@ -167,6 +167,17 @@ def record_checksum_ok(rec: bytes) -> bool:
     chk = struct.unpack_from("<H", rec, 6)[0]
     plain = _xor16(rec[8:BOX_MON_SIZE], chk)
     return sum(struct.unpack("<64H", plain)) & 0xFFFF == chk
+
+
+def party_section_ok(rec: bytes) -> bool:
+    """The 100-byte party section of an encrypted 236-byte record decrypts (LCRNG seeded by the PID) to
+    plausible values: level 1-100, max HP > 0, HP <= max HP, mail type none or valid. A section the game has
+    decrypted in place right now fails this (verified on the real game: dev/platinum/soullink_verify.py)."""
+    if len(rec) < PARTY_MON_SIZE:
+        return False
+    sec = _xor16(rec[BOX_MON_SIZE:PARTY_MON_SIZE], struct.unpack_from("<I", rec, 0)[0])
+    hp, max_hp = struct.unpack_from("<HH", sec, 6)
+    return 1 <= sec[4] <= 100 and 0 < max_hp and hp <= max_hp and (sec[0x1B] == 0xFF or sec[0x1B] < 12)
 
 
 def _decode(codes) -> str:
@@ -414,9 +425,12 @@ class PlatinumMemory:
                 for i in range(self.party_count())]
 
     def party_checked(self):
-        """party_raw() if every record's checksum is valid and two reads agree, else None (mid-update)."""
+        """party_raw() if every record's checksum is valid, every party section (HP/level/stats, encrypted
+        separately with the PID and not covered by the checksum) decrypts to something plausible, and two reads
+        agree; else None (mid-update: the game decrypts records in place - in the overworld it does so with
+        the lead of a big party every few frames, sometimes only the party section - so retry next frame)."""
         a = self.party_raw()
-        if a != self.party_raw() or not all(record_checksum_ok(r) for r in a):
+        if a != self.party_raw() or not all(record_checksum_ok(r) and party_section_ok(r) for r in a):
             return None
         return a
 
@@ -860,7 +874,8 @@ def mon_info(record: bytes) -> dict | None:
 
 def game_record(raw: bytes, rec_id: int) -> int:
     """Value of one GameRecords record from the raw (encrypted) GameRecords bytes (pret game_records.c:
-    records 1.. are XORed with the LCRNG stream seeded by byteSum | modifier << 16; record 0 = steps, plain)."""
+    records 1.. are XORed with the LCRNG stream seeded by byteSum | modifier << 16; record 0 = steps, plain).
+    0 if the decrypted bytes don't add up to byteSum (being updated right now, or no records at all)."""
     raw = bytes(raw)
     if len(raw) < GAME_RECORDS_SIZE:
         return 0
@@ -869,6 +884,8 @@ def game_record(raw: bytes, rec_id: int) -> int:
     if rec_id == 0:
         return struct.unpack_from("<I", raw, 0)[0]
     dec = raw[:4] + pk4._crypt(raw[4:4 * n32 + 2 * n16 + 2], byte_sum | modifier << 16)
+    if sum(dec[4:]) & 0xFFFF != byte_sum:          # EncodeGameRecords stores the plain byte sum: else mid-update
+        return 0
     if rec_id < n32:
         return struct.unpack_from("<I", dec, 4 * rec_id)[0]
     if rec_id < n32 + n16:
