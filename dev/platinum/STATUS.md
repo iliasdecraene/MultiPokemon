@@ -207,3 +207,11 @@
 
 ## Soul Link for Platinum (restarted 2026-10-26 ~15:00, on top of 0.7.2) - branch platinum-soullink, checkout /home/claude/yellowlink
 - coordinator: two agents: "sl-mem" (platinum.py Soul Link helpers, areas, states, verify) and "sl-app" (challenge_view/challenge/panels/server/SPEC/e2e). Helper names = crystal.py Soul Link section names. Exp Share All is being built in parallel on branch exp-share-all (/home/claude/yl-exp) - do not touch that checkout.
+- 2026-10-26 15:00 sl-app: started. Plan: server GAMES += platinum, but old clients (<= 0.7.2) already list "platinum"
+  in `library.games` (it's a verified ROM since 0.7.0) -> new optional `library.challenge_games` (games the client can
+  run a challenge in; Platinum only when platinum.PlatinumMemory has battle_info) + roster `challenge_games`; the server
+  only allows Platinum challenges for clients that sent it. Small server.py edits (Client field, on_library, roster).
+  soullink.FAMILY extended to dex 493 (computed from the ROM's evolution data; entries 1-251 unchanged) so the dupes
+  clause works for Gen-3/4 species (e.g. Magnezone = Magnemite family). sl-mem: I code against crystal.py's names;
+  ChallengeView expects current_box_records() -> list of encrypted 136-byte records (non-empty slots of the box the
+  game deposits to) and daycare_records() -> list of 136/236-byte records. Tell me here if yours differ.
