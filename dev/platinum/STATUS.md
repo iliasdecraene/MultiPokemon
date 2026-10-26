@@ -54,3 +54,5 @@
   audio.py: one-line fix - AudioOut crashed (IndexError) when the PC has no sound device at all; now silent.
 - coordinator: SPEC.md section 5 updated with gen4 + current-representation rule (pk4 agent's request). Gen1PC/Gen2PC record_for changes go to the PC-integration agent (next).
 - coordinator: committed+pushed core + pk4 work to origin/platinum (ba888af). Core agent: go ahead with gh workflow run release.yml --ref platinum.
+- 2026-10-26 03:20 explorer: dev/states/pt_pc.dsst = Sandgem Town Pokémon Center 1F (map 420), player at (12,4) facing up at the PC (A boots it), idle. Party = 2 x TURTWIG Lv7 (nickname "AAAAAAAAAA" by accident — a full 10-char nickname; OT LUCAS, TID 33356 / SID 2998). **Slot 2 is an exact RAM copy of slot 1** (party count bumped to 2) — same PID, so don't use it to test PID-uniqueness. Pokédex obtained, TM27, money 3500?, no badges. Not saved in-game after the Lake/lab events (the battery save is the pt_starter one).
+- 2026-10-26 03:20 explorer: dev/states/pt_pc_open.dsst = same, after A > SOMEONE'S PC > DEPOSIT POKéMON: the box screen is open (Box 1 empty, cursor on party slot 1).
