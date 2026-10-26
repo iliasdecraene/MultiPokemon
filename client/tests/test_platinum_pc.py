@@ -362,3 +362,272 @@ def test_real_rom_conversions_round_trip_through_the_store(tmp_path):
     back = g1.record_for(e)
     assert G1ROM.dex_no(back[0]) == 25 and back[3] == 10 and back[8:12] == gen1_rec(25)[8:12]
     assert rom.species_name(493).upper() == "ARCEUS"
+
+
+# ---------------------------------------------------------------------------------------------------------
+# review fixes (each test reproduces a bug found in review)
+# ---------------------------------------------------------------------------------------------------------
+def all_game_mons(pm):
+    return sorted(r for b in range(18) for r in pm.box_raw(b) if platinum_pc.classify(r) == "mon")
+
+
+def fill_store(sync, n, first=0):
+    k = 0
+    for b in range(14):
+        while len(sync.working["boxes"][b]) < 20 and k < n:
+            sync.working["boxes"][b].append(pk4.entry_from_pk4(mon(5000 + first + k, species=25), ROM))
+            k += 1
+
+
+def test_first_link_with_a_nearly_full_store_never_erases_platinum_mons(tmp_path):
+    """1: store 270 + Platinum box 1 with 30 -> 10 imported, the other 20 stay in the game (boxes 15-18)."""
+    _bus, pm, pc = game()
+    sync = pcdb.PCSync(tmp_path / "pc.json")
+    fill_store(sync, 270)
+    theirs = [mon(i) for i in range(30)]
+    for s, r in enumerate(theirs):
+        set_slot(pm, 0, s, r)
+    view = sync.open_session("platinum", pc, trust_game=False)
+    pc.write_boxes(view)
+    assert sync.count() == 280 and "platinum" in sync.working["linked"]
+    in_game = all_game_mons(pm)
+    assert all(r in in_game for r in theirs)                              # nothing erased
+    assert len(pc.unplaced) == 20 and all(r in [x for b in range(14, 18) for x in pm.box_raw(b)]
+                                          for r in pc.unplaced)
+    left = list(pc.unplaced)
+    # once there is room (140 traded away, among them the 10 imported ones) the other 20 are harvested
+    sync.close_session("platinum", pc)
+    sync.commit()
+    gone = [e["id"] for b in sync.working["boxes"] for e in b[10:]]
+    sync.apply_trade({"trade_id": "t", "remove": gone, "add": [], "srv_rev": 5})
+    pc.write_boxes(sync.open_session("platinum", pc, trust_game=True))
+    assert sync.count() == 140 and all(r in all_game_mons(pm) for r in left)
+    sync.close_session("platinum", pc)
+    assert pc.unplaced == [] and sync.count() == 160
+    assert all(any(e.get("gen4") == b64(r) for b in sync.working["boxes"] for e in b) for r in left)
+
+
+def test_first_link_of_a_gb_game_that_does_not_fit_is_refused(tmp_path):
+    """1 (Yellow/Crystal): never write a view that would drop the game's own mons."""
+    from test_pcdb import rec as g1rec, setup_game
+    mons = [g1rec(0x54, "M%d" % i, otid=i) for i in range(20)] + [g1rec(0xA5, "N%d" % i, otid=100 + i)
+                                                                    for i in range(10)]
+    mem, ypc = setup_game([mons[:20], mons[20:]])
+    sync = pcdb.PCSync(tmp_path / "pc.json")
+    fill_store(sync, 270)
+    before = ypc.read_boxes()
+    assert sync.open_session("yellow", ypc, trust_game=False) is None
+    assert sync.refused == (30, 10) and "yellow" not in sync.working["linked"] and not sync.session_open
+    assert ypc.read_boxes() == before and sync.count() == 270
+    for b in sync.working["boxes"]:                                       # with room it links normally
+        del b[15:]
+    assert sync.open_session("yellow", ypc, trust_game=False) is not None and sync.count() == 205 + 30
+
+
+def marked(rec, marks=0x05):
+    p = pk4.PK4(pk4.decrypt(rec))
+    p.markings = marks
+    return p.box_bytes()
+
+
+def with_item(rec, item):
+    p = pk4.PK4(pk4.decrypt(rec))
+    p.item = item
+    return p.box_bytes()
+
+
+def session(tmp_path, entries):
+    _bus, pm, pc = game([mon(900)])
+    sync = pcdb.PCSync(tmp_path / "pc.json")
+    sync.working["boxes"][0].extend(entries)
+    sync.working["linked"].append("platinum")
+    sync.last_view["platinum"] = [[] for _ in range(14)]
+    pc.write_boxes(sync.open_session("platinum", pc, trust_game=True))
+    return pm, pc, sync
+
+
+def test_box_ui_edits_update_the_same_entry(tmp_path):
+    """2: MARK / give an item in Platinum's box UI = the same mon (same id), not a deposit (no clone)."""
+    own = pk4.entry_from_pk4(mon(1), ROM)
+    yel = {"id": "y1", "origin": "yellow", "dex": 25, "level": 10, "nick": "PIKACHU", "ot": "ASH", "otid": 0x1234,
+           "gen1": b64(gen1_rec(25)), "gen2": None, "gen4": None}
+    pm, pc, sync = session(tmp_path, [own, yel])
+    shown = pm.box_raw(0)[:2]
+    set_slot(pm, 0, 0, with_item(shown[0], 155))                          # Oran Berry to our own Turtwig
+    set_slot(pm, 0, 1, marked(shown[1]))                                  # a mark on the converted Pikachu
+    rep = sync.close_session("platinum", pc)
+    assert rep["added"] == 0 and rep["removed"] == 0 and rep["changed"] == 1 and sync.count() == 2
+    e0, e1 = sync.working["boxes"][0]
+    assert e0["id"] == own["id"] and e0["gen4"] == b64(with_item(shown[0], 155))
+    assert e1 == yel                                                      # marks only: Yellow data kept
+    sync.commit()
+    # the next visit sees the game exactly as recorded: no changes, nothing new
+    sync.open_session("platinum", pc, trust_game=True)
+    assert not sync.pending and sync.count() == 2
+
+
+def test_marked_locked_mon_is_not_cloned(tmp_path):
+    """2: a mon offered in a trade, then marked in the box UI, stays one (locked) entry."""
+    e = pk4.entry_from_pk4(mon(2), ROM)
+    pm, pc, sync = session(tmp_path, [e])
+    sync.lock("t1", [e["id"]])
+    set_slot(pm, 0, 0, marked(pm.box_raw(0)[0]))
+    rep = sync.close_session("platinum", pc)
+    assert rep["added"] == 0 and sync.count() == 1 and sync.working["boxes"][0][0] == e
+    sync.commit()
+    sync.open_session("platinum", pc, trust_game=True)
+    assert sync.count() == 1 and not sync.pending
+
+
+def test_item_given_to_a_standin_goes_back_once(tmp_path):
+    """2: ?NAME stand-ins keep their real data; an item given to one is returned (exactly once)."""
+    egg = {"id": "c9", "origin": "crystal", "dex": 152, "level": 5, "nick": "EGG", "gen1": None,
+           "gen2": b64(gen2_rec(152, egg=True)), "gen4": None}
+    pm, pc, sync = session(tmp_path, [egg])
+    st = pm.box_raw(0)[0]
+    assert pc.is_standin(st)
+    set_slot(pm, 0, 0, marked(with_item(st, 155)))
+    rep = sync.close_session("platinum", pc)
+    assert rep["items_back"] == [155] and sync.working["boxes"][0] == [egg] and rep["added"] == 0
+    rep = sync.close_session("platinum", pc)                              # seen again before the next write
+    assert rep["items_back"] == [] and sync.working["boxes"][0] == [egg]
+    pc.write_boxes(sync.open_session("platinum", pc, trust_game=True))
+    assert pm.box_raw(0)[0] == st                                         # the stored stand-in, no item
+
+
+def test_traded_away_mon_left_in_the_box_does_not_come_back(tmp_path):
+    """Traded away while the PC was open and left in the box: dropped at close and NOT re-imported at the next
+    open (the game still shows it until that open rewrites the boxes)."""
+    a, b = pk4.entry_from_pk4(mon(3), ROM), pk4.entry_from_pk4(mon(4), ROM)
+    pm, pc, sync = session(tmp_path, [a, b])
+    sync.apply_trade({"trade_id": "t", "remove": [a["id"]], "add": [], "srv_rev": 3})
+    sync.close_session("platinum", pc)
+    assert [e["id"] for e in sync.working["boxes"][0]] == [b["id"]]
+    sync.commit()
+    sync.open_session("platinum", pc, trust_game=True)
+    assert [e["id"] for e in sync.working["boxes"][0]] == [b["id"]]
+
+
+def test_traded_away_yellow_mon_left_in_the_box_does_not_come_back(tmp_path):
+    """Same for Yellow (this used to clone the traded mon on the next PC visit)."""
+    from test_pcdb import rec as g1rec, setup_game
+    mem, ypc = setup_game([[g1rec(0x54, "PIKA"), g1rec(0xA5, "RATTY", otid=2)]])
+    sync = pcdb.PCSync(tmp_path / "pc.json")
+    ypc.write_boxes(sync.open_session("yellow", ypc, True))
+    sync.close_session("yellow", ypc)
+    sync.commit()
+    ypc.write_boxes(sync.open_session("yellow", ypc, True))
+    pika = sync.working["boxes"][0][0]["id"]
+    sync.apply_trade({"trade_id": "t", "remove": [pika], "add": [], "srv_rev": 2})
+    sync.close_session("yellow", ypc)
+    sync.commit()
+    sync.open_session("yellow", ypc, True)
+    assert [e["nick"] for e in sync.working["boxes"][0]] == ["RATTY"]
+
+
+def test_box_slot_read_mid_update_is_not_a_withdrawal(tmp_path):
+    """4: a slot the game has decrypted in place at the close frame is the same mon, not a removal."""
+    e = pk4.entry_from_pk4(mon(5), ROM)
+    pm, pc, sync = session(tmp_path, [e])
+    plain = bytearray(pk4.decrypt(pm.box_raw(0)[0]))
+    struct.pack_into("<H", plain, 4, 0x2)                                 # the game's 'box decrypted' flag
+    set_slot(pm, 0, 0, bytes(plain))
+    rep = sync.close_session("platinum", pc)
+    assert rep["removed"] == rep["added"] == 0 and sync.working["boxes"][0] == [e] and pc.unplaced == []
+
+
+def twin(i, level, species=25):
+    """Same PID/TID/SID as mon(i) (so the same mon_key) but a different mon."""
+    return native(species=species, pid=0x10000 + i * 7919, tid=i, sid=0, level=level, nick="TWIN")
+
+
+def test_party_removal_takes_the_right_mon_when_keys_collide(tmp_path):
+    """5: converted mons' keys can collide; a locked mon withdrawn into the party must not take a real party mon
+    with the same key out instead of (or as well as) itself."""
+    a = pk4.entry_from_pk4(mon(6), ROM)
+    pm, pc, sync = session(tmp_path, [a])
+    sync.lock("t2", [a["id"]])
+    shown = pm.box_raw(0)[0]
+    set_slot(pm, 0, 0, EMPTY)                                             # withdrawn anyway
+    other = twin(6, 30)
+    assert pc.key(other) == pc.key(shown) and other != shown
+    rep = sync.close_session("platinum", pc, [mon(900), other, shown])
+    assert rep["locked_returned"] and rep["standin_party_slots"] == [2]
+    assert list(rep["party_removals"]) == [2]
+
+
+def test_gb_party_removal_one_slot_per_mon(tmp_path):
+    """5 (Yellow): two party mons share the locked mon's key -> only the closest one is taken."""
+    from test_pcdb import rec as g1rec, setup_game
+    mem, ypc = setup_game([[g1rec(0x54, "PIKA"), g1rec(0xA5, "RATTY")]])
+    sync = pcdb.PCSync(tmp_path / "s.json")
+    ypc.write_boxes(sync.open_session("yellow", ypc, True))
+    sync.close_session("yellow", ypc)
+    sync.commit()
+    ratty = next(e for e in sync.committed["boxes"][0] if e["nick"] == "RATTY")
+    sync.lock("t9", [ratty["id"]])
+    ypc.write_boxes(sync.open_session("yellow", ypc, True))
+    withdrawn = ypc.read_boxes()[0][1]
+    boxes = ypc.read_boxes()
+    boxes[0] = boxes[0][:1]
+    ypc.write_boxes(boxes)
+    lookalike = g1rec(0xA5, "OTHER", level=40)                           # same Yellow key, a different mon
+    assert ypc.key(lookalike) == ypc.key(withdrawn)
+    report = sync.close_session("yellow", ypc, party_records=[lookalike, withdrawn])
+    assert report["standin_party_slots"] == [1]
+
+
+def test_give_item_to_bag():
+    _bus, pm, _ = game()
+    pockets = [0] * platinum_pc.NUM_ITEMS
+    pockets[155], pockets[328] = 4, 3
+    pc = Gen4PC(pm, ROM, pockets)
+    bag = pm.save_body() + platinum_pc.PAGE_BAG
+    berries = bag + platinum_pc.BAG_POCKETS[4][0]
+    assert pc.give_item(155) and pc.give_item(155) and pc.give_item(17)
+    assert struct.unpack("<HH", pm.read(berries, 4)) == (155, 2)
+    assert struct.unpack("<HH", pm.read(bag, 4)) == (17, 1)               # items pocket
+    pm.m.write(bag + platinum_pc.BAG_POCKETS[3][0], struct.pack("<HH", 328, 99))
+    assert not pc.give_item(328)                                          # TMs stop at 99
+    assert not Gen4PC(pm, ROM).give_item(155)                             # no item data: refuse
+
+
+class FakeApp:
+    """Just what App._pt_pc_poll / on_pc_close need."""
+    frame = 0
+
+    def __init__(self, pm, pc, sync):
+        self.game, self.pc_codec, self.pcsync = pm, pc, sync
+        self.closed_with = []
+        self._pt_pc, self._pt_pc_wait, self._pt_close_wait, self._pt_close_prev = "open", 0, 0, None
+        self._pt_party_fix = None
+
+    def on_pc_close(self, party=None):
+        self.closed_with.append(party)
+
+
+def _app_methods():
+    from yellowlink import app as appmod
+    for name in ("_pt_pc_poll", "_pt_party_now"):
+        setattr(FakeApp, name, getattr(appmod.App, name))
+
+
+def test_close_waits_for_a_settled_party_and_boxes(tmp_path):
+    """3: the close is harvested only when party_checked() reads clean and the boxes read the same twice."""
+    _app_methods()
+    e = pk4.entry_from_pk4(mon(7), ROM)
+    pm, pc, sync = session(tmp_path, [e])
+    a = FakeApp(pm, pc, sync)
+    first = pm.party_raw()[0]
+    garbage = bytearray(first)
+    garbage[60] ^= 0xFF
+    pm.m.write(pm.party_addr(0), bytes(garbage))                          # mid-update party record
+    poll = lambda: a._pt_pc_poll(1)                                       # noqa: E731
+    poll()
+    assert a._pt_pc == "closing" and not a.closed_with
+    poll()
+    poll()
+    assert not a.closed_with                                              # party still unreadable
+    pm.m.write(pm.party_addr(0), first)
+    poll()
+    assert a.closed_with == [[first[:136]]] and a._pt_pc is None

@@ -160,3 +160,24 @@
      windows: Invite/Cancel pinned to the bottom, offers fall back to one line each). Yellow 4x screens identical
      before/after (harness is now deterministic: network stopped before the screenshots).
   Tests: unit 313 passed; platinum_boot, servertest, pt_pctest ALL PASS.
+- 2026-10-26 pc agent: REVIEW FIXES done (each reproduced by a test first; all 13 new tests fail on 972a728):
+  1. first link with a nearly full store: _import keeps what doesn't fit in Platinum (codec.unplaced -> boxes 15-18
+     + red toast); Yellow/Crystal are NOT linked (open_session returns None, PCSync.refused = (mons, free), game
+     untouched, red toast) - previously their boxes were overwritten.
+  2. box-UI edits (MARK / MOVE ITEMS): codecs with edits_in_box (Gen4PC) match a changed record to the vanished entry
+     with the same key, closest byte-wise -> same entry id (updated_entry; marks-only on another game's mon keeps its
+     data). Stand-in / locked / traded-away: kept as stored, a given item goes back to the bag (Gen4PC.give_item =
+     Bag_TryAddItem; bag = body+0x630, pockets from pl_item_data.narc, item->data id = ARM9 table 0x020F0CC4 = id,
+     0 for 113-134, id-22 from 135; verified in the game's own bag screen + MOVE ITEMS e2e). The last view now records
+     what the game really holds (override / tombstone), so an edited copy or a traded-away mon still in the box isn't
+     seen again at the next open. The tombstone part also fixes a Yellow/Crystal clone: a mon traded away while the
+     PC was open and left in the box came back as a new entry at the next visit.
+  3. Platinum close: "closing" state until party_checked() reads clean and two box reads agree (<= 120 frames).
+  4. a slot decrypted in place reads as the mon (platinum_pc.normalise), not as a Bad Egg.
+  5. party removal: each locked/traded mon takes at most ONE party slot, the closest with its key (all games);
+     Platinum removes by exact bytes. pk4's PID seed left unchanged (stability tests rely on it).
+  6. server valid_entry rejects gen4 species 0 / > 493 (+ test).
+  Tests: client 325 + server 93 pass; pt_pctest (now with MOVE ITEMS), pt_trade_e2e, pctest, pctrade_e2e, crossgame
+  ALL PASS. Files: pcdb.py, platinum_pc.py, app.py (PC parts only), pcstore.py, tests/test_platinum_pc.py,
+  server/tests/test_pcstore_gen4.py, dev/e2e/pt_pctest.py. SPEC.md section 5 could note: a game whose boxes don't
+  fit is not linked (nothing written); Platinum box edits keep the entry id; stand-in items return to the bag.

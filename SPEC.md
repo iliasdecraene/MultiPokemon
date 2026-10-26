@@ -294,6 +294,11 @@ Entry   = {"id": "<uuid4 hex>", "origin": "yellow"|"crystal", "dex": int, "level
   the view is written on the exec hook `0x0203D754` (FieldSystem_OpenPokemonStorage, after DEPOSIT/WITHDRAW/MOVE is
   picked, before the box app reads PCBoxes); close is polled (box app = field child overlay 19 gone). Party records
   are decrypted in place mid-frame by the game: always read them via `PlatinumMemory.party_checked()`.
+  First link of a game whose boxes don't fit the store: Yellow/Crystal are not linked at all (nothing written, the
+  player is told); Platinum keeps what doesn't fit in its boxes 15-18. Edits made in Platinum's box screen (MARK,
+  MOVE ITEMS) keep the entry id (matched by mon_key); an item given to a stand-in, locked or traded-away Pokémon goes
+  back to the bag. The last view records what the game really holds, so a traded-away Pokémon still sitting in a box
+  is never harvested again.
 - `gen1`/`gen2` hold the exact game bytes (box_struct + OT name + nickname) of the last version seen in that
   generation, so a Pokémon that never leaves its game round-trips byte-identically. Readable fields (dex, level, names)
   are for UI/conversion only.

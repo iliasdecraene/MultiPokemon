@@ -303,7 +303,8 @@ def valid_entry(entry) -> bool:
         except (ValueError, TypeError):
             return False
         if k == "gen4":
-            if pk4_decrypt(raw) is None:                             # 136 bytes with a valid checksum
+            plain = pk4_decrypt(raw)                                 # 136 bytes with a valid checksum
+            if plain is None or not 1 <= struct.unpack_from("<H", plain, 8)[0] <= 493:   # an empty slot isn't a mon
                 return False
         elif len(raw) not in (54, 55):
             return False

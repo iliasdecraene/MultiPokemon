@@ -1010,24 +1010,40 @@ class App(ChallengeMixin, TradeMixin):
             log.warning("Platinum PC open hook outside the game / under a running box UI: not syncing")
             return
         boxes = self.pcsync.open_session(self.game_id, self.pc_codec, trust_game=self.pc_trust)
+        if boxes is None:                # store too full to link this game: its boxes stay exactly as they are
+            n, free = self.pcsync.refused or (0, 0)
+            game = self.game_info.title.replace("Pokémon ", "")
+            self.toast(f"Your YellowLink PC only has room for {free} more Pokémon, but {game}'s PC has {n}: it can't "
+                       "be linked yet and nothing was changed. Make room in another game, then open the PC again.",
+                       10, ui.BAD)
+            return
         self.pc_codec.write_boxes(boxes)
         self.pc_trust = True
+        if self.ds:
+            self._pt_pc_report(opening=True)
         log.info("PC opened: %d mons in the database", self.pcsync.count())
 
-    def on_pc_close(self):
+    def on_pc_close(self, party=None):
         if self.chal:
             if self.referee:
                 self.referee.on_pc_close()
             return
         if not self.pc_codec or not self.pcsync.session_open:
             return
-        party = self.G.party_records(self.game)
+        if party is None:
+            party = self.G.party_records(self.game)
         report = self.pcsync.close_session(self.game_id, self.pc_codec, party)
         if self.ds:
-            # Platinum: taken out of the party once the game isn't in the middle of updating it (_pt_pc_poll)
-            if report["standin_party_slots"]:
-                self._pt_party_fix = ({self.pc_codec.key(party[i]) for i in report["standin_party_slots"]},
-                                      self.frame + 600)
+            # Platinum: party mons are taken out (by their exact bytes) and items given back once the game isn't
+            # in the middle of updating the party (_pt_fix_party)
+            codec = self.pc_codec
+            remove, items = [], list(report.get("items_back", []))
+            for slot, old in report.get("party_removals", {}).items():
+                remove.append(party[slot])
+                items += codec.items_added(old, party[slot]) if old is not None else \
+                    [i for i in [codec.held_item(party[slot])] if i]
+            if remove or items:
+                self._pt_party_fix = (remove, items, self.frame + 600)
             self._pt_pc_report()
         else:
             for slot in sorted(report["standin_party_slots"], reverse=True):
@@ -1054,20 +1070,22 @@ class App(ChallengeMixin, TradeMixin):
     def _start_pt_pc(self):
         self._pt_pc = None               # None | "opening" (hook fired) | "open" (box UI running)
         self._pt_pc_wait = 0
-        self._pt_party_fix = None        # (mon keys, give-up frame): party mons to take out after the PC closed
+        self._pt_party_fix = None        # (party records to take out, items to give back, give-up frame)
+        self._pt_close_wait = 0
+        self._pt_close_prev = None
         if not (self.full and platinum_pc and not self.chal and hasattr(self.G, "HOOK_PC_OPEN")):
             return
         data = self.plat_data
         if data is None:
             log.warning("no Platinum ROM data: the PC database is off in Platinum")
             return
-        self.pc_codec = platinum_pc.Gen4PC(self.game, data)
+        self.pc_codec = platinum_pc.Gen4PC(self.game, data, platinum_pc.load_item_pockets(self.cfg["rom_path"]))
         self.nds.hook_register(self.G.HOOK_PC_OPEN, self._pt_pc_hook)
 
     def _pt_pc_hook(self):
         """FieldSystem_OpenPokemonStorage: the box UI is about to start and hasn't read the boxes yet."""
-        if self.pcsync.session_open:     # a close we didn't see (shouldn't happen): harvest it first
-            self.on_pc_close()
+        if self.pcsync.session_open:     # a close we didn't see / didn't finish: harvest it first
+            self.on_pc_close(self._pt_party_now())
         self._pt_pc, self._pt_pc_wait = "opening", 0
         self.on_pc_open()
 
@@ -1085,37 +1103,70 @@ class App(ChallengeMixin, TradeMixin):
             elif self._pt_pc_wait > 600:     # the UI never came up (10 s): end the session anyway
                 log.warning("Platinum box UI didn't open after the hook; closing the PC session")
                 self._pt_pc = None
-                self.on_pc_close()
-        elif not now_open:
-            self._pt_pc = None
-            self.on_pc_close()
+                self.on_pc_close(self._pt_party_now())
+        elif self._pt_pc == "open":
+            if not now_open:
+                self._pt_pc, self._pt_close_wait, self._pt_close_prev = "closing", 0, None
+                self._pt_pc_poll(0)
+        elif self._pt_pc == "closing":
+            # Harvest at a settled moment: the game decrypts records in place while it works on them and a DS frame
+            # can end in the middle of that -> wait until the party reads clean (party_checked) and the boxes read
+            # the same on two frames in a row (normally the next frame).
+            party = self.game.party_checked()
+            slots = self.game.read(self.game.box_slot_addr(0, 0), platinum_pc.ALL_SLOTS * 136)
+            self._pt_close_wait += frames
+            if (party is not None and slots == self._pt_close_prev) or self._pt_close_wait > 120:
+                if party is None:
+                    log.warning("Platinum party didn't settle after the PC closed; harvesting anyway")
+                self._pt_pc = None
+                self.on_pc_close([r[:136] for r in party] if party is not None else None)
+            else:
+                self._pt_close_prev = slots
+
+    def _pt_party_now(self):
+        party = self.game.party_checked()
+        return [r[:136] for r in party] if party is not None else None
 
     def _pt_fix_party(self):
         """Take stand-ins (and traded-away / locked mons) back out of Platinum's party. The game decrypts party
         records in place while it works on them and a DS frame can end in the middle of that, so this waits for a
         moment where every record is encrypted with a valid checksum and two reads agree (party_checked)."""
-        keys, give_up = self._pt_party_fix
+        remove, items, give_up = self._pt_party_fix
         recs = self.game.party_checked()
         if recs is None:
             if self.frame > give_up:
-                log.warning("Platinum party never settled; stand-ins left in the party")
+                log.warning("Platinum party never settled; %d Pokémon left in the party", len(remove))
                 self._pt_party_fix = None
             return
         codec = self.pc_codec
-        drop = [i for i, r in enumerate(recs) if codec.is_standin(r[:136]) or codec.key(r[:136]) in keys]
-        for i in reversed(drop):
+        drop = set()
+        for target in remove:                # exact bytes: a different mon with a colliding key is never taken
+            i = next((i for i, r in enumerate(recs) if i not in drop and r[:136] == target), None)
+            if i is not None:
+                drop.add(i)
+        drop |= {i for i, r in enumerate(recs) if codec.is_standin(r[:136])}
+        for i in sorted(drop, reverse=True):
             codec.remove_party_slot(i)
         self._pt_party_fix = None
         if drop:
             log.info("took %d Pokémon back out of the Platinum party", len(drop))
+        lost = [i for i in items if not codec.give_item(i)]
+        back = [i for i in items if i not in lost]
+        name = (lambda i: self.plat_data.item_name(i)) if self.plat_data is not None else (lambda i: f"item {i}")
+        if back:
+            self.toast(f"{', '.join(name(i) for i in back[:3])} went back to your bag (that Pokémon stays as it "
+                       "was in the PC).", 7, ui.ACCENT)
+        if lost:
+            log.warning("could not return items %s: bag pocket full", lost)
+            self.toast(f"Your bag is full: couldn't put back {', '.join(name(i) for i in lost[:3])}.", 8, ui.BAD)
 
-    def _pt_pc_report(self):
+    def _pt_pc_report(self, opening=False):
         codec = self.pc_codec
         left = sum(1 for r in getattr(codec, "unplaced", []) if platinum_pc.classify(r) == "mon")
         if left:
             self.toast(f"Your YellowLink PC is full: {left} Pokémon stay in Platinum's boxes 15-18 until you make "
                        "room.", 8, ui.BAD)
-        elif getattr(codec, "harvested", 0):
+        elif getattr(codec, "harvested", 0) and not opening:
             self.toast("Platinum shows your YellowLink PC in boxes 1-14 (20 per box): Pokémon put elsewhere move to "
                        "free spaces there.", 7, ui.ACCENT)
 

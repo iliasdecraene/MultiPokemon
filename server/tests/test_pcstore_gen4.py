@@ -63,6 +63,21 @@ def test_valid_entry_gen4():
     assert pcstore.valid_entry(both)
 
 
+def _species_entry(species):
+    p = pcstore.pk4_decrypt(pk4(25))
+    struct.pack_into("<H", p, 0x08, species)
+    return {**g4_entry("s", 25), "gen4": base64.b64encode(pcstore.pk4_encrypt(p)).decode()}
+
+
+def test_valid_entry_gen4_species_range():
+    empty_slot = bytes(8) + pcstore._pk4_crypt(bytes(128), 0)                  # how Platinum stores an empty slot
+    assert pcstore.pk4_decrypt(empty_slot) is not None                          # valid checksum, species 0
+    assert not pcstore.valid_entry({**g4_entry("e", 25), "gen4": base64.b64encode(empty_slot).decode()})
+    assert not pcstore.valid_entry(_species_entry(0))
+    assert not pcstore.valid_entry(_species_entry(494))
+    assert pcstore.valid_entry(_species_entry(1)) and pcstore.valid_entry(_species_entry(493))
+
+
 # --- trade evolutions ---------------------------------------------------------------------------------------
 def test_kadabra_evolves_name_and_ability_follow():
     e, name = pcstore.evolve_for_trade(g4_entry("k", 64, pid=0x101))       # odd PID: second ability slot

@@ -562,6 +562,10 @@ class PCSync:
         locked = self.locked_ids()
         edits = getattr(codec, "edits_in_box", False)   # the game's box UI can change a stored mon in place
         changed_recs = []                               # (box, index in new_boxes[box], record) to resolve below
+        # What the game holds after this, where it differs from record_for(entry): the next diff must recognise it
+        # (an entry kept as stored while the game shows an edited copy; a traded-away mon still in the box)
+        override = {}                                   # entry id -> game record
+        tombstones = []                                 # (box, gone entry id, game record)
         for bi, box in enumerate(game_boxes):
             for rec in box:
                 cands = pool.get(bytes(rec), [])
@@ -573,6 +577,7 @@ class PCSync:
                     new_boxes[bi].append(entries[pick[1]])
                 elif pick and pick[1] in gone:
                     used.add(pick[1])
+                    tombstones.append((bi, pick[1], bytes(rec)))
                     continue                        # traded away while this game still showed it: drop
                 elif edits:
                     new_boxes[bi].append(None)      # placeholder: an edited known mon, or a deposit
@@ -583,7 +588,8 @@ class PCSync:
                     new_boxes[bi].append(codec.entry_from_record(rec, origin=game_id))
                     report["added"] += 1
         if changed_recs:
-            self._match_edits(game_id, codec, before, changed_recs, new_boxes, used, entries, gone, locked, report)
+            self._match_edits(game_id, codec, before, changed_recs, new_boxes, used, entries, gone, locked, report,
+                              override, tombstones)
         # Entries this game never saw (added from another game since) stay in their box, after the ones it knows.
         seen = {eid for box in before for eid, _ in box}
         for bi, box in enumerate(self.working["boxes"][:len(game_boxes)]):
@@ -637,13 +643,19 @@ class PCSync:
                 new_boxes[k].append(extra)
         changed = new_boxes != self.working["boxes"]
         self.working["boxes"] = new_boxes
-        self.last_view[game_id] = [[[e["id"], _b64(codec.record_for(e))] for e in b] for b in new_boxes[:len(game_boxes)]]
+        view = [[[e["id"], _b64(override.get(e["id"]) or codec.record_for(e))] for e in b]
+                for b in new_boxes[:len(game_boxes)]]
+        for bi, eid, rec in tombstones:
+            if bi < len(view):
+                view[bi].append([eid, _b64(rec)])
+        self.last_view[game_id] = view
         if changed or report["added"] or report["removed"]:
             self.pending = True
         return report
 
     @staticmethod
-    def _match_edits(game_id, codec, before, changed_recs, new_boxes, used, entries, gone, locked, report):
+    def _match_edits(game_id, codec, before, changed_recs, new_boxes, used, entries, gone, locked, report,
+                     override, tombstones):
         """Records whose bytes match nothing in the last view (codecs with `edits_in_box`): a known mon the box
         UI changed in place (Platinum: MARK, give/take an item) has the same key as an entry that disappeared;
         the closest such entry (byte-wise) is that mon. Otherwise it's a deposit (new entry).
@@ -663,9 +675,14 @@ class PCSync:
                     entry = codec.updated_entry(entries[eid], rec, origin=game_id)
                     if entry != entries[eid]:
                         report["changed"] += 1
+                    else:
+                        override[eid] = rec                 # marks on another game's mon: kept as stored
                 else:
                     if eid in entries:
                         entry = entries[eid]
+                        override[eid] = rec
+                    else:
+                        tombstones.append((bi, eid, rec))
                     report["items_back"].extend(codec.items_added(old, rec))
             elif not codec.is_standin(rec):
                 entry = codec.entry_from_record(rec, origin=game_id)

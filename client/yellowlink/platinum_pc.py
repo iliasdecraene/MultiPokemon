@@ -15,6 +15,15 @@ Mapping. The store has 14 boxes x 20; Platinum has 18 boxes x 30 slots that may 
     the game (`unplaced`: write_boxes keeps them in boxes 15-18) and the app tells the player. Slots with a bad
     checksum are never harvested or erased either (they also stay `unplaced`).
 PCSync's diff matches records by their bytes, not by position, so the folding above needs nothing else from it.
+  * First link with a nearly full store: what doesn't fit stays in the game (`unplaced`), never erased.
+  * The box UI can change a stored mon in place (MARK, MOVE ITEMS give/take): `edits_in_box` makes PCSync match a
+    changed record to the vanished entry with the same key that is closest byte-wise (`distance`) and keep its id
+    (`updated_entry`). Stand-ins, mons in an unfinished trade and traded-away mons stay as stored; an item given
+    to one goes back to the bag (`give_item`: Bag_TryAddItem, pockets from the ROM's item data; verified in the
+    game's own bag screen and with MOVE ITEMS in dev/e2e/pt_pctest.py).
+  * A record the game has decrypted in place at the moment we read (a DS frame can end mid-update) is read as the
+    mon it is (`normalise`), not as a Bad Egg; the app also harvests only once two box reads in a row agree and
+    the party reads clean (App._pt_pc_poll "closing").
 
 When to write (verified on the real game, dev/e2e/pt_pctest.py): in the exec hook platinum.HOOK_PC_OPEN
 (FieldSystem_OpenPokemonStorage), i.e. after the player picked DEPOSIT / WITHDRAW / MOVE in "SOMEONE'S PC" and
@@ -264,11 +273,11 @@ class Gen4PC:
         game -> the entry stays as it is (marks are cosmetic; its own game's exact data is kept). Anything else
         (an item given/taken) -> the entry's current representation becomes these Platinum bytes."""
         try:
-            old = pk4.PK4(pk4.decrypt(self.record_for(entry)))
-            new = pk4.PK4(pk4.decrypt(rec))
-            new_no_marks = pk4.PK4(new.plain)
-            new_no_marks.markings = old.markings
-            if entry.get("origin") != origin and new_no_marks.plain == old.plain:
+            old = pk4.PK4(pk4._plain_of(self.record_for(entry))[:pk4.BOX_SIZE])
+            new = pk4.PK4(pk4._plain_of(bytes(rec))[:pk4.BOX_SIZE])
+            new.markings = old.markings
+            same = new.plain()[:4] == old.plain()[:4] and new.plain()[8:] == old.plain()[8:]   # not flags/checksum
+            if entry.get("origin") != origin and same:
                 return entry
         except ValueError:
             pass

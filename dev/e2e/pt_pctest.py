@@ -10,7 +10,7 @@
 Run: python dev/e2e/pt_pctest.py   (needs dev/states/{platinum.nds,pt_pc.dsst,yellow.gb,pokecenter_pc.state})
 Screenshots are written to the temp folder printed at the end.
 """
-import os, sys, time, subprocess, tempfile, pathlib, atexit
+import os, sys, time, subprocess, tempfile, pathlib, atexit, struct
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.abspath(os.path.join(_HERE, "..", ".."))
 STATES = os.environ.get("YL_STATES", os.path.join(_REPO, "dev", "states"))
@@ -99,7 +99,7 @@ def pt_open(a, mode):
     if not storage_menu(a):
         shot(a, "pt_open_failed.png")
         return False
-    for _ in range({"deposit": 0, "withdraw": 1, "move": 2}[mode]):
+    for _ in range({"deposit": 0, "withdraw": 1, "move": 2, "items": 3}[mode]):
         press(a, "down", 10)
     press(a, "a", 30)
     ok = steps(a, 300, a.game.pc_open)
@@ -246,6 +246,46 @@ check("box 1 = ?EGG, PIDGEY, TURTWIG (slots 1-3); box 16 empty",
       [s for s, _ in box_view(P)] == [132, 16, 387] and box_view(P, 15) == [], (box_view(P), box_view(P, 15)))
 shot(P, "pt_3_box_after_harvest.png")
 check("look-only visit changes nothing", pt_close(P) and not P.pcsync.pending)
+
+# 3b. MOVE ITEMS: give Leftovers to the ?EGG stand-in (goes back to the bag) and to PIDGEY (stays, same entry) ----
+LEFTOVERS = 234
+from yellowlink import platinum_pc
+
+
+def leftovers(a):
+    bag = a.game.save_body() + platinum_pc.PAGE_BAG
+    return sum(q for i, q in (struct.unpack_from("<HH", a.game.read(bag + 4 * k, 4)) for k in range(165))
+               if i == LEFTOVERS)
+
+
+check("bag writer: 2 Leftovers into the Items pocket", P.pc_codec.give_item(LEFTOVERS)
+      and P.pc_codec.give_item(LEFTOVERS) and leftovers(P) == 2)
+ids_before = [e["id"] for e in P.pcsync.working["boxes"][0]]
+egg_before = dict(P.pcsync.working["boxes"][0][0])
+check("SOMEONE'S PC > MOVE ITEMS opens the box UI", pt_open(P, "items"))
+for _ in range(5):                      # ?EGG: GIVE > the bag opens > Leftovers > give > "now being held"
+    press(P, "a", 70)
+press(P, "right", 60)
+for _ in range(5):                      # PIDGEY: the same
+    press(P, "a", 70)
+held = [pk4.PK4(pk4.decrypt(r)).item for r in P.game.box_raw(0)[:2]]
+check("the game put Leftovers on ?EGG and PIDGEY", held == [LEFTOVERS, LEFTOVERS] and leftovers(P) == 0,
+      (held, leftovers(P)))
+shot(P, "pt_4_items_given.png")
+check("PC closes", pt_close(P))
+steps(P, 30)
+check("the stand-in's Leftovers went back to the bag", leftovers(P) == 1, leftovers(P))
+check("player told", any("Leftovers went back" in t[0] for t in P.toasts), [t[0] for t in P.toasts])
+check("same entries, no clones; ?EGG's real data untouched",
+      [e["id"] for e in P.pcsync.working["boxes"][0]] == ids_before
+      and P.pcsync.working["boxes"][0][0] == egg_before, store_nicks(P))
+pid = P.pcsync.working["boxes"][0][1]
+check("PIDGEY keeps its entry and now holds Leftovers",
+      pid["nick"] == "PIDGEY" and pk4.PK4(pk4.decrypt(pcdb._unb64(pid["gen4"]))).item == LEFTOVERS)
+check("reopen", pt_open(P, "withdraw"))
+held = [pk4.PK4(pk4.decrypt(r)).item for r in P.game.box_raw(0)[:3]]
+check("box: ?EGG without an item, PIDGEY with Leftovers", held == [0, LEFTOVERS, 0], held)
+check("closing again returns nothing more", pt_close(P) and leftovers(P) == 1 and P.pcsync.count() == 3)
 P.shutdown()
 
 # 4. Yellow again ---------------------------------------------------------------------------------------------------
