@@ -18,8 +18,9 @@ Facts verified with libdesmume 0.9.12 (py-desmume 0.0.9), see dev/platinum/STATU
   fatal: DeSmuME's SDL sound core just stays off (silent). Every ROM open / save import resets the DS and reopens
   DeSmuME's own audio device (SDL legacy device 1), so sound comes back after pygame.quit()/init() on travel.
 - DeSmuME keeps its own live battery file `<battery dir>/<rom name>.dsv` (Linux: $XDG_CONFIG_HOME/desmume/, Windows:
-  the folder of the .exe). That file is shared by every server and challenge, so we never rely on it: right after
-  opening the ROM we always import OUR per-server save (or a blank one), and on close we blank it again.
+  the folder of the .exe - verified by the release smoke test; it stays open until the process exits). That file is
+  shared by every server and challenge, so we never rely on it: right after opening the ROM we always import OUR
+  per-server save (or a blank one), and on close we blank it again (the exe also deletes a leftover before opening).
 - import_file/export_file use plain fopen (no UTF-8 on Windows): they go through an ASCII-only staging folder.
 - The Python wrapper imports PIL at import time (only for screenshot(), which we don't use); the exe doesn't ship
   Pillow, so a tiny stand-in module is installed when PIL is missing.
@@ -191,6 +192,15 @@ class NDSCore:
         self.closed = False
         self.rom_path = rom_path
         self.tmp = _staging_dir()
+        if getattr(sys, "frozen", False):
+            # Windows (verified in the release smoke test): DeSmuME keeps <exe folder>/<rom>.dsv open until the
+            # process ends, so it can only be removed here, before the first open. Locked = ours, already blank.
+            for p in battery_file_candidates(rom_path):
+                try:
+                    if os.path.isfile(p):
+                        os.remove(p)
+                except OSError:
+                    pass
         try:
             self.emu.open(_short_path(os.path.abspath(rom_path)))
         except Exception as e:

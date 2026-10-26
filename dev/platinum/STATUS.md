@@ -69,3 +69,12 @@
   1366x768 laptops / 125 % Windows scaling; ds_scale in config, F5/F6 +-0.5). COORDINATOR: please commit+push
   (nds_core.py, release.yml, ui.py, app.py, dev/e2e/platinum_boot.py) so I can read the selftest once more.
 - coordinator: pushed 5b5f1b4 for the core agent's selftest.
+- 2026-10-26 core: Windows build run 40258223835: DeSmuME's .dsv is <exe folder>/<rom>.dsv and stays locked until the
+  process exits (WinError 32) -> the exe now deletes a leftover before the first open; content is always ours/blank.
+  Sound: DeSmuME plays through its own SDL legacy device (44.1 kHz, ~133 ms ring buffer); on Windows it shares
+  pygame's SDL2.dll. Every ROM open / save import reopens that device, so travel (pygame.quit/init) is fine.
+  No sound card -> DeSmuME silently disables its sound core (verified on the runner); fast-forward = DS sound muted
+  (like the GB games). When the main loop stalls (window drag, file picker) the ring buffer repeats ~0.1 s: we pause
+  DeSmuME's audio around our own blocking dialogs; a window drag on Windows can still buzz briefly.
+  Waiting for client/yellowlink/platinum.py: the app picks it up automatically (App.full needs PlatinumMemory,
+  fast_continue and PLATINUM_SHA1 in it); dev/e2e/platinum_boot.py uses it instead of its stand-in when present.
