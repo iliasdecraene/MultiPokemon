@@ -421,6 +421,7 @@ class YellowLinkServer:
             "latest_client": self.config.latest_client,
             "download_url": self.config.download_url,
             "motd": self.config.motd,
+            "server_name": self.config.name,
         })
         await self.send(client, {"type": "challenge_list", "challenges": self.challenges.mine(uid)})
         for c in others:

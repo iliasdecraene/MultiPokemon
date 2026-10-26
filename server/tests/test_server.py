@@ -432,3 +432,10 @@ async def test_crystal_badges_above_255(connect_client):
     a = await connect_client("Ilias")
     await a.send(type="party", mons=[make_crystal_mon()], trainer="CHRIS", badges=0x01FF)
     await a.expect_none("error")
+
+
+def test_server_name_and_motd_from_env():
+    from yellowlink_server.config import load_config
+    cfg = load_config(env={"YL_SERVER_NAME": "  Vizkes Pokémon  ", "YL_MOTD": "Hoi!"})
+    assert cfg.name == "Vizkes Pokémon" and cfg.motd == "Hoi!"
+    assert load_config(env={}).name == ""

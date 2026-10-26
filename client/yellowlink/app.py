@@ -451,7 +451,8 @@ class App(ChallengeMixin, TradeMixin):
             self.sys_msg("Server refused connection: " + self.net.status_detail, ui.BAD)
 
     def on_welcome(self, msg):
-        self.sys_msg("Connected to server.", ui.GOOD)
+        self.server_name = str(msg.get("server_name") or "")[:30]
+        self.sys_msg(f"Connected to {self.server_name}." if self.server_name else "Connected to server.", ui.GOOD)
         if msg.get("motd"):
             self.sys_msg(msg["motd"])
         latest = msg.get("latest_client") or ""

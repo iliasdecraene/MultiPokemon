@@ -17,6 +17,7 @@ class Config:
     latest_client: str = __version__  # server and client are released together
     download_url: str = "https://github.com/iliasdecraene/MultiPokemon/releases/latest"
     motd: str = "Welcome!"
+    name: str = ""                 # shown to players (sidebar + welcome); e.g. "Vizkes Pokémon"
     data_dir: str = "data"
 
 
@@ -25,7 +26,7 @@ def load_config(path: str | None = None, *, host: str | None = None,
     """Build a Config.
 
     Precedence (lowest to highest): built-in defaults, the JSON file at
-    ``path``, environment variables (YL_KEY, YL_PORT, YL_DATA_DIR), and
+    ``path``, environment variables (YL_KEY, YL_PORT, YL_DATA_DIR, YL_SERVER_NAME, YL_MOTD), and
     finally explicit ``host``/``port`` arguments (from the command line).
     """
     env = os.environ if env is None else env
@@ -45,10 +46,15 @@ def load_config(path: str | None = None, *, host: str | None = None,
         cfg.port = int(env["YL_PORT"])
     if env.get("YL_DATA_DIR"):
         cfg.data_dir = env["YL_DATA_DIR"]
+    if env.get("YL_SERVER_NAME"):
+        cfg.name = env["YL_SERVER_NAME"]
+    if env.get("YL_MOTD"):
+        cfg.motd = env["YL_MOTD"]
     if host is not None:
         cfg.host = host
     if port is not None:
         cfg.port = port
     cfg.port = int(cfg.port)
     cfg.key = str(cfg.key)
+    cfg.name = str(cfg.name or "").strip()[:30]
     return cfg
