@@ -426,8 +426,9 @@ it in its own game.
 
 ### Local storage (client)
 `<server folder>/challenges/<challenge_id>/game.sav` (server folder: see section 8; always the server's OWN folder,
-also when it shares another server's main save - a run belongs to the server it's played on. Runs a 0.7.2 client put in
-the shared folder are still found there), `resume.state`, `game.rtc` (Crystal). Platinum: `game.sav` = the 512 KB
+also when it shares another server's main save - a run belongs to the server it's played on. Clients up to 0.7.3 put
+a sharing server's runs in the shared save's folder: such a run is found wherever it is - the app folder or any
+`servers/<id>/` folder, also after the save was un-shared (run ids are unique)), `resume.state`, `game.rtc` (Crystal). Platinum: `game.sav` = the 512 KB
 battery, `resume.state` = a DeSmuME savestate. While playing a challenge,
 `cfg["active_challenge"] = {"id", "game"}`; `Config.game_id/save_path/resume_path` point at the challenge.
 The main game's library, saves, PC database and party snapshot are untouched. On a fresh start of the app
@@ -526,6 +527,24 @@ module `mon_key()`/`mon_info()`/`area_of()`/`area_name()`; details: `dev/notes/s
   slots out; `move_box_to_party(i)` takes an index into that list.
 - The forced moves rebuild the party/box record like the game (PP, stats) and need the ROM data:
   in a challenge the app sets `PlatinumMemory.rom` (ndsrom.PlatinumData).
+- Catches are matched by key: `battle_info()` lists every wild mon (`keys`, `dexes`; Yellow/Crystal give one `dex`
+  and no key -> matched by species as before). The mons the save already holds (party + all 18 boxes) are noted at
+  the battle's start, because a catch with a full party and a full current box lands in another box (which becomes
+  the current one) next to older mons. Double wild battles (walking with a partner): the encounter is the first wild
+  mon the dupes clause allows ("open" with its dex); catching it -> "caught" with the dex/key of the mon actually
+  caught; catching the other one (a dupe) -> the encounter "failed" and that catch is dead ("not first encounter");
+  with a shiny among them the outcome is decided by the mon caught (shiny -> bonus area key).
+- Blackout = the game's own verdict: `battle_info()["result"]` (FieldBattleDTO.resultMask, written on the battle's
+  last ~7 frames: 1 won, 2 lost, 3 draw, 4 caught, 5 fled). The field whites out only on lost/draw
+  (CheckPlayerWonBattle), so in a partner (tag) battle all of your Pokémon can faint while the partner wins: no
+  blackout, the party is healed - the deaths still count (and no usable Pokémon left still ends the run).
+  Yellow/Crystal have no result: blackout = every party mon fainted, as before.
+- Field poison can't kill in Platinum: `Pokemon_DoPoisonDamage` stops at 1 HP and cures the mon (checked on the ROM
+  in soullink_platinum.py), so there is no out-of-battle faint or white-out to watch for.
+- `daycare_records()` None (a slot can't be read right now) skips that full PC scan; a PC slot that stays
+  unreadable (a real Bad Egg) is logged once and keeps release detection off while it's there.
+- Forced moves write only what read identically on an earlier frame (`observe_stable()`, sampled by the view's
+  `safe()`); without the ROM data they can't be done (logged once, the player is asked instead).
 - No hold state (no Bug-Catching Contest). The Great Marsh counts like any area (Safari Balls count as balls while
   the safari game runs).
 - The PC: no PC-database hook inside a challenge, so the box UI running (`pc_open()`) is polled every frame and given

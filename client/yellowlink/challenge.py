@@ -16,6 +16,7 @@ log = logging.getLogger("yellowlink.challenge")
 KIND_NAMES = {"soul_link": "Soul Link"}
 FINISHED = ("completed", "failed", "abandoned")
 CHALLENGE_GAMES = ("yellow", "crystal", "platinum")     # order of the buttons in the new-challenge form
+CHALLENGE_RULES = ("exp_share",)        # optional run rules this client applies (`library.challenge_rules`)
 LEGACY_GAMES = ("yellow", "crystal")    # every challenge client (0.6.0+) plays these; others need `challenge_games`
 # What the referee needs from a game adapter's memory class (crystal.py / platinum.py "Soul Link" sections)
 REFEREE_HELPERS = ("battle_info", "battle_party_slot", "has_poke_balls", "current_box_records", "move_party_to_box",
@@ -81,7 +82,7 @@ class ChallengeMixin:
         # of them this client can run a challenge in (0.7.x clients list Platinum in `games` but have no Platinum
         # Soul Link, so the server only allows Platinum for clients that send it - SPEC.md section 7)
         self.net.send({"type": "library", "games": sorted(g for g in self.lib.games if self._game_supported(g)),
-                       "challenge_games": self.challenge_games()})
+                       "challenge_games": self.challenge_games(), "challenge_rules": list(CHALLENGE_RULES)})
         if self.chal:
             if self.chal_wait == "offline":
                 self.chal_wait = "load"           # back online: wait until the server says both are in
@@ -166,7 +167,8 @@ class ChallengeMixin:
         if self.chal:
             return
         self.close_panel()
-        self.enter_challenge = {"id": c["id"], "game": c["game"]}
+        # the run's rules travel with it (Exp Share All applies from the first frame, before the server's record)
+        self.enter_challenge = {"id": c["id"], "game": c["game"], "rules": dict(c.get("rules") or {})}
         _, partner = self.chal_partner(c)
         self.cfg["_travel_msg"] = f"Starting your Soul Link with {partner}..."
         self.quit_requested = True
@@ -360,7 +362,39 @@ class ChallengeMixin:
     def new_challenge_form(self, uid, name):
         shared = self.shared_games(uid)
         self.chal_form = {"uid": uid, "name": name, "game": shared[0] if shared else None,
-                          "dupes": True, "shiny": True}
+                          "dupes": True, "shiny": True,
+                          # Exp Share All for both: starts as my own setting, if the partner's client knows the rule
+                          "exp_share": bool(self.cfg.get("exp_share_all", True)) and self.can_exp_share_rule(uid)}
+
+    def can_exp_share_rule(self, uid) -> bool:
+        """The partner's client (and the server) know the Exp Share All run rule (roster `challenge_rules`)."""
+        e = next((r for r in self.roster if r.get("uid") == uid), {}) or {}
+        return "exp_share" in (e.get("challenge_rules") or [])
+
+    def toggle_exp_share_rule(self):
+        f = self.chal_form
+        if not f:
+            return
+        if not f.get("exp_share") and not self.can_exp_share_rule(f["uid"]):
+            e = next((r for r in self.roster if r.get("uid") == f["uid"]), {}) or {}
+            self.toast("The server needs updating for this rule (ask the host)." if "challenge_rules" not in e
+                       else f"{f['name']} needs to update YellowLink (press U) for Exp Share All in a run.", 5,
+                       ui.BAD)
+            return
+        f["exp_share"] = not f.get("exp_share")
+
+    def chal_exp_share(self):
+        """The run's Exp Share All rule (both players) while in a run, else None (= the player's own setting).
+        Runs from before the rule existed have none: off, the original games' rule."""
+        if not self.chal:
+            return None
+        rec = self.chal_rec if self.chal_rec and self.chal_rec.get("id") == self.chal["id"] else None
+        rules = (rec or {}).get("rules")
+        if rules is None:
+            rules = self.chal.get("rules")
+        if rules is None:
+            rules = (self.challenges.get(self.chal["id"]) or {}).get("rules")
+        return bool((rules or {}).get("exp_share", False))
 
     def shared_games(self, uid) -> list:
         """Games both of us can run a Soul Link in (form buttons). Yellow/Crystal: the partner's `games` (None =
@@ -417,7 +451,7 @@ class ChallengeMixin:
         if not f or not f.get("game"):
             return
         self.net.send({"type": "challenge_request", "to": f["uid"], "kind": "soul_link", "game": f["game"],
-                       "rules": {"dupes": f["dupes"], "shiny": f["shiny"]}})
+                       "rules": {"dupes": f["dupes"], "shiny": f["shiny"], "exp_share": bool(f.get("exp_share"))}})
         self.toast(f"Soul Link invite sent to {f['name']}...", 4)
         self.chal_form = None
         self.close_panel()

@@ -2117,14 +2117,13 @@ class App(ChallengeMixin, TradeMixin):
                 rules = p.get("rules") or {}
                 if p.get("continue"):
                     lines = [f"{p['name']} wants to continue your Soul Link!",
-                             (f"{game.title if game else p['game']} - you'll both jump into your run.", ui.DIM)]
+                             (f"{game.title if game else p['game']} - you'll both jump into your run.", ui.DIM),
+                             (panels.rules_line(rules, p["game"]).capitalize(), ui.DIM)]
                 else:
                     lines = [f"{p['name']} challenges you to a Soul Link!",
                              (f"{game.title if game else p['game']}, fresh save (your main game is kept safe).",
                               ui.DIM),
-                             ("Dupes clause " + ("on" if rules.get("dupes", True) else "off")
-                              + (", shiny clause on" if rules.get("shiny") and p["game"] != "yellow" else ""),
-                              ui.DIM)]
+                             (panels.rules_line(rules, p["game"]).capitalize(), ui.DIM)]
                 r = ui.modal(sub, self.fonts, self.game_w, self.game_h, "Challenge!", lines + [(f"({left}s)", ui.DIM), ""],
                              "[Y] accept    [N] decline")
                 off = (0, self.game_y)
@@ -2304,7 +2303,9 @@ class App(ChallengeMixin, TradeMixin):
         Never in live or practice battles with friends (those give no lasting experience anyway). A practice
         offer that's still waiting doesn't count (the player may be in a normal battle meanwhile)."""
         practice = self.battle is not None and getattr(self.battle, "phase", "") != "waiting"
-        return bool(self.cfg.get("exp_share_all", True)) and not practice and not self.live
+        run = self.chal_exp_share()            # in a Soul Link: the run's rule for both players (SPEC.md 7)
+        on = bool(self.cfg.get("exp_share_all", True)) if run is None else run
+        return on and not practice and not self.live
 
     def _exp_award_busy(self) -> bool:
         h = self.exp_share
@@ -2371,7 +2372,7 @@ class App(ChallengeMixin, TradeMixin):
             if install is not None:
                 self.exp_share = install(emu, self.exp_share_on)
                 log.info("Exp Share All hooks installed for %s (setting %s)", self.game_id,
-                         "on" if self.cfg.get("exp_share_all", True) else "off")
+                         "on" if self.exp_share_on() else "off")
         except Exception:  # noqa: BLE001 - the game must run without it
             log.exception("could not install Exp Share All for %s", self.game_id)
             self.exp_share = None

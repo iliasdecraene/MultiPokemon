@@ -163,12 +163,19 @@ def give_balls():
         A.game.m.w32(body() + dex + 4 + 4 * i, 0xFFFFFFFF)
 
 
-def set_hp(slot, hp):
-    """TEST SHORTCUT: a party mon's current HP (party section, encrypted with the PID)."""
+def set_hp(slot, hp, status=None):
+    """TEST SHORTCUT: a party mon's current HP (+ status: 0x08 = poisoned) (party section, encrypted with the PID)."""
     addr = A.game.party_addr(slot)
     pk = pk4.PK4(pk4.decrypt(A.game.read(addr, pk4.PARTY_SIZE)))
     pk.hp = hp
+    if status is not None:
+        pk.status = status
     A.game.m.write(addr, pk.encrypted())
+
+
+def lead():
+    p = A.game.party_checked()
+    return pk4.PK4(pk4.decrypt(p[0])) if p else None
 
 
 def walk_until_battle(limit=120):
@@ -247,6 +254,23 @@ A.render()
 tags = [t[0] for t in A._draw_friends_ds()]
 check("in the run only the partner is drawn", "Alex" in tags and "Misty" not in tags, tags)
 A.friends.pop("u-misty")
+# field poison: Platinum never takes the last HP (pret Pokemon_DoPoisonDamage) - the mon survives at 1 HP, cured
+set_hp(0, 3, 0x08)                            # TEST SHORTCUT: poisoned, 3 HP
+hps = set()
+for k in range(30):
+    A.nds.button_press("left" if k % 2 == 0 else "right")
+    run(10)
+    A.nds.button_release("left" if k % 2 == 0 else "right")
+    run(8)
+    m = lead()
+    if m:
+        hps.add(m.hp)
+m = lead()
+check("field poison: down to 1 HP, then cured - no faint", m is not None and m.hp == 1 and m.status == 0
+      and 0 not in hps and 2 in hps, (sorted(hps), m and m.status))
+check("...and the referee sees no death", A.sl.status(turtwig) == "linked" and not A.sl.mine()["dead"])
+set_hp(0, 21, 0)
+run(30)
 
 # 2. Route 201: free battle, balls, first encounter, catch, link -------------------------------------------------
 A._chal_leaving = True                       # restart without "left": like a crash, back within the 30 s grace

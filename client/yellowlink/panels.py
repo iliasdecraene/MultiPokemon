@@ -456,6 +456,8 @@ def draw_settings(surf, f, app, game_w, game_h, offset):
             lines += wrap(f.small, "Not active for this game file." if small else
                           "Not active for this game file (needs the supported Yellow, Crystal or Platinum).",
                           width - 56)
+        elif key == "exp_share_all" and exp_share_run_note(app):
+            lines += wrap(f.small, exp_share_run_note(app), width - 56)
         if y + 32 > bottom:
             break
         on = bool(app.cfg.get(key, default))
@@ -489,6 +491,25 @@ def _toggle(surf, app, f, rect, label, on, cb, offset):
     pygame.draw.circle(surf, (245, 245, 250), (sw.right - 12 if on else sw.x + 12, sw.centery), 9)
     text(surf, f.body, label, (rect.x + 56, rect.y + 5), TEXT if not hover else ACCENT)
     app.click_targets.append((rect.move(offset), cb, label))
+
+
+def rules_line(rules: dict, game: str = "") -> str:
+    """'Dupes clause on, shiny clause on, Exp Share All: off' for a run's rules (legacy runs: Exp Share off)."""
+    rules = rules or {}
+    parts = ["dupes clause " + ("on" if rules.get("dupes", True) else "off")]
+    if rules.get("shiny", True) and game != "yellow":
+        parts.append("shiny clause on")
+    parts.append("Exp Share All: " + ("on" if rules.get("exp_share") else "off"))
+    return ", ".join(parts)
+
+
+def exp_share_run_note(app):
+    """Settings: in a Soul Link the run's Exp Share All rule applies (both players), not the toggle."""
+    run = app.chal_exp_share() if hasattr(app, "chal_exp_share") else None
+    if run is None:
+        return None
+    return (f"This Soul Link run: Exp Share All {'on' if run else 'off'} (set when the run started). "
+            f"The toggle is for your main game.")
 
 
 def _game_tip(app, form, g) -> str:
@@ -546,6 +567,14 @@ def _draw_challenge_form(surf, f, app, r, y, offset):
     y += 40
     _toggle(surf, app, f, pygame.Rect(r.x + 18, y, tw, 30), shiny,
             form["shiny"], lambda: form.__setitem__("shiny", not form["shiny"]), offset)
+    y += 40
+    exp = "Exp Share All for both of you" + ("" if app.can_exp_share_rule(form["uid"]) else
+                                             f" - {form['name']} must update")
+    if narrow:
+        exp = fit(f.body, "Exp Share All (both)" if app.can_exp_share_rule(form["uid"]) else
+                  "Exp Share All (needs update)", tw - 56)
+    _toggle(surf, app, f, pygame.Rect(r.x + 18, y, tw, 30), exp, bool(form.get("exp_share")),
+            app.toggle_exp_share_rule, offset)
     y += 52
     rules = ["Only the first wild encounter per area counts (once you have Poké Balls).",
              "Same area = partners. Faint, and your partner's goes too. Missed = no partner.",
@@ -592,9 +621,9 @@ def draw_soullink(surf, f, app, game_w, game_h, offset):
         text(surf, f.body, "Connecting...", (r.x + 18, y), DIM)
     else:
         cnt = sl.counts()
+        rec = app.chal_rec or {}
         line = (f"{cnt['alive']} alive · {cnt['dead']} lost · rules: "
-                + ("dupes clause on" if sl.rules["dupes"] else "dupes clause off")
-                + (", shiny clause on" if sl.rules["shiny"] else ""))
+                + rules_line(rec.get("rules") or sl.rules, rec.get("game", "")))
         text(surf, f.small, fit(f.small, line, r.w - 36) if narrow else line, (r.x + 18, y), DIM)
         y += 26
         text(surf, f.small, "Area", (cx[0], y), DIM)

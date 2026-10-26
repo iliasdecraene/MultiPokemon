@@ -79,7 +79,8 @@ class Partner:
             self.inbox.append(m)
         if self.net.status == "online" and not self.online:
             self.online = True
-            self.net.send({"type": "library", "games": ["platinum"], "challenge_games": ["platinum"]})
+            self.net.send({"type": "library", "games": ["platinum"], "challenge_games": ["platinum"],
+                           "challenge_rules": ["exp_share"]})
 
     def take(self, mtype, **match):
         for i, m in enumerate(self.inbox):
@@ -93,7 +94,7 @@ class Partner:
 
 cfg = Config()
 cfg.update(name="Ilias", server_url=f"ws://127.0.0.1:{PORT}", room_key="pt", rom_path=PT_ROM, seen_help=True,
-           games={"platinum": PT_ROM}, current_game="platinum", ds_scale=2)
+           games={"platinum": PT_ROM}, current_game="platinum", ds_scale=2, exp_share_all=False)
 cfg.save()
 main_save = cfg.data_dir / "saves" / "platinum.sav"
 main_save.write_bytes(MAIN_SAVE)
@@ -157,6 +158,9 @@ shot("1_challenges_panel.png")
 check("Start a Soul Link is offered", any(lab == "Start a Soul Link" for _, _, lab in A.click_targets))
 A.new_challenge_form(B.uid, "Alex")
 check("form defaults to Platinum", A.chal_form["game"] == "platinum", A.chal_form)
+check("Exp Share All rule: default = my own setting (off), partner supports it",
+      A.chal_form["exp_share"] is False and A.can_exp_share_rule(B.uid))
+A.toggle_exp_share_rule()                    # switch it ON for this run (my personal setting stays off)
 shot("2_form.png")
 labels = [lab for _, _, lab in A.click_targets]
 check("form: Platinum button on, Yellow/Crystal off (Alex only has Platinum)",
@@ -166,6 +170,7 @@ got = {}
 run(200, lambda: got.setdefault("req", B.take("challenge_request")) is not None or got.pop("req") is not None)
 req = got.get("req") or {}
 check("partner gets a Platinum invite", req.get("game") == "platinum" and req.get("challenge_id") is None, req)
+check("...with Exp Share All on as a run rule", (req.get("rules") or {}).get("exp_share") is True, req)
 A.close_panel()
 B.send(type="challenge_respond", request_id=req.get("request_id"), accept=True)
 run(300, lambda: A.enter_challenge is not None and B.take("challenge_go") is not None)
@@ -196,6 +201,8 @@ run(120)
 check("both in -> the game runs", A.chal_wait is None and A.nds.frame_count > f0 + 60 and not A._ds_chal_paused,
       (A.chal_wait, A.nds.frame_count - f0))
 check("rules engine + referee loaded", A.sl is not None and A.referee is not None and A.sl.partner == B.uid)
+check("in the run Exp Share All is ON (the run's rule; my own setting is off)",
+      A.exp_share_on() and not cfg.get("exp_share_all") and A.chal_rec["rules"]["exp_share"] is True)
 check("no PC database / trades in the challenge", A.pc_codec is None and not A.pcsync.session_open)
 A.toggle_panel("soullink")
 shot("4_soullink_panel.png")
@@ -222,6 +229,7 @@ before = ram_hash()
 A.leave_to_main("paused")
 check("pausing sends me home", A.quit_requested and A.leave_challenge)
 A = restart(A)
+check("main game: my own Exp Share setting (off) again", not A.exp_share_on())
 check("back in the main game with the main save", not A.chal and A.cfg.save_path == main_save
       and A.nds.loaded_save and A.nds.export_save() == MAIN_SAVE)
 told = run(300, lambda: B.take("challenge_partner_left", challenge_id=cid, reason="paused") is not None)

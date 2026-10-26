@@ -63,6 +63,7 @@ def restart(app):
 
 
 ca, cb = make_cfg("Ilias"), make_cfg("Alex")
+ca["exp_share_all"], cb["exp_share_all"] = True, False      # different personal settings (Settings panel)
 A, B = boot(ca), boot(cb)
 
 
@@ -86,6 +87,8 @@ A.open_challenges(cb["uid"]); A.render(); shot(A, "1_challenges_panel.png")
 check("Start button is offered", any(l == "Start a Soul Link" for _, _, l in A.click_targets))
 A.new_challenge_form(cb["uid"], "Alex")
 check("form defaults to Yellow", A.chal_form["game"] == "yellow")
+check("Exp Share All rule offered, default = Ilias's own setting (on)", A.chal_form["exp_share"] is True
+      and A.can_exp_share_rule(cb["uid"]))
 A.render(); shot(A, "2_form.png")
 A.send_challenge()
 run(150, lambda: B.mode == "prompt" and B.prompt and B.prompt["kind"] == "challenge")
@@ -111,6 +114,9 @@ B = restart(B)
 run(200, lambda: A.chal_wait is None and B.chal_wait is None)
 check("both in -> game runs", A.chal_wait is None and B.chal_wait is None and A.pyboy.frame_count > frame_before)
 check("rules engine loaded", A.sl is not None and B.sl is not None and A.sl.partner == cb["uid"])
+check("run rule Exp Share All on, for BOTH (Alex's own setting is off)",
+      A.chal_rec["rules"].get("exp_share") is True and A.exp_share_on() and B.exp_share_on()
+      and not B.cfg.get("exp_share_all"))
 run(200, lambda: any(e.get("challenge") == "soul_link" for e in A.roster if e["uid"] == cb["uid"]))
 check("roster says they're in a Soul Link", A.player_region({"uid": cb["uid"], "challenge": "soul_link"}) == "Soul Link"
       and any(e.get("challenge") == "soul_link" for e in A.roster if e["uid"] == cb["uid"]))
@@ -130,6 +136,7 @@ ok_btn()
 check("OK sends Alex home", B.quit_requested and B.leave_challenge)
 B = restart(B)
 check("Alex is back in his main game", not B.chal)
+check("...where his own Exp Share setting (off) applies again", not B.exp_share_on())
 check("challenge save exists on disk", (tmp / "appdata" / "yellowlink" / "challenges" / cid / "game.sav").exists()
       or (tmp / "appdata" / "yellowlink" / "challenges" / cid / "resume.state").exists())
 

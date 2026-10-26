@@ -299,3 +299,21 @@
   frame like GetExpTask; new tests remove mid-slot, stale pending (4 ways), busy() (24 pass; 6 fail on the old
   module). e2e expshare_pt.py: + busy() samples, + case F remove() at the real move-learn prompt -> Razor Leaf
   still learnt by slot 1, Starly 0, lead 24; ALL PASS.
+- 2026-10-26 17:00 sl-app: REVIEW FIXES + Exp Share run rule done (test-first; 10 new client tests fail on ad26c4d).
+  1. Referee: catch matched by key (battle_info keys/dexes; Yellow/Crystal: species as before); logs the dex of the
+     mon actually caught; doubles: encounter = first wild mon the dupes clause allows, catching the dupe one = failed
+     + dead; shiny decided by the mon caught. b["before"] += every box (view.stored_keys, Platinum) for spills.
+  2. Field poison: pret Pokemon_DoPoisonDamage never goes below 1 HP (cures at 1) - verified on the ROM in
+     soullink_platinum.py (HP 3->2->1, status cleared, no death). No extra sampling needed; SPEC 7 says so.
+  3. Blackout = the game's verdict: battle_info "result" (view falls back to FieldBattleDTO+0x14, set on the last ~7
+     frames - traced on the ROM: 5 = fled); white-out only on 2/3 (lost/draw). Tag battle all fainted but won = no
+     blackout, deaths count. 4. daycare None -> scan skipped; persistent Bad Egg logged once. 5. challenge_dir finds
+     legacy runs in app_dir()/challenges or any servers/*/challenges. 6. paused DS sound stays paused after F3/pickers;
+     forced-move RuntimeError logged once; old SERVER named in the form tip. view.safe() calls observe_stable().
+  Exp Share All as a run rule (Ilias): rules.exp_share (form toggle, default = creator's setting, only if the partner
+  lists "exp_share" in library/roster challenge_rules; server refuses otherwise; continue too). In a run
+  App.exp_share_on() = the run's rule for both; legacy runs = off; Settings shows "This Soul Link run: ...".
+  Tests: client 475, server 109 pass; soullink_platinum (29), challenge_flow_platinum, challenge_flow (+3 Exp Share
+  checks, personal settings differ), soullink_yellow, soullink_crystal (1st try) ALL PASS.
+  COORDINATOR: uncommitted: SPEC.md, client/yellowlink/{app,challenge,panels}.py, client/tests/test_challenge_rules.py
+  (new), test_challenge_platinum.py, dev/e2e/{challenge_flow,challenge_flow_platinum,soullink_platinum}.py, STATUS.md.
