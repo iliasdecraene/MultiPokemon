@@ -166,6 +166,8 @@ ENV
 sudo docker compose up -d --build
 ```
 Players of that group use `ws://<server-ip>:8766` and that password. Open port 8766 if a firewall is on.
+Someone in both groups adds the second one in the game (Multiplayer → Switch server → Add a server...) and switches
+between them there; each server keeps its own saves, PC and challenges on their computer.
 Update it like the first one: `cd /opt/yellowlink2 && git pull && cd server && docker compose up -d --build`.
 
 ### Name and welcome message

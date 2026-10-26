@@ -373,7 +373,7 @@ of rule events; each client derives the rule state from the ledger (`client/yell
 it in its own game.
 
 ### Local storage (client)
-`<appdir>/challenges/<challenge_id>/game.sav`, `resume.state`, `game.rtc`. While playing a challenge,
+`<server folder>/challenges/<challenge_id>/game.sav` (server folder: see section 8), `resume.state`, `game.rtc`. While playing a challenge,
 `cfg["active_challenge"] = {"id", "game"}`; `Config.game_id/save_path/resume_path` point at the challenge.
 The main game's library, saves, PC database and party snapshot are untouched. On a fresh start of the app
 (e.g. after a crash) `active_challenge` is cleared, so the player always starts in their main game.
@@ -446,3 +446,24 @@ Key facts: Yellow `battle_info` is valid from the first frame of `wIsInBattle`; 
 from frame 1 (the referee waits for the first non-None). A faint counts when `battle_party_slot()` shows HP 0 on two
 frames in a row. Withdrawing heals in Crystal, so deaths are tracked by `mon_key`, never by HP. Bug-Catching Contest
 battles are free; the kept mon arrives later as the National Park "gift". Only call the forced moves while `is_safe()`.
+
+## 8. Servers (one per group of friends) — added in 0.6.4 (client only, no protocol change)
+
+A player can be on several servers (each group of friends runs its own, see server/DEPLOY.md) and switches between
+them from Multiplayer → Switch server. Everything that belongs to a group is per server; only the player's name,
+game files (ROMs) and settings are shared.
+
+- `config.json`: `servers = [{id, label, url, key, uid, game, seen_name}]`, `server_id` = active one. The active
+  server's `url`/`key`/`uid` are mirrored in `server_url`/`room_key`/`uid` (what the rest of the client reads);
+  `Config.save()` copies them back into the entry (so the settings window edits the active server).
+- **Player id per server**: a new server gets a new `uid`, so no server ever sees a player id from another server
+  (the server-side PC store and challenge records are keyed by uid).
+- **Folder per server** (`Config.data_dir`): the first server (`id "main"`, created from a pre-0.6.4 config) keeps the
+  original folders (`<appdir>/saves`, `resume`, `pc`, `challenges`); others use `<appdir>/servers/<id>/` with the same
+  layout. Saves, resume snapshots, backups, the PC database and challenge saves all live there.
+- `game` = the region/game last played on that server; restored on switch (each group is somewhere else).
+- `label` (the player's own name for it) or else `seen_name` (the server's `server_name` from `welcome`) or else
+  the address is shown in the list.
+- Switching = save + close + reopen (like travelling between regions). Refused during a trade, battle or challenge;
+  `active_challenge` is cleared. Adding a server with an address already in the list is refused. Removing a server
+  only forgets it: its folder stays on disk.

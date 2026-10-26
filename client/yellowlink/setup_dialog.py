@@ -33,7 +33,8 @@ def run_setup(cfg, first_run: bool) -> bool:
     tk.Label(root, text="Multiplayer Pokémon — you bring your own game files.",
              font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", **pad)
     row(1, "Your name (shown to friends)", "name")
-    row(2, "Server address", "server_url")
+    several = len(getattr(cfg, "servers", None) or []) > 1
+    row(2, "Server address" + (" (this server)" if several else ""), "server_url")
     row(3, "Room password", "room_key", show="•")
     row(4, "Your game file (.gb / .gbc)", "rom_path")
 
@@ -117,3 +118,58 @@ def run_setup(cfg, first_run: bool) -> bool:
     root.bind("<Return>", lambda e: on_ok())
     root.mainloop()
     return result["ok"]
+
+
+def server_form(entry, check):
+    """Add/edit-a-server window (runs inside the game, like the game-file picker).
+
+    entry: the server being edited, or None to add one. check(label, url, key) saves it and returns an error
+    message or None. Returns None when cancelled, else {"join": bool} (join: switch to the new server now)."""
+    import tkinter as tk
+    from tkinter import messagebox
+
+    result = {"value": None}
+    root = tk.Tk()
+    root.title("YellowLink – " + ("edit server" if entry else "add a server"))
+    root.resizable(False, False)
+    root.attributes("-topmost", True)
+    pad = {"padx": 8, "pady": 4}
+    tk.Label(root, text="Each server has its own saves, PC and challenges.",
+             font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", **pad)
+    values = {}
+    rows = [("Name (optional – for you)", "label", None), ("Server address", "url", None),
+            ("Room password", "key", "•")]
+    first = None
+    for i, (label, key, show) in enumerate(rows, start=1):
+        tk.Label(root, text=label, anchor="w").grid(row=i, column=0, sticky="w", **pad)
+        var = tk.StringVar(value=str((entry or {}).get(key, "")))
+        e = tk.Entry(root, textvariable=var, width=40, show=show)
+        e.grid(row=i, column=1, sticky="we", **pad)
+        values[key] = var
+        first = first or e
+    tk.Label(root, text="Leave the name empty to use the server's own name. Ask the host for the address "
+                        "(like ws://1.2.3.4:8766) and password.", fg="#666", wraplength=430, justify="left").grid(
+        row=4, column=0, columnspan=2, sticky="w", **pad)
+    join = tk.BooleanVar(value=True)
+    if not entry:
+        tk.Checkbutton(root, text="Switch to it now (your current game is saved first)", variable=join).grid(
+            row=5, column=0, columnspan=2, sticky="w", **pad)
+
+    def on_ok(*_):
+        err = check(values["label"].get(), values["url"].get(), values["key"].get())
+        if err:
+            messagebox.showerror("YellowLink", err, parent=root)
+            return
+        result["value"] = {"join": bool(join.get()) and not entry}
+        root.destroy()
+
+    btns = tk.Frame(root)
+    btns.grid(row=6, column=0, columnspan=2, sticky="e", **pad)
+    tk.Button(btns, text="Cancel", width=10, command=root.destroy).pack(side="right", padx=4)
+    tk.Button(btns, text="Save" if entry else "Add server", width=12, command=on_ok, default="active").pack(
+        side="right", padx=4)
+    root.bind("<Return>", on_ok)
+    root.bind("<Escape>", lambda e: root.destroy())
+    first.focus_set()
+    root.mainloop()
+    return result["value"]

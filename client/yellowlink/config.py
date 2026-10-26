@@ -33,7 +33,29 @@ DEFAULTS = {
 }
 
 
+MAIN_SERVER = "main"      # the first server: keeps the original folders (saves/, resume/, pc/, challenges/)
+
+
+def normalize_url(url: str) -> str:
+    url = (url or "").strip().strip('"')
+    scheme, sep, rest = url.partition("://")
+    if sep and scheme.lower() in ("ws", "wss"):
+        return scheme.lower() + "://" + rest
+    if sep and scheme.lower() in ("http", "https"):          # pasted with the wrong prefix
+        return ("wss" if scheme.lower() == "https" else "ws") + "://" + rest
+    return "ws://" + url if url else url
+
+
+def _url_key(url: str) -> str:
+    return normalize_url(url).lower().rstrip("/")
+
+
 class Config(dict):
+    """Settings. Servers (one per group of friends): cfg["servers"] = [{id, label, url, key, uid, game}], the active
+    one in cfg["server_id"]. The active server's address/password/player id are also kept in server_url / room_key /
+    uid (what the rest of the app reads); save() copies them back into its entry. Each server has its own folder
+    (data_dir) for saves, resume snapshots, backups, the PC database and challenge saves."""
+
     def __init__(self, path: Path | None = None):
         super().__init__(DEFAULTS)
         self.path = path or (app_dir() / "config.json")
@@ -42,11 +64,128 @@ class Config(dict):
                 self.update(json.loads(self.path.read_text(encoding="utf-8")))
             except (ValueError, OSError):
                 pass
+        fresh = not self.get("uid") or not isinstance(self.get("servers"), list) or not self["servers"]
         if not self.get("uid"):
             self["uid"] = str(uuid.uuid4())
+        self._init_servers()
+        if fresh:
             self.save()
 
+    # --- servers -------------------------------------------------------------------------------------------------
+    def _init_servers(self):
+        servers = self.get("servers")
+        if not isinstance(servers, list) or not servers:
+            # older versions had a single server: it becomes the first entry and keeps its folders and player id
+            self["servers"] = [{"id": MAIN_SERVER, "label": "", "url": self.get("server_url", ""),
+                                "key": self.get("room_key", ""), "uid": self["uid"]}]
+            self["server_id"] = MAIN_SERVER
+        self["servers"] = [s for s in self["servers"] if isinstance(s, dict) and s.get("id")] or \
+            [{"id": MAIN_SERVER, "label": "", "url": self.get("server_url", ""), "key": "", "uid": self["uid"]}]
+        if self.get("server_id") not in {s["id"] for s in self["servers"]}:
+            first = self["servers"][0]
+            self["server_id"] = first["id"]
+            self["server_url"], self["room_key"] = first.get("url", ""), first.get("key", "")
+            self["uid"] = first.get("uid") or self["uid"]
+
+    @property
+    def servers(self) -> list:
+        return self["servers"]
+
+    @property
+    def server_id(self) -> str:
+        return self.get("server_id") or MAIN_SERVER
+
+    def server(self, sid: str) -> dict | None:
+        return next((s for s in self["servers"] if s["id"] == sid), None)
+
+    @property
+    def active_server(self) -> dict:
+        return self.server(self.server_id) or self["servers"][0]
+
+    def _sync_active(self):
+        s = self.server(self.server_id)
+        if s is not None:
+            s["url"], s["key"], s["uid"] = self.get("server_url", ""), self.get("room_key", ""), self["uid"]
+
+    @staticmethod
+    def server_label(s: dict) -> str:
+        """What the player sees: their own name for it, else the name the server gave itself, else its address."""
+        label = (s.get("label") or s.get("seen_name") or "").strip()
+        if label:
+            return label[:30]
+        host = normalize_url(s.get("url", "")).split("://", 1)[-1].rstrip("/")
+        return host or "Server"
+
+    def _check_url(self, url: str, skip: str | None = None) -> str:
+        url = normalize_url(url)
+        if len(url) < 8 or " " in url:
+            raise ValueError("Please enter the server address (like ws://1.2.3.4:8765).")
+        for s in self["servers"]:
+            if s["id"] != skip and _url_key(s.get("url", "")) == _url_key(url):
+                raise ValueError(f"You already have that server ({self.server_label(s)}).")
+        return url
+
+    def add_server(self, label: str, url: str, key: str) -> dict:
+        """A new server with its own player id and folders. Raises ValueError for a bad or duplicate address."""
+        self._sync_active()
+        s = {"id": "s" + uuid.uuid4().hex[:10], "label": (label or "").strip()[:30], "url": self._check_url(url),
+             "key": key or "", "uid": str(uuid.uuid4())}
+        self["servers"].append(s)
+        self.save()
+        return s
+
+    def edit_server(self, sid: str, label: str, url: str, key: str):
+        s = self.server(sid)
+        if s is None:
+            raise ValueError("That server is gone.")
+        self._sync_active()
+        s["url"], s["key"], s["label"] = self._check_url(url, skip=sid), key or "", (label or "").strip()[:30]
+        if sid == self.server_id:
+            self["server_url"], self["room_key"] = s["url"], s["key"]
+        self.save()
+
+    def remove_server(self, sid: str):
+        """Forget a server (not the one you're on). Its saves stay on disk (servers/<id>/)."""
+        if sid == self.server_id or len(self["servers"]) < 2:
+            raise ValueError("You can't remove the server you're playing on.")
+        self["servers"] = [s for s in self["servers"] if s["id"] != sid]
+        self.save()
+
+    def switch_server(self, sid: str):
+        """Make another server active: its address, password, player id, folders and last game."""
+        new = self.server(sid)
+        if new is None:
+            raise ValueError("That server is gone.")
+        self._sync_active()
+        old = self.server(self.server_id)
+        if old is not None:
+            old["game"] = self.get("current_game")
+        self["server_id"] = sid
+        self["server_url"], self["room_key"] = new.get("url", ""), new.get("key", "")
+        if not new.get("uid"):
+            new["uid"] = str(uuid.uuid4())
+        self["uid"] = new["uid"]
+        if new.get("game"):
+            self["current_game"] = new["game"]
+        self.pop("active_challenge", None)
+        self.save()
+
+    @property
+    def data_dir(self) -> Path:
+        """This server's folder. The first server uses the app folder itself (where everything lived before)."""
+        sid = self.server_id
+        if sid == MAIN_SERVER:
+            return app_dir()
+        d = app_dir() / "servers" / "".join(ch for ch in sid if ch.isalnum())[:20]
+        (d / "saves").mkdir(parents=True, exist_ok=True)
+        return d
+
+    @property
+    def pc_path(self) -> Path:
+        return self.data_dir / "pc" / f"{self['uid']}.json"
+
     def save(self):
+        self._sync_active()
         tmp = self.path.with_suffix(".tmp")
         try:
             tmp.write_text(json.dumps(self, indent=2), encoding="utf-8")
@@ -65,7 +204,7 @@ class Config(dict):
         return c if isinstance(c, dict) and c.get("id") and c.get("game") else None
 
     def challenge_dir(self, cid: str) -> Path:
-        d = app_dir() / "challenges" / "".join(ch for ch in cid if ch.isalnum() or ch in "-_")[:40]
+        d = self.data_dir / "challenges" / "".join(ch for ch in cid if ch.isalnum() or ch in "-_")[:40]
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -79,19 +218,19 @@ class Config(dict):
         c = self.challenge
         if c:
             return self.challenge_dir(c["id"]) / "game.sav"
-        return app_dir() / "saves" / f"{self.game_id}.sav"
+        return self.data_dir / "saves" / f"{self.game_id}.sav"
 
     @property
     def resume_path(self) -> Path:
         c = self.challenge
         if c:
             return self.challenge_dir(c["id"]) / "resume.state"
-        d = app_dir() / "resume"
-        d.mkdir(exist_ok=True)
+        d = self.data_dir / "resume"
+        d.mkdir(parents=True, exist_ok=True)
         return d / f"{self.game_id}.state"
 
     @property
     def backup_dir(self) -> Path:
-        d = app_dir() / "saves" / "backups"
-        d.mkdir(exist_ok=True)
+        d = self.data_dir / "saves" / "backups"
+        d.mkdir(parents=True, exist_ok=True)
         return d

@@ -61,6 +61,11 @@ Gamepads work too.
 The save file lives in `%APPDATA%\YellowLink\saves\yellow.sav`. A backup is made every time you start the app,
 in the `backups` folder next to it, and the last 15 are kept. It's a standard 32 KB save, so it also works in other emulators.
 
+**More than one group of friends?** Open **Multiplayer → Switch server → Add a server...** and enter the other
+group's address and password. Each server keeps its own saves, PC and challenges (saves of extra servers live in
+`%APPDATA%\YellowLink\servers\`), so a different group means a different adventure. Switch back any time from the
+same list; your game is saved first and continues where you left off.
+
 **After a trade, save in-game.**
 
 **Updates:** when a new version is out, the sidebar says so. Press **U**: it downloads in the background while you play, then asks to restart. Save in-game before restarting.

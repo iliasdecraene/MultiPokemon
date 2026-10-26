@@ -102,7 +102,9 @@ class App(ChallengeMixin, TradeMixin):
         self.save_tag = f"challenge-{cfg.challenge['id']}" if cfg.challenge else self.game_id
         self.game_info = self.lib.info(self.game_id)
         self.travel_to = None
-        self.pcsync = pcdb.PCSync(app_dir() / "pc" / f"{cfg['uid']}.json")
+        self.pcsync = pcdb.PCSync(cfg.pc_path)       # per server (each group of friends has its own)
+        self.switch_to = None        # set -> main loop restarts on that server
+        self._confirm_remove = None
         self.pc_codec = None
         self.pc_trust = False        # True once the game's boxes are known to match our last view
         self.panel = None            # None | "multiplayer" | "regions"
@@ -452,6 +454,10 @@ class App(ChallengeMixin, TradeMixin):
 
     def on_welcome(self, msg):
         self.server_name = str(msg.get("server_name") or "")[:30]
+        entry = self.cfg.server(self.cfg.server_id)
+        if entry is not None and entry.get("seen_name", "") != self.server_name:
+            entry["seen_name"] = self.server_name          # shown in the server list when you didn't name it
+            self.cfg.save()
         self.sys_msg(f"Connected to {self.server_name}." if self.server_name else "Connected to server.", ui.GOOD)
         if msg.get("motd"):
             self.sys_msg(msg["motd"])
@@ -961,6 +967,83 @@ class App(ChallengeMixin, TradeMixin):
         self.travel_to = game_id
         self.quit_requested = True
 
+    # servers (one per group of friends) ------------------------------------------------------------------------
+    def switch_server(self, sid):
+        """Save, close and reopen on another server: its own saves, PC and challenges (see Config)."""
+        entry = self.cfg.server(sid)
+        if entry is None or sid == self.cfg.server_id:
+            return
+        if self.chal or self.enter_challenge:
+            self.toast("Pause your Soul Link first (Soul Link > Pause & go back).", 5, ui.BAD)
+            return
+        if self.trade or self.battle or self.live:
+            self.toast("Finish your trade or battle first.", 4, ui.BAD)
+            return
+        self._restart_on(sid, f"Switching to {self.cfg.server_label(entry)}...")
+
+    def _restart_on(self, sid, msg):
+        log.info("restarting on server %s (%s)", sid, (self.cfg.server(sid) or {}).get("url"))
+        self.cfg["_travel_msg"] = msg
+        self.switch_to = sid
+        self.quit_requested = True
+
+    def server_dialog(self, sid=None):
+        """Add a server (sid None) or edit one: a small window with name / address / password."""
+        from .setup_dialog import server_form
+        self.release_all()
+        entry = self.cfg.server(sid) if sid else None
+        before = (entry or {}).get("url"), (entry or {}).get("key")
+
+        def check(label, url, key):
+            try:
+                if entry:
+                    self.cfg.edit_server(sid, label, url, key)
+                else:
+                    check.added = self.cfg.add_server(label, url, key)
+            except ValueError as e:
+                return str(e)
+            return None
+        check.added = None
+        try:
+            res = server_form(entry, check)
+        except Exception:  # noqa: BLE001
+            log.exception("server window failed")
+            self.toast("Couldn't open the server window.", 4, ui.BAD)
+            return
+        if not res:
+            return
+        if check.added is not None:
+            name = self.cfg.server_label(check.added)
+            if res.get("join"):
+                self.switch_server(check.added["id"])
+            else:
+                self.toast(f"Added {name}. Click Switch to play there.", 5, ui.GOOD)
+        elif sid == self.cfg.server_id and (entry.get("url"), entry.get("key")) != before:
+            if self.chal or self.trade or self.battle or self.live:
+                self.toast("Saved. The new address/password is used the next time you start the game.", 5, ui.GOOD)
+            else:
+                self._restart_on(sid, "Reconnecting...")     # save, close and reopen with the new details
+        else:
+            self.toast("Saved.", 3, ui.GOOD)
+
+    def remove_server(self, sid):
+        """Two clicks: the first arms it (the button turns into 'Sure?')."""
+        if not self.confirming_remove(sid):
+            self._confirm_remove = (sid, time.time())
+            return
+        self._confirm_remove = None
+        entry = self.cfg.server(sid)
+        try:
+            self.cfg.remove_server(sid)
+        except ValueError as e:
+            self.toast(str(e), 4, ui.BAD)
+            return
+        self.toast(f"Removed {self.cfg.server_label(entry or {})}. Its saves stay in your YellowLink folder.", 5)
+
+    def confirming_remove(self, sid) -> bool:
+        c = self._confirm_remove
+        return bool(c and c[0] == sid and time.time() - c[1] < 5)
+
     def pick_region_game(self, region_id, game_id):
         """Remember which version to use for a region; if we're in that region, switch to it."""
         picks = self.cfg.setdefault("region_game", {})
@@ -1413,6 +1496,8 @@ class App(ChallengeMixin, TradeMixin):
         sub = self.screen.subsurface((0, self.game_y, self.game_w, self.game_h))
         if self.mode == "panel" and self.panel == "multiplayer":
             panels.draw_multiplayer(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
+        elif self.mode == "panel" and self.panel == "servers":
+            panels.draw_servers(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
         elif self.mode == "panel" and self.panel == "regions":
             panels.draw_regions(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
         elif self.mode == "panel" and self.panel == "challenges":
@@ -1664,6 +1749,12 @@ def _main(argv, cfg, diag):
         errors_before = diag.errors
         app = App(cfg, diag)
         app.run()
+        if app.switch_to:                                 # another server: its own saves, PC and challenges
+            cfg.switch_server(app.switch_to)
+            lib = library.Library(cfg, app_dir())
+            if lib.current:
+                lib.set_current(lib.current)
+            continue
         if app.enter_challenge:
             cfg["active_challenge"] = app.enter_challenge
             cfg.save()
