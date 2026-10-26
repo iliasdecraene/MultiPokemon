@@ -60,8 +60,21 @@ class TradeMixin:
         rows = [(bi, e) for bi, box in enumerate(self.pcsync.committed["boxes"]) for e in box if e["id"] in ok]
         return rows
 
+    def pc_dex_name(self, dex: int) -> str:
+        """Species name for a PC entry from any game: this game's ROM, else the Platinum ROM's names (national dex
+        1-493) if the player has Platinum, else '#dex'."""
+        name = self.dex_name(dex)
+        if name.startswith("#"):
+            data = getattr(self, "plat_data", None)
+            try:
+                if data is not None and 1 <= int(dex) <= 493:
+                    return data.species_name(int(dex)).title()
+            except Exception:  # noqa: BLE001
+                pass
+        return name
+
     def entry_label(self, e: dict) -> str:
-        species = self.dex_name(e.get("dex", 0))
+        species = self.pc_dex_name(e.get("dex", 0))
         nick = e.get("nick") or species
         if species.startswith("#") or nick.upper() == species.upper():   # unknown name in this game / no nickname
             return f"{nick.title() if nick.isupper() else nick} Lv{e.get('level', '?')}"
@@ -223,7 +236,7 @@ class TradeMixin:
             self.sys_msg(text, ui.GOOD)
 
     def mons_text(self, entries) -> str:
-        names = [e.get("nick") or self.dex_name(e.get("dex", 0)) for e in entries]
+        names = [e.get("nick") or self.pc_dex_name(e.get("dex", 0)) for e in entries]
         names = [n.title() if n.isupper() else n for n in names]
         if not names:
             return "nothing"

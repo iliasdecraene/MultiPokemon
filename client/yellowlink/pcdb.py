@@ -47,6 +47,21 @@ def _key(codec, rec: bytes):
         return None
 
 
+ORIGIN_REP = {"yellow": "gen1", "crystal": "gen2", "platinum": "gen4"}
+
+
+def current_rep(entry: dict, own: str | None = None):
+    """(representation name, bytes) of an entry's *current* representation (SPEC.md section 5): the one named by
+    its origin, else the first present of gen1, gen2, gen4. (None, None) if it has no data at all.
+    `own` (the asking game's representation) is tried right after the origin's: it only matters for entries
+    without a known origin."""
+    order = [ORIGIN_REP.get(entry.get("origin")), own, "gen1", "gen2", "gen4"]
+    for rep in [r for r in order if r]:
+        if entry.get(rep):
+            return rep, _unb64(entry[rep])
+    return None, None
+
+
 def repair_store(s):
     """Fix an overfull store (a box with more than 20): extras go to 'incoming'. None if beyond repair."""
     try:
@@ -191,16 +206,25 @@ class Gen1PC:
                     rec[G1_STRUCT:G1_STRUCT + G1_NAME]), "otid": (rec[12] << 8) | rec[13],
                 "gen1": _b64(rec), "gen2": None}
 
+    plat_rom = None             # Platinum ROM data (ndsrom.PlatinumData) if the player has that game, for levels
+
     def record_for(self, entry: dict) -> bytes:
-        """The bytes to show in Yellow: own Gen-1 data, else a Time-Capsule conversion of the Gen-2 data,
-        else a stand-in."""
-        if entry.get("gen1"):
-            return _unb64(entry["gen1"])
-        if entry.get("gen2"):
-            rec = gen2_to_gen1(_unb64(entry["gen2"]), self.rom)
-            if rec is not None:
-                return rec
-        return self.standin(entry)
+        """The bytes to show in Yellow, from the entry's current representation (SPEC.md section 5): own Gen-1
+        data, else a Time-Capsule conversion of the Gen-2 data or a conversion of the Gen-4 data, else a stand-in."""
+        rep, data = current_rep(entry, "gen1")
+        rec = None
+        try:
+            if rep == "gen1":
+                return data
+            if rep == "gen2":
+                rec = gen2_to_gen1(data, self.rom)
+            elif rep == "gen4":
+                from . import pk4
+                rec = pk4.to_gen1(data, self.rom, self.plat_rom)
+        except Exception:  # noqa: BLE001 - damaged data from a friend: show a stand-in instead
+            log.exception("could not convert %s to Gen 1", entry.get("id"))
+            rec = None
+        return rec if rec is not None else self.standin(entry)
 
     def standin(self, entry: dict) -> bytes:
         level = max(2, min(100, int(entry.get("level") or 5)))
@@ -442,8 +466,16 @@ class PCSync:
     def _entries(self):
         return {e["id"]: e for b in self.working["boxes"] for e in b}
 
+    def _prime(self, game_id: str, codec):
+        """Codecs whose game PC is bigger than the store (Platinum: 18 x 30) fold the extra slots into free store
+        space when reading; tell them which records the store already knows (they keep those over new ones when
+        the store is full)."""
+        if hasattr(codec, "known"):
+            codec.known = {_unb64(rb) for box in self.last_view.get(game_id) or [] for _eid, rb in box}
+
     def open_session(self, game_id: str, codec, trust_game: bool) -> list:
         """Reconcile + compute the view to write. Returns boxes of records for codec.write_boxes()."""
+        self._prime(game_id, codec)
         game_boxes = codec.read_boxes()
         if game_id not in self.working["linked"]:
             self._import(game_id, codec, game_boxes)
@@ -470,6 +502,7 @@ class PCSync:
 
     def close_session(self, game_id: str, codec, party_records=None) -> dict:
         """Harvest changes after Bill's PC closed. Returns a report for the UI."""
+        self._prime(game_id, codec)
         game_boxes = codec.read_boxes()
         report = self._apply_diff(game_id, codec, game_boxes, party_records)
         self.session_open = False

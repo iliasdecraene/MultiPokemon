@@ -27,6 +27,10 @@ try:                                   # Pokémon Platinum adapter (dev/platinum
     from . import platinum
 except ImportError:
     platinum = None
+try:                                   # Platinum's PC boxes as a view of the PC database (Gen4PC)
+    from . import platinum_pc
+except ImportError:
+    platinum_pc = None
 
 log = logging.getLogger("yellowlink")
 
@@ -327,6 +331,8 @@ class App(ChallengeMixin, TradeMixin):
         # Hooks patch ROM addresses, so only enable them on the exact ROM they were verified on.
         if self.full and self.gen2:
             self.pc_codec = None if self.chal else crystal.Gen2PC(self.pyboy.memory, self.rom)
+            if self.pc_codec:
+                self.pc_codec.plat_rom = self.plat_data      # Platinum mons convert (else ?NAME stand-ins)
             self.pyboy.hook_register(*crystal.HOOK_PC_OPEN, self._hook_safe(self.on_pc_open), None)
             self.pyboy.hook_register(*crystal.HOOK_PC_CLOSE, self._hook_safe(self.on_pc_close), None)
             if self.wide:
@@ -336,6 +342,8 @@ class App(ChallengeMixin, TradeMixin):
             self.hooks = pvp.LinkHooks(self.pyboy, self._send_battle_move)
             self.wv = worldview.WorldView(self.rom.rom, margin_x=WIDE_MX, margin_y=WIDE_MY)
             self.pc_codec = None if self.chal else pcdb.Gen1PC(self.pyboy.memory, self.rom)
+            if self.pc_codec:
+                self.pc_codec.plat_rom = self.plat_data
             self.pyboy.hook_register(0x08, 0x546F, self._hook_safe(self.on_pc_open), None)    # BillsPC_
             self.pyboy.hook_register(0x08, 0x553E, self._hook_safe(self.on_pc_close), None)   # ExitBillsPC
         else:
@@ -378,6 +386,7 @@ class App(ChallengeMixin, TradeMixin):
         self.emu = self.nds
         log.info("DS game %s started (save %s, %s)", self.game_id, save, "loaded" if self.nds.loaded_save else "none")
         self.game = self.G.PlatinumMemory(self.nds)
+        self._start_pt_pc()
         if self.wide:
             self.wide = False
         self.last_sram = self._read_sram()
@@ -984,6 +993,9 @@ class App(ChallengeMixin, TradeMixin):
         if self.gen2 and not self.pc_codec.initialised():
             log.info("PC opened before the first save: Crystal's boxes don't exist yet, not syncing")
             return
+        if self.ds and (not self.pc_codec.initialised() or self.game.pc_open()):
+            log.warning("Platinum PC open hook outside the game / under a running box UI: not syncing")
+            return
         boxes = self.pcsync.open_session(self.game_id, self.pc_codec, trust_game=self.pc_trust)
         self.pc_codec.write_boxes(boxes)
         self.pc_trust = True
@@ -997,8 +1009,11 @@ class App(ChallengeMixin, TradeMixin):
         if not self.pc_codec or not self.pcsync.session_open:
             return
         report = self.pcsync.close_session(self.game_id, self.pc_codec, self.G.party_records(self.game))
+        remove_slot = getattr(self.pc_codec, "remove_party_slot", None) or self.game.remove_party_slot
         for slot in sorted(report["standin_party_slots"], reverse=True):
-            self.game.remove_party_slot(slot)
+            remove_slot(slot)
+        if self.ds:
+            self._pt_pc_report()
         if report.get("locked_returned"):
             names = ", ".join(n.title() for n in report["locked_returned"][:3])
             self.toast(f"{names} is part of a trade that's still finishing - it stays in the PC.", 6, ui.ACCENT)
@@ -1008,6 +1023,61 @@ class App(ChallengeMixin, TradeMixin):
             names = ", ".join(n.title() for n in report["standins_returned"][:3])
             self.toast(f"{names} can't leave the PC here - they live in another region.", 6, ui.ACCENT)
         log.info("PC closed: +%d -%d (pending=%s)", report["added"], report["removed"], self.pcsync.pending)
+
+    # Platinum: the box UI is opened through an exec hook and its closing is polled (dev/platinum/MEMORY_MAP.md)
+    @property
+    def plat_data(self):
+        """The player's Platinum ROM data (ndsrom.PlatinumData: species names, growth, Gen-4 conversions) or None."""
+        if not hasattr(self, "_plat_data"):
+            path = self.cfg["rom_path"] if self.ds else self.lib.rom_path("platinum")
+            self._plat_data = platinum_pc.load_data(path) if platinum_pc and path else None
+        return self._plat_data
+
+    def _start_pt_pc(self):
+        self._pt_pc = None               # None | "opening" (hook fired) | "open" (box UI running)
+        self._pt_pc_wait = 0
+        if not (self.full and platinum_pc and not self.chal and hasattr(self.G, "HOOK_PC_OPEN")):
+            return
+        data = self.plat_data
+        if data is None:
+            log.warning("no Platinum ROM data: the PC database is off in Platinum")
+            return
+        self.pc_codec = platinum_pc.Gen4PC(self.game, data)
+        self.nds.hook_register(self.G.HOOK_PC_OPEN, self._pt_pc_hook)
+
+    def _pt_pc_hook(self):
+        """FieldSystem_OpenPokemonStorage: the box UI is about to start and hasn't read the boxes yet."""
+        if self.pcsync.session_open:     # a close we didn't see (shouldn't happen): harvest it first
+            self.on_pc_close()
+        self._pt_pc, self._pt_pc_wait = "opening", 0
+        self.on_pc_open()
+
+    def _pt_pc_poll(self, frames):
+        """Every host frame: notice the box UI closing (pc_open() goes False) -> on_pc_close."""
+        if self._pt_pc is None:
+            return
+        now_open = self.game.pc_open()
+        if self._pt_pc == "opening":
+            self._pt_pc_wait += frames
+            if now_open:
+                self._pt_pc = "open"
+            elif self._pt_pc_wait > 600:     # the UI never came up (10 s): end the session anyway
+                log.warning("Platinum box UI didn't open after the hook; closing the PC session")
+                self._pt_pc = None
+                self.on_pc_close()
+        elif not now_open:
+            self._pt_pc = None
+            self.on_pc_close()
+
+    def _pt_pc_report(self):
+        codec = self.pc_codec
+        left = sum(1 for r in getattr(codec, "unplaced", []) if platinum_pc.classify(r) == "mon")
+        if left:
+            self.toast(f"Your YellowLink PC is full: {left} Pokémon stay in Platinum's boxes 15-18 until you make "
+                       "room.", 8, ui.BAD)
+        elif getattr(codec, "harvested", 0):
+            self.toast("Platinum shows your YellowLink PC in boxes 1-14 (20 per box): Pokémon put elsewhere move to "
+                       "free spaces there.", 7, ui.ACCENT)
 
     def pc_push(self):
         """Compare-and-swap upload of the committed PC store (SPEC.md section 5)."""
@@ -1866,6 +1936,7 @@ class App(ChallengeMixin, TradeMixin):
             ticks = 0 if paused else (DS_FAST_TICKS if self.fast and not self.trade else 1)
             if ticks:
                 self.nds.tick(ticks)      # DeSmuME plays the sound itself (see _sync_ds_audio)
+                self._pt_pc_poll(ticks)
             self._touch_step(ticks)
         else:
             ticks = 0 if paused else (4 if self.fast and not self.trade else 1)

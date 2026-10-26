@@ -1,0 +1,256 @@
+"""Platinum PC <-> PC database, end to end on the real ROMs (real button presses in the box UI, local server).
+
+  1. Yellow: deposit PIDGEY in Bill's PC, autosave commits, the server stores it.
+  2. Platinum (dev/states/pt_pc.dsst): SOMEONE'S PC > WITHDRAW shows PIDGEY converted to Gen 4 and a Crystal egg as
+     the ?EGG stand-in (screenshots); withdraw both; on close the stand-in leaves the party and stays in the
+     database, PIDGEY is out of the database (it's in the Platinum party now).
+  3. DEPOSIT PIDGEY into box 1 and a TURTWIG into box 16: on close both are harvested into the store (box 16 is
+     folded into store box 1); autosave commits and the server stores it; reopening shows them in box 1 slots 1-20.
+  4. Yellow again: PIDGEY (now Platinum data) converts back to Gen 1; TURTWIG is the ?TURTWIG stand-in.
+Run: python dev/e2e/pt_pctest.py   (needs dev/states/{platinum.nds,pt_pc.dsst,yellow.gb,pokecenter_pc.state})
+Screenshots are written to the temp folder printed at the end.
+"""
+import os, sys, time, subprocess, tempfile, pathlib, atexit, struct
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.abspath(os.path.join(_HERE, "..", ".."))
+STATES = os.environ.get("YL_STATES", os.path.join(_REPO, "dev", "states"))
+tmp = pathlib.Path(tempfile.mkdtemp(prefix="yl_ptpc_"))
+os.environ["XDG_CONFIG_HOME"] = str(tmp / "appdata")        # app folder + DeSmuME's battery folder
+os.environ["SDL_VIDEODRIVER"] = "dummy"; os.environ["SDL_AUDIODRIVER"] = "dummy"
+sys.path.insert(0, os.path.join(_REPO, "client"))
+sys.path.insert(0, _HERE)
+import pygame
+pygame.quit = lambda: None
+from PIL import Image
+from yellowlink.config import Config
+from yellowlink import app as appmod, pcdb, pk4, text
+import pc_actions as pa
+
+PT_ROM = os.path.join(STATES, "platinum.nds")
+GB_ROM = os.path.join(STATES, "yellow.gb")
+PORT = 8793
+srv = subprocess.Popen([sys.executable, "-m", "yellowlink_server", "--port", str(PORT)], cwd=os.path.join(_REPO, "server"),
+                       env=dict(os.environ, YL_KEY="test", YL_DATA_DIR=str(tmp / "srv"),
+                                PYTHONPATH=os.path.join(_REPO, "server")),
+                       stdout=open(tmp / "srv.log", "w"), stderr=subprocess.STDOUT)
+atexit.register(srv.terminate)
+time.sleep(1.5)
+FAILS = []
+
+
+def check(label, ok, detail=""):
+    print(("PASS " if ok else "FAIL ") + label + (f"  [{detail}]" if detail and not ok else ""), flush=True)
+    if not ok:
+        FAILS.append(label)
+
+
+cfg = Config()
+cfg.update(name="Ilias", server_url=f"ws://127.0.0.1:{PORT}", room_key="test", seen_help=True,
+           games={"yellow": GB_ROM, "platinum": PT_ROM})
+
+
+def start(game, state):
+    cfg["current_game"] = game
+    cfg.save()
+    os.environ["YL_DEV_LOAD_STATE"] = os.path.join(STATES, state)
+    a = appmod.App(cfg)
+    os.environ.pop("YL_DEV_LOAD_STATE", None)      # let autosave run (it commits the PC store)
+    saved = []
+    orig = a.on_pc_saved
+    a.on_pc_saved = lambda m: (saved.append(m.get("srv_rev")), orig(m))
+    a.saved_revs = saved
+    return a
+
+
+def steps(a, n, cond=None):
+    for _ in range(n):
+        a.step()
+        if cond and cond():
+            return True
+    return False
+
+
+def store_nicks(a, committed=False):
+    st = a.pcsync.committed if committed else a.pcsync.working
+    return [e["nick"] for b in st["boxes"] for e in b]
+
+
+# --- Platinum driving (real buttons through the app's DS core) -----------------------------------------------
+def press(a, k, after=40):
+    a.nds.button_press(k)
+    steps(a, 6)
+    a.nds.button_release(k)
+    steps(a, after)
+
+
+def storage_menu(a):
+    """The DEPOSIT / WITHDRAW / MOVE / MOVE ITEMS / SEE YA! menu is on the top screen (white box down to y=86;
+    the SOMEONE'S PC menu before it is one row shorter)."""
+    top = a.nds.screen_ndarray()[78:87, 12:100]
+    return int((top.min(axis=2) > 230).sum()) > 400
+
+
+def pt_open(a, mode):
+    """Pokémon Center PC (player in front of it): A boots it, SOMEONE'S PC, two text boxes, then the menu."""
+    for i in range(10):
+        if storage_menu(a):
+            break
+        press(a, "a")
+    if not storage_menu(a):
+        shot(a, "pt_open_failed.png")
+        return False
+    for _ in range({"deposit": 0, "withdraw": 1, "move": 2}[mode]):
+        press(a, "down", 10)
+    press(a, "a", 30)
+    ok = steps(a, 300, a.game.pc_open)
+    steps(a, 150)
+    return ok
+
+
+def pt_close(a):
+    """B out of the box UI, then out of the PC menus back to the overworld."""
+    for _ in range(8):
+        press(a, "b", 40)
+        if not a.game.pc_open():
+            break
+    for _ in range(8):
+        if a.game.is_safe():
+            break
+        press(a, "b", 40)
+    return steps(a, 200, a.game.is_safe)
+
+
+def species(rec):
+    return pk4.PK4(pk4.decrypt(rec)).species
+
+
+def nick(rec):
+    return pk4.PK4(pk4.decrypt(rec)).nickname
+
+
+def box_view(a, b=0):
+    return [(species(r), nick(r)) for r in a.game.box_raw(b) if r != pk4.EMPTY_BOX]
+
+
+def shot(a, name):
+    img = Image.frombytes("RGB", (256, 384), a.nds.screen_rgb())
+    img.save(tmp / name)
+    return tmp / name
+
+
+def party_species(a):
+    return [species(r[:136]) for r in a.game.party_raw()]
+
+
+# 1. Yellow ---------------------------------------------------------------------------------------------------
+Y = start("yellow", "pokecenter_pc.state")
+steps(Y, 300, lambda: Y.net.status == "online")
+check("Yellow online with the PC database on", Y.full and Y.pc_codec is not None and Y.net.status == "online")
+pa.open_pc(Y.pyboy)
+check("Yellow: deposit PIDGEY", pa.deposit(Y.pyboy, 1))
+pa.close_pc(Y.pyboy)
+check("Yellow: autosave commits", Y.autosave(force=True) and store_nicks(Y, True) == ["PIDGEY"])
+steps(Y, 300, lambda: Y.saved_revs)
+check("Yellow: server stored the PC", bool(Y.saved_revs))
+Y.shutdown()
+
+# 2. Platinum: converted PIDGEY + ?EGG stand-in ----------------------------------------------------------------
+P = start("platinum", "pt_pc.dsst")
+check("Platinum runs with the PC database on", P.ds and P.full and P.pc_codec is not None
+      and type(P.pc_codec).__name__ == "Gen4PC")
+steps(P, 300, lambda: P.net.status == "online")
+check("store loaded: PIDGEY", store_nicks(P) == ["PIDGEY"], store_nicks(P))
+egg2 = bytearray(32)
+egg2[0], egg2[2], egg2[3], egg2[6], egg2[7], egg2[31] = 152, 33, 45, 0x12, 0x34, 5
+egg2[8:11] = (135).to_bytes(3, "big")
+egg2[23], egg2[24] = 35, 40
+EGG = bytes(egg2) + text.encode("KRIS") + text.encode("EGG") + b"\x01"
+P.pcsync.working["boxes"][0].append({"id": "cegg", "origin": "crystal", "dex": 152, "level": 5, "nick": "EGG",
+                                     "ot": "KRIS", "otid": 0x1234, "gen1": None, "gen2": pcdb._b64(EGG), "gen4": None})
+P.pcsync.pending = True
+check("egg added to the store (committed)", P.autosave(force=True) and "EGG" in store_nicks(P, True))
+party0 = party_species(P)
+check("Platinum party: 2 x TURTWIG", party0 == [387, 387], party0)
+
+check("SOMEONE'S PC > WITHDRAW opens the box UI", pt_open(P, "withdraw"))
+check("open hook started a PC session", P.pcsync.session_open and P._pt_pc == "open", P._pt_pc)
+view = box_view(P)
+check("Platinum box 1 shows PIDGEY (converted) + ?EGG", view == [(16, "PIDGEY"), (132, "?EGG")], view)
+s1 = shot(P, "pt_1_box_converted_pidgey.png")
+press(P, "a", 40)                       # PIDGEY: WITHDRAW
+press(P, "a", 100)
+press(P, "right", 40)
+s2 = shot(P, "pt_2_box_standin_egg.png")
+press(P, "a", 40)                       # ?EGG: WITHDRAW
+press(P, "a", 100)
+check("the game let both into the party", party_species(P) == [387, 387, 16, 132], party_species(P))
+check("box 1 empty in the game", box_view(P) == [], box_view(P))
+check("PC closes (B)", pt_close(P))
+check("close detected: session ended", not P.pcsync.session_open and P._pt_pc is None)
+check("stand-in removed from the party again", party_species(P) == [387, 387, 16], party_species(P))
+check("?EGG back in the database (same entry), PIDGEY out", store_nicks(P) == ["EGG"] and
+      P.pcsync.working["boxes"][0][0]["id"] == "cegg" and P.pcsync.pending, store_nicks(P))
+check("player told the stand-in stays", any("Egg" in t[0] and "can't leave" in t[0] for t in P.toasts),
+      [t[0] for t in P.toasts])
+pid_party = P.game.party_raw()[2]
+pk = pk4.PK4(pk4.decrypt(pid_party))
+check("PIDGEY in the Platinum party: real Gen-4 mon (Lv, OT, stats)", pk.species == 16 and pk.ot_name == "ASH"
+      and pk.level(P.pc_codec.rom) >= 2 and pk.stats[0] > 0, (pk.ot_name, pk.stats))
+
+# 3. deposit PIDGEY -> box 1, TURTWIG -> box 16 -------------------------------------------------------------------
+check("DEPOSIT opens the box UI", pt_open(P, "deposit"))
+check("box 1 shows ?EGG only", box_view(P) == [(132, "?EGG")], box_view(P))
+press(P, "down", 30)                    # party slot 3 (PIDGEY)
+press(P, "a", 40)
+press(P, "a", 40)                       # STORE
+press(P, "a", 80)                       # Box 1
+check("PIDGEY deposited into box 1", party_species(P) == [387, 387] and (16, "PIDGEY") in box_view(P),
+      (party_species(P), box_view(P)))
+press(P, "up", 30)
+press(P, "a", 40)
+press(P, "a", 40)                       # STORE
+for _ in range(15):
+    press(P, "right", 20)               # Box 16
+press(P, "a", 80)
+check("TURTWIG deposited into box 16", party_species(P) == [387] and [s for s, _ in box_view(P, 15)] == [387],
+      (party_species(P), box_view(P, 15)))
+check("PC closes", pt_close(P))
+nicks = store_nicks(P)
+check("harvested: EGG + PIDGEY + TURTWIG in store box 1", sorted(nicks) == ["AAAAAAAAAA", "EGG", "PIDGEY"]
+      and all(len(b) == 0 for b in P.pcsync.working["boxes"][1:]), P.pcsync.working["boxes"])
+pid = next(e for e in P.pcsync.working["boxes"][0] if e["nick"] == "PIDGEY")
+check("PIDGEY is now a Platinum entry (gen4 = the game's bytes)", pid["origin"] == "platinum" and pid["gen4"]
+      and not pid["gen1"] and pid["dex"] == 16)
+check("player told about the box-16 fold", any("boxes 1-14" in t[0] for t in P.toasts), [t[0] for t in P.toasts])
+check("not committed until the autosave", P.pcsync.pending and store_nicks(P, True) == ["EGG"])
+n = len(P.saved_revs)
+check("autosave (overworld, idle) commits", P.game.is_safe() and P.autosave() and not P.pcsync.pending
+      and sorted(store_nicks(P, True)) == ["AAAAAAAAAA", "EGG", "PIDGEY"])
+steps(P, 300, lambda: len(P.saved_revs) > n)
+check("server stored the Platinum changes", len(P.saved_revs) > n)
+
+check("reopen", pt_open(P, "withdraw"))
+check("box 1 = ?EGG, PIDGEY, TURTWIG (slots 1-3); box 16 empty",
+      [s for s, _ in box_view(P)] == [132, 16, 387] and box_view(P, 15) == [], (box_view(P), box_view(P, 15)))
+shot(P, "pt_3_box_after_harvest.png")
+check("look-only visit changes nothing", pt_close(P) and not P.pcsync.pending)
+P.shutdown()
+
+# 4. Yellow again ---------------------------------------------------------------------------------------------------
+Y2 = start("yellow", "pokecenter_pc.state")
+steps(Y2, 120)
+pa.open_pc(Y2.pyboy)
+box = [n for _, n in pa.box(Y2.pyboy)]
+check("Yellow box: ?EGG, PIDGEY (converted back), ?AAAAAAAAA (the Turtwig)", box == ["?EGG", "PIDGEY", "?AAAAAAAAA"],
+      box)
+rec = Y2.pc_codec.read_boxes()[Y2.pc_codec.current_box()]
+check("Yellow PIDGEY is a real Gen-1 Pidgey with its OT", Y2.rom.dex_no(rec[1][0]) == 16
+      and text.decode(rec[1][33:44]) == "ASH", rec[1].hex())
+pa.close_pc(Y2.pyboy)
+check("Yellow: database unchanged by a look-only visit", sorted(store_nicks(Y2)) == ["AAAAAAAAAA", "EGG", "PIDGEY"])
+Y2.shutdown()
+for p in (s1, s2):
+    print("screenshot:", p)
+print("\nfiles in", tmp)
+print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}")
+sys.exit(1 if FAILS else 0)
