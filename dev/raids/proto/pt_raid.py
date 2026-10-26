@@ -18,7 +18,7 @@ import struct
 import sys
 
 from common import STATES, OUT, check, info, done
-from pt_common import (Caller, FieldBattleDTO_New, FieldBattleDTO_Init, CreateWildMon_Scripted,
+from pt_common import (EpilogueCaller as Caller, FieldBattleDTO_New, FieldBattleDTO_Init, CreateWildMon_Scripted,
                        Encounter_NewVsWild, HEAP_ID_FIELD2, BATTLE_TYPE_WILD_MON, DTO_BATTLE_STATUS,
                        BATTLE_STATUS_LEGENDARY, S_FIELD_SYSTEM, OV6_CODE, Regs)
 from ds import DS
@@ -73,6 +73,7 @@ class RaidPT:
         self.cur_moves = list(moves)
         self.hp_zero_at = None
         self.on_wait = None
+        self._last_wait = None
         d.emu.memory.register_exec(HOOK_SELECT_INPUT, self._hook(self._on_select_input))
         d.emu.memory.register_exec(HOOK_CATCH_CMP, self._hook(self._on_catch_cmp))
 
@@ -151,6 +152,10 @@ class RaidPT:
         if d.r16(bm) != self.species:
             return
         if self.phase == "starting":
+            # the battle mon is filled in over a few frames: wait until it is complete (max HP set, full HP)
+            if not (d.r32(bm + BM_MAX_HP) and d.r32(bm + BM_CUR_HP) == d.r32(bm + BM_MAX_HP)
+                    and d.r8(bm + 0x34) == self.level):
+                return
             self._override(ctx)
             self.phase = "fight"
         cmd = d.r32(ctx + CTX_COMMAND)
@@ -177,20 +182,19 @@ class RaidPT:
         self.last_hp = hp
         if self.phase == "fight" and self.server.pool == 0 and self.clamp:
             self.enter_catch(ctx)
-        # timer
-        waiting = cmd == CONTROL_COMMAND_SELECTION_INPUT and state in WAITING
-        if waiting and self.wait_since is None:
-            self.wait_since = self.frame
-            self.log("waiting (%s)" % WAITING[state])
+        # timer: waiting = the controller's command-selection state is one that needs the player
+        now = WAITING.get(state) if cmd == CONTROL_COMMAND_SELECTION_INPUT else None
+        if now and now != self._last_wait:
+            if self.wait_since is None:
+                self.wait_since = self.frame
+            self.log("waiting (%s)" % now)
             if self.on_wait:
-                self.on_wait(self, WAITING[state])
-        elif self.wait_since is not None and (cmd != CONTROL_COMMAND_SELECTION_INPUT or state in LOCKED):
+                self.on_wait(self, now)
+        if self.wait_since is not None and (cmd != CONTROL_COMMAND_SELECTION_INPUT or state in LOCKED):
             self.decisions.append((self.wait_since, self.frame))
             self.wait_since = None
             self.log("locked in")
-        elif self.wait_since is not None and waiting and WAITING[state] != getattr(self, "_last_wait", None):
-            pass
-        self._last_wait = WAITING.get(state) if waiting else None
+        self._last_wait = now
         self.last_cmd = cmd
 
     def _override(self, ctx):

@@ -24,6 +24,79 @@ from ctypes import c_char_p
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "platinum"))
 
+# --- v2 (works in every field map): the epilogue of ExecuteFieldProcesses (the field app's main, every frame)
+EPILOGUE = 0x0203CCE0                     # movs r0,#0 ; >>> pop {r3, pc} <<<  (the normal "not finished" return)
+EPILOGUE_CODE = bytes.fromhex("08bd")     # pop {r3, pc}
+
+
+class EpilogueCaller:
+    """Call game functions (<= 4 args) from Python, one per field frame, with only register/memory writes.
+
+    At `pop {r3, pc}` (EPILOGUE, frame = [r3 slot, return address]):
+      1. job queued: remember the frame + r0, put our function in the frame's PC slot and our 4th argument in
+         its r3 slot, r0-r2 = arguments, LR = EPILOGUE|1. The pop "returns" into our function, which returns to
+         EPILOGUE (its own pop/bx lr uses the LR we set).
+      2. back at EPILOGUE: r0 = our result; write the original frame back just below the current SP, set
+         SP = that address and r0 = the original return value. The pop now returns to the real caller.
+    A DeSmuME exec hook cannot redirect execution by writing r15 (the instruction is already fetched), but the
+    pop reads the stack and the stack is ours to write."""
+
+    def __init__(self, d):
+        self.d = d
+        self.r = Regs(d.emu)
+        self.queue = []
+        self.cur = None
+        self.log = []
+        d.emu.memory.register_exec(EPILOGUE, self._cb)
+
+    def _cb(self, addr, size):
+        try:
+            self._on_pop()
+        except Exception as e:  # noqa: BLE001
+            self.log.append("hook error %r" % e)
+        return 0
+
+    def call(self, fn, args, on_result=None):
+        self.queue.append((fn, list(args), on_result))
+
+    def busy(self):
+        return bool(self.queue) or self.cur is not None
+
+    def _on_pop(self):
+        d, r = self.d, self.r
+        if d.read(EPILOGUE, 2) != EPILOGUE_CODE:
+            return
+        sp = r["r13"]
+        if self.cur is None:
+            if not self.queue:
+                return
+            fn, args, cb = self.queue.pop(0)
+            args = args + [0] * (4 - len(args))
+            self.cur = {"cb": cb, "sp": sp, "frame": (d.r32(sp), d.r32(sp + 4)), "r0": r["r0"]}
+            d.w32(sp, args[3])                # the pop loads r3 from here
+            d.w32(sp + 4, fn | 1)             # ... and PC from here
+            for i in range(3):
+                r["r%d" % i] = args[i]
+            r["r14"] = EPILOGUE | 1
+            self.log.append("call %08X %s" % (fn, ["%X" % a for a in args]))
+            return
+        cur = self.cur
+        if sp != cur["sp"] + 8:                # not our function coming back (shouldn't happen)
+            self.log.append("unexpected sp %08X" % sp)
+            return
+        result = r["r0"]
+        base = cur["sp"]
+        d.w32(base, cur["frame"][0])
+        d.w32(base + 4, cur["frame"][1])
+        r["r13"] = base
+        r["r0"] = cur["r0"]
+        self.cur = None
+        self.log.append("result %08X" % result)
+        if cur["cb"]:
+            cur["cb"](result)
+
+
+# --- v1 (only where the map runs it, e.g. Route 202): a table dispatcher's blx r4
 HOOK_CALL = 0x02067DBC
 HOOK_RET = 0x02067DBE
 DISPATCH_ENTRY = 0x02067DA9
