@@ -20,7 +20,6 @@ dev/e2e/platinum_boot.py).
 """
 import io
 import os
-import struct
 import sys
 import tempfile
 
