@@ -62,3 +62,4 @@
   can't start on a PC, the app falls back to a Game Boy game with a red message instead of crash-looping.
   COORDINATOR: please commit+push again (release.yml, app.py, nds_core.py) - I'll re-run the build to read where
   DeSmuME puts its .dsv on Windows.
+- 2026-10-26 03:30 explorer: dev/states/pt_title.dsst = power-on (reset) with the pt_starter battery save, intro skipped with START x2, "PRESS START" title screen (Giratina). START then shows the main menu with CONTINUE (LUCAS, 0:10, 0 badges) selected by default; A loads the save.

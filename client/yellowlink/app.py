@@ -272,8 +272,11 @@ class App(ChallengeMixin, TradeMixin):
             self.view_w, self.view_h = nds_core.SCREEN_W, 2 * nds_core.SCREEN_H
         else:
             self.view_w, self.view_h = 160 + 2 * self.off_x, 144 + 2 * self.off_y
-        self.scale = int(self.cfg.get(self._scale_key(), 0) or 0) or self._fit_scale()
-        self.game_w, self.game_h = self.view_w * self.scale, self.view_h * self.scale
+        if self.ds:      # the DS view is tall: half steps (1.5x) so it still fits laptops / 125 % Windows scaling
+            self.scale = (round(float(self.cfg.get("ds_scale", 0) or 0) * 2) / 2) or self._fit_scale()
+        else:
+            self.scale = int(self.cfg.get(self._scale_key(), 0) or 0) or self._fit_scale()
+        self.game_w, self.game_h = int(self.view_w * self.scale), int(self.view_h * self.scale)
         h = max(self.game_h, 480)
         self.screen = pygame.display.set_mode((self.game_w + ui.SIDEBAR_W, h))
         self.game_surf = pygame.Surface((self.view_w, self.view_h))
@@ -290,6 +293,9 @@ class App(ChallengeMixin, TradeMixin):
             dw, dh = sizes[0] if sizes else (1920, 1080)
         except (pygame.error, AttributeError):
             dw, dh = 1920, 1080
+        if self.ds:
+            fit = int(min((dw - ui.SIDEBAR_W - 40) / self.view_w, (dh - 100) / self.view_h) * 2) / 2
+            return max(1.0, min(4.0, fit))
         fit = min((dw - ui.SIDEBAR_W - 40) // self.view_w, (dh - 100) // self.view_h)
         return max(1, min(4, fit))
 
@@ -1583,7 +1589,8 @@ class App(ChallengeMixin, TradeMixin):
             self.cfg["show_names"] = not self.cfg.get("show_names", True)
             self.cfg.save()
         elif k in (pygame.K_F5, pygame.K_F6):
-            self.cfg[self._scale_key()] = max(1, min(6, self.scale + (1 if k == pygame.K_F6 else -1)))
+            step = (0.5 if self.ds else 1) * (1 if k == pygame.K_F6 else -1)
+            self.cfg[self._scale_key()] = max(1, min(6, self.scale + step))
             self.cfg.save()
             self._make_window()
         elif k == pygame.K_u and self.update_available:
