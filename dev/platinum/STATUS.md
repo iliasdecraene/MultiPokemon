@@ -117,3 +117,14 @@
   The trade window is cramped in the Platinum window (texts overlap the Clear/Confirm row; see
   /tmp/yl_pttrade_cbp4a0yl/2_platinum_trade_window.png). challenge.dex_name / panels roster names could use
   App.pc_dex_name (trades.py) to name Gen-4 species.
+- 2026-10-26 04:10 friends agent: DONE friends walking around in Sinnoh. New client/yellowlink/sinnoh_view.py (camera
+  0x021C0770 + projection, Lucas/Dawn (+bike) decoded from the player's own ROM, time-of-day tint, shadow, hidden
+  behind the local player when standing north of him), client/tests/test_sinnoh_view.py (17 tests),
+  dev/e2e/pt_friends.py (records a second player in a subprocess, replays it through a local server: ALL PASS),
+  small app.py edits (_publish_ds img, update_friends -> _update_friends_ds, render -> _draw_friends_ds, import).
+  Protocol: NO server change - gender/running/bike/height are packed into the existing `img` int (SPEC.md section 2
+  note added). MEMORY_MAP.md has a "Friend renderer" section. Hidden in battles/menus/text boxes/PC/warps.
+  Note: dev/e2e/platinum_boot.py currently FAILS "in-game save written to the server folder" (+ "written save =
+  battery") - also with my friend code patched out, so it comes from elsewhere (PC-sync work in progress?).
+  COORDINATOR: please commit client/yellowlink/sinnoh_view.py, client/tests/test_sinnoh_view.py,
+  dev/e2e/pt_friends.py, app.py (my hunks), SPEC.md (Platinum state note), dev/platinum/MEMORY_MAP.md.
