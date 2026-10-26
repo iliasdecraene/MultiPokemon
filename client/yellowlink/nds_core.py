@@ -49,6 +49,10 @@ VOLUME_MAX = 128                    # DeSmuME's volume is SDL_MixAudio's 0..128
 BUTTONS = {"a": 1 << 0, "b": 1 << 1, "select": 1 << 2, "start": 1 << 3, "right": 1 << 4, "left": 1 << 5,
            "up": 1 << 6, "down": 1 << 7, "r": 1 << 8, "l": 1 << 9, "x": 1 << 10, "y": 1 << 11}
 
+class DSUnavailable(RuntimeError):
+    """The DS emulator can't run on this PC (library missing/broken, no video driver, ROM refused)."""
+
+
 _EMU = None          # the one DeSmuME of this process
 _ACTIVE = None       # the NDSCore currently using it
 
@@ -93,7 +97,7 @@ def get_emulator():
         try:
             _EMU = DeSmuME(dl) if dl else DeSmuME()
         except Exception as e:
-            raise RuntimeError(f"the DS emulator could not start: {e}") from e
+            raise DSUnavailable(f"the DS emulator could not start: {e}") from e
         atexit.register(_forget)
     return _EMU
 
@@ -187,7 +191,12 @@ class NDSCore:
         self.closed = False
         self.rom_path = rom_path
         self.tmp = _staging_dir()
-        self.emu.open(_short_path(os.path.abspath(rom_path)))
+        try:
+            self.emu.open(_short_path(os.path.abspath(rom_path)))
+        except Exception as e:
+            _ACTIVE = None
+            shutil.rmtree(self.tmp, ignore_errors=True)
+            raise DSUnavailable(f"the DS emulator could not open the game file: {e}") from e
         lib.desmume_input_keypad_update(0)
         lib.desmume_input_release_touch()
         self.set_volume(volume)

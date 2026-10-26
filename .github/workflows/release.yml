@@ -83,6 +83,8 @@ jobs:
             set -e
             echo "--- selftest ($mode audio): exit $CODE"
             cat "smoke/selftest-$mode.txt" || echo "::error::no selftest report ($mode)"
+            # also as an annotation (readable with `gh run view` without downloading the log)
+            echo "::notice title=DS selftest ($mode audio)::$(tr '\n' ' ' < "smoke/selftest-$mode.txt" 2>/dev/null)"
             if [[ $CODE -ne 0 ]] || ! grep -q "^OK$" "smoke/selftest-$mode.txt"; then
               echo "::error::YellowLink.exe could not start the DS emulator ($mode audio)"
               exit 1
@@ -90,6 +92,7 @@ jobs:
           done
           echo "--- files DeSmuME left next to the exe (should be none):"
           ls -la dist
+          echo "::notice title=dist after the DS selftest::$(ls dist | tr '\n' ' ')"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

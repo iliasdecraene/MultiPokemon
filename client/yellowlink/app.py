@@ -252,6 +252,10 @@ class App(ChallengeMixin, TradeMixin):
             "name": cfg["name"], "uid": cfg["uid"], "key": cfg.get("room_key", ""), "version": __version__})
         self.net.start()
         self.sys_msg(f"Welcome, {cfg['name']}! Press F1 for help, F3 to report a problem.")
+        ds_error = cfg.pop("_ds_error", None)
+        if ds_error:
+            self.sys_msg(f"Pokémon Platinum couldn't start ({ds_error}). Press F3 to send a report.", ui.BAD)
+            self.toast("Pokémon Platinum couldn't start - press F3 to send a report.", 8, ui.BAD)
         log.info("config: name=%s server=%s rom=%s", cfg["name"], cfg["server_url"], cfg["rom_path"])
         if not cfg.get("seen_help"):
             self.mode = "help"  # show the controls once on first launch
@@ -2042,7 +2046,18 @@ def _main(argv, cfg, diag):
             return
     while True:
         errors_before = diag.errors
-        app = App(cfg, diag)
+        try:
+            app = App(cfg, diag)
+        except nds_core.DSUnavailable as e:
+            # never get stuck crashing on start: go back to a Game Boy game and say why
+            log.exception("DS game could not start")
+            lib = library.Library(cfg, app_dir())
+            other = next((g for g in lib.games if library.GAMES_BY_ID[g].platform != "nds"), None)
+            if other is None:
+                raise
+            lib.set_current(other)
+            cfg["_ds_error"] = str(e)
+            continue
         app.run()
         if app.switch_to:                                 # another server: its own saves, PC and challenges
             cfg.switch_server(app.switch_to)
