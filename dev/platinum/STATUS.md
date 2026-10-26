@@ -317,3 +317,21 @@
   checks, personal settings differ), soullink_yellow, soullink_crystal (1st try) ALL PASS.
   COORDINATOR: uncommitted: SPEC.md, client/yellowlink/{app,challenge,panels}.py, client/tests/test_challenge_rules.py
   (new), test_challenge_platinum.py, dev/e2e/{challenge_flow,challenge_flow_platinum,soullink_platinum}.py, STATUS.md.
+- 2026-10-26 sl-mem: REVIEW FIXES (platinum.py Soul Link section, ndsrom.py, pk4.calc_stats, gen_soullink_areas.py):
+  1. battle_info() also returns `keys` / `dexes` (all wild mons, first = key/dex; verified on the double with Cheryl)
+     - match a catch by key. A wild mon record unreadable this frame -> None for that frame (not the next mon).
+  2. daycare_records() returns None (not a shorter list) when a slot reads "bad" -> "unknown, skip this scan".
+  3. Forms: ndsrom.PlatinumData loads all 508 personal entries; personal_index(dex, form) / form_base_stats(dex, form)
+     (pret Pokemon_GetFormNarcIndex); pk4.calc_stats / to_party use the form's base stats when the ROM data has
+     form_base_stats (Rotom appliances, Giratina-O, Shaymin-Sky, Deoxys, Wormadam).
+  4. Eggs, real (Day Care man + real hatch): a party egg is level 1, HP 11/11 -> passes party_section_ok();
+     party_checked() is clean with it; the hatched mon keeps its key.
+  5. NEW PlatinumMemory.observe_stable(): call it in the referee view's safe() check (every check is fine). It
+     snapshots party (party_checked) + current box with the emulator frame counter and is True when the snapshot
+     equals the last clean one from an EARLIER frame (not necessarily adjacent: with a 6-mon party the game decrypts
+     a mon on every other frame). move_party_to_box / move_box_to_party now return False (nothing written, try
+     again later) unless the state was seen identical on an earlier frame (by observe_stable or an earlier attempt).
+     reset_stable() forgets the last look (after loading a save state). Without observe_stable() wired in, a forced
+     move fails once and succeeds on a later attempt.
+  6. Area keys <= 37 chars (server AREA_RE 40 incl. "*n"): map 352 -> 'unused_eterna_gate_route_206'; generator
+     refuses longer keys; unit test reads the server's regex.

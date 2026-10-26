@@ -208,8 +208,7 @@ class PlatinumMemory:
     def __init__(self, bus, rom=None):
         self.m = bus
         self.rom = rom          # ndsrom.PlatinumData: needed only by the Soul Link forced moves (move PP, stats)
-        self._obs = None        # (frame, snapshot) of the last stable-state observation (see observe_stable)
-        self._obs_prev = None   # the one before it, from an earlier frame
+        self._obs = None        # (frame, snapshot) of the last clean observation (see observe_stable)
 
     # raw access ------------------------------------------------------------------------------------------
     def r8(self, a):
@@ -730,21 +729,29 @@ class PlatinumMemory:
         return tuple(party), box, tuple(self.box_raw(box)) if 0 <= box < NUM_BOXES else ()
 
     def observe_stable(self) -> bool:
-        """Call once per frame (or every few frames) while the player is safe - the referee's view does it in
-        safe(): records what the party and the current box look like and returns True when they read clean
-        (party_checked) and byte-identical to the previous observation made on an EARLIER emulated frame.
+        """Call every frame (or every few frames) while the player is safe - the referee's view should do it in
+        its safe() check. Records what the party and the current box look like and returns True when they read
+        clean (party_checked) and byte-identical to the last clean observation made on an EARLIER emulated frame.
 
         Why: the game decrypts records in place in the middle of its frame work; party_checked()'s "two reads
-        agree" happens within one paused frame, so it can't see an operation that is still going on. The forced
-        moves (move_party_to_box / move_box_to_party) only write when the state they are about to change was
-        observed identical on an earlier frame - by this method or by an earlier attempt of the move itself."""
+        agree" happens within one paused frame, so it can't see an operation that is still going on. The two
+        clean reads need not be on adjacent frames: with a 6-mon party the game works on the lead on about every
+        other frame, so adjacent clean frames may never come. The forced moves (move_party_to_box /
+        move_box_to_party) only write when the state they are about to change passes this check - against an
+        observation by this method or by an earlier attempt of the move itself."""
         snap = self._move_snapshot()
+        if snap is None:
+            return False
         f = self._frame()
-        if self._obs is not None and (f is None or self._obs[0] != f):
-            self._obs_prev = self._obs
+        last = self._obs
+        if last is not None and last[1] == snap:
+            return f is None or last[0] != f
         self._obs = (f, snap)
-        prev = self._obs_prev
-        return snap is not None and prev is not None and prev[1] == snap
+        return False
+
+    def reset_stable(self):
+        """Forget observe_stable()'s last look (e.g. after loading a save state)."""
+        self._obs = None
 
     def _stable_for_move(self) -> bool:
         """True if the current party + current box equal an observation from an earlier frame. Otherwise the

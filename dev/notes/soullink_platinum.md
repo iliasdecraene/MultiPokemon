@@ -125,13 +125,16 @@ an empty pocket → True.
 * Both need `PlatinumMemory(bus, rom)` / `pm.rom = ndsrom.PlatinumData` (move PP, base stats, growth) — the app sets
   `game.rom = plat_data`.
 * **Cross-frame stability:** `party_checked()`'s "two reads agree" happens inside one paused DS frame, so it can't
-  see an operation the game is still in the middle of. `observe_stable()` records (party via party_checked, current
+  see an operation the game is still in the middle of. `observe_stable()` snapshots (party via party_checked, current
   box id, the current box's 30 raw slots) with the emulator's frame counter (`NDSCore.frame_count` / `ds.DS.frame`)
-  and returns True when it equals the observation from an EARLIER frame. Both forced moves call it first and return
-  False ("try again later", nothing written) unless the state was already seen identical on an earlier frame — by a
-  previous `observe_stable()` (the referee's view should call it in its safe() check) or a previous attempt of the
-  move. Real game: an unobserved first attempt and a second one on the same frame write nothing; the move then went
-  through on a later frame (with a 6-mon party whose lead is decrypted in place on about half the frames).
+  and returns True when the snapshot is clean and byte-identical to the last CLEAN snapshot taken on an EARLIER
+  frame. The two clean reads need not be adjacent: with a 6-mon party the game decrypts the lead on about every
+  other frame, so adjacent clean frames may never come (the first version demanded adjacent frames and a forced move
+  never went through in a rebuilt fixture). Both forced moves call it first and return False ("try again later",
+  nothing written) unless the state was already seen identical on an earlier frame — by a previous
+  `observe_stable()` (the referee's view should call it in its safe() check) or a previous attempt of the move.
+  `reset_stable()` forgets the last look (verify script: after loading a save state). Real game: an unobserved first
+  attempt and a second one on the same frame write nothing; the move goes through a few frames later.
 * Stats use the mon's **form** (`pk4.calc_stats` → `PlatinumData.form_base_stats`; pret Pokemon_GetFormNarcIndex:
   Deoxys forms 1-3 → personal 496-498, Wormadam 1-2 → 499-500, Giratina Origin → 501, Shaymin Sky → 502, Rotom 1-5 →
   503-507; values checked against the ROM's personal NARC, which has 508 entries). Before, a withdrawn Rotom
@@ -166,8 +169,9 @@ own mons: negligible. `mon_info(rec)` (Platinum extra) = {key, dex, hp (party; �
 
 ## Gift Pokémon / eggs
 
-**Eggs, real:** the Day Care man's egg (RAM: Daycare.offspringPersonality = 0x12345678 at body+0x1654+0x1D8 = "egg
-waiting"; talking to him runs the game's egg creation) is a level-1 party record with HP 12/12 → it passes
+**Eggs, real:** the Day Care man's egg (RAM: the two Day Care mons rewritten as a female/male pair of the same
+species, Daycare.offspringPersonality = 0x12345678 at body+0x1654+0x1D8 = "egg waiting"; talking to him runs the
+game's egg creation; with an incompatible pair the game makes a species-0 egg, which `mon_info()` reports as None) is a level-1 party record with HP 12/12 → it passes
 `party_section_ok()`, `party_checked()` is clean on ~half the frames as usual (the lead's in-place decryption),
 `mon_info()['egg']` True, key = 12345678 + the player's TID/SID. Hatch (RAM: the egg's cycles 0, Day Care step
 counter 254 at +0x1DC): the game's hatch scene runs on the next step; the hatched BIDOOF has the same key.

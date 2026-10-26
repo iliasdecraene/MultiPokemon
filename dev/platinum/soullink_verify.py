@@ -62,6 +62,7 @@ class Rig:
     # --- states / time --------------------------------------------------------------------------------
     def load(self, name):
         self.d.load(st(name))
+        self.pm.reset_stable()          # a reloaded state is a new timeline: forget observe_stable()'s last look
         self.d.run(2)
 
     def save(self, name):
@@ -207,7 +208,7 @@ class Rig:
 # ---------------------------------------------------------------------------------------------------------
 def party_infos(pm):
     """mon_info of the party as party_checked() reads it (None while the game is mid-update)."""
-    for _ in range(10):
+    for _ in range(120):
         p = pm.party_checked()
         if p is not None:
             return [P.mon_info(r) for r in p]
@@ -390,7 +391,7 @@ def build_pc5(rig):
     rig.load("pt_sl_pc6.dsst")
     while rig.pm.party_checked() is None:
         rig.d.run(1)
-    forced(rig, rig.pm.move_party_to_box, 5)
+    ok(forced(rig, rig.pm.move_party_to_box, 5) and rig.pm.party_count() == 5, "pt_sl_pc5: 6th mon boxed")
     rig.settle()
     rig.save("pt_sl_pc5.dsst")
 
@@ -600,7 +601,8 @@ def check_faint(rig):
     note("slots before the faint: %s" % sorted(set(map(str, log[:zero[0] if zero else None]))))
     ok(fainted and len(zero) >= 2 and zero[1] == zero[0] + 1 and all(s in (None, (0, 1)) for s in log[:zero[0]]),
        "lead at 1 HP: battle_party_slot() (0, 1) ... then (0, 0) on consecutive frames when it faints")
-    rig.run(300)
+    rig.wait(rig.yes_no_shown, 3000)                # "Use next Pokémon?" / "Flee"
+    rig.run(40)
     rig.press("a", 80)                              # "Use next Pokémon"
     rig.press("a", 80)
     rig.touch(190, 30, 60)                          # party slot 2
@@ -1066,12 +1068,22 @@ def check_safari(rig):
 
 
 def check_egg(rig):
-    """A real egg from the Day Care man (the game's Daycare_GiveEggToPlayer; RAM: Daycare.offspringPersonality
-    set = "an egg is waiting"), then a real hatch (RAM: the egg's cycles 0 + Day Care step counter 254)."""
+    """A real egg from the Day Care man (the game's Daycare_GiveEggToPlayer; RAM: the two Day Care mons made a
+    female/male pair of the same species, Daycare.offspringPersonality set = "an egg is waiting" - with an
+    incompatible pair the game makes a species-0 egg, which mon_info() reports as None), then a real hatch (RAM:
+    the egg's cycles 0 + Day Care step counter 254)."""
     rig.load("pt_sl_daycare.dsst")
     pm, d = rig.pm, rig.d
     dc = body(pm) + P.PAGE_DAYCARE
-    d.w32(dc + 2 * P.DAYCARE_MON_SIZE, 0x12345678)          # Daycare.offspringPersonality
+    # a compatible pair: the first Day Care mon twice, female + male (gender comes from the PID's low byte)
+    parent = pk4.PK4(pk4.decrypt(pm.daycare_records()[0]))
+    ratio = rig.rom.gender_ratio(parent.species)
+    for i, low in enumerate((0x00, 0xFE)):
+        pk = pk4.PK4(parent.plain())
+        pk.pid = (parent.pid & ~0xFF) | low
+        pk.gender_bits = pk4.gender_of(ratio, pk.pid)
+        d.write(dc + i * P.DAYCARE_MON_SIZE, pk.encrypted())
+    d.w32(dc + 2 * P.DAYCARE_MON_SIZE, 0x12345678)          # Daycare.offspringPersonality: an egg is waiting
     rig.step("down", 7)                                      # out of the Day Care: Solaceon Town (553, 646)
     rig.settle()
     rig.step("down", 2)
@@ -1121,7 +1133,7 @@ def check_egg(rig):
         rig.press("b", 40)
     rig.settle()
     hatched = party_infos(pm)[-1]
-    ok(not hatched["egg"] and hatched["dex"] == egg["dex"] and hatched["key"] == egg["key"],
+    ok(not hatched["egg"] and hatched["dex"] == egg["dex"] == parent.species and hatched["key"] == egg["key"],
        "the egg hatched (real hatch scene): species %d, mon_key unchanged (%s)" % (hatched["dex"], hatched["key"]))
 
 
