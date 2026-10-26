@@ -201,3 +201,6 @@
      marks/held item (Gen4PC.same_mon). Box-edit matching uses same_mon too (no key/distance guessing any more).
   + _pt_pc_poll "closing" guards box_slot_addr() == None (save gone -> PC session rolled back after 2 s).
   Files: pk4.py, platinum_pc.py, pcdb.py, app.py (PC parts), tests/test_platinum_pc.py, dev/e2e/pt_pctest.py.
+
+## Exp Share All (2026-10-26 afternoon) - branch exp-share-all, checkout /home/claude/yl-exp
+- coordinator: modern rule (Gen 6+): participants 100% each (no split), non-participants 50%, fainted/eggs 0. Interface: each adapter module gets install_exp_share(emu, enabled) -> handle (handle.remove()); enabled() is checked at every exp award. Coordinator owns app.py/panels.py/ui.py/config.py (Settings panel + wiring).
