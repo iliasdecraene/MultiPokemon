@@ -296,7 +296,7 @@ class PlatinumMemory:
         x, y   tile coords (y = the DS z axis; = destination tile while stepping, like the game's own coords)
         h      height (MapObject y)
         px, py smooth position in 1/16 tile units, = x*16 / y*16 when standing (pos - 8: pos is the tile centre)
-        ph     smooth height (pos.y, 16 per tile? (pos.y = 8*h observed))
+        ph     smooth height (pos.y in the same units; observed pos.y = 8*h)
         facing 0 up, 1 down, 2 left, 3 right (game DIR_*); dir = moving direction
         moving bool, running bool (RUN actions), action = MovementAction, state = 0 walk/1 bike/2 surf...
         gender 0 boy / 1 girl
@@ -528,8 +528,8 @@ def _tick_takes_render(core) -> bool:
 
 def fast_continue(core, on_progress=None, max_frames: int = 7200) -> str:
     """From power-on: skip the intro movie + title screen and pick CONTINUE. Returns 'loaded' (player in control in
-    the overworld), 'no save' (stops on the main menu, which then only offers NEW GAME - nothing is pressed there)
-    or 'timeout'.
+    the overworld), 'no save' (returned as soon as the intro starts, without pressing anything: with no save,
+    START on the title screen leads straight into the new-game intro) or 'timeout'.
 
     Verified (dev/platinum/verify.py): START/A are only pressed while sApplication.currOverlayID is 77
     (game_opening: logos, intro movie, PRESS START), so a stray press can never pick NEW GAME; on the main menu
@@ -540,15 +540,22 @@ def fast_continue(core, on_progress=None, max_frames: int = 7200) -> str:
     f = 0
     last_press = -999
     menu_since = None
+    in_game_since = None
     toggle = 0
     while f < max_frames:
         if pm.in_game():
-            # wait for the map fade-in / load task to finish
-            if pm.is_safe():
+            # wait for the map fade-in / load task to finish (or give up waiting if a script keeps running)
+            if in_game_since is None:
+                in_game_since = f
+            if pm.is_safe() or f - in_game_since > 900:
                 _run(core, 10)
                 return "loaded"
         else:
             ov = pm.top_overlay()
+            if ov in (OVERLAY_GAME_OPENING, OVERLAY_MAIN_MENU) and not pm.has_save():
+                # without a save the main menu jumps straight into NEW GAME (main_menu.c: isNewGame ->
+                # NEXT_APP_GAME_INTRO), so never press anything: the game keeps looping intro <-> title.
+                return "no save"
             if ov == OVERLAY_GAME_OPENING and f - last_press >= 30:
                 _press(core, ("start", "a")[toggle])
                 toggle ^= 1
@@ -557,8 +564,6 @@ def fast_continue(core, on_progress=None, max_frames: int = 7200) -> str:
             elif ov == OVERLAY_MAIN_MENU:
                 if menu_since is None:
                     menu_since = f
-                if not pm.has_save():
-                    return "no save"
                 if f - menu_since >= 40 and f - last_press >= 60:
                     _press(core, "a")
                     last_press = f

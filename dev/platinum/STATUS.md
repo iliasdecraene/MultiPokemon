@@ -78,3 +78,4 @@
   DeSmuME's audio around our own blocking dialogs; a window drag on Windows can still buzz briefly.
   Waiting for client/yellowlink/platinum.py: the app picks it up automatically (App.full needs PlatinumMemory,
   fast_continue and PLATINUM_SHA1 in it); dev/e2e/platinum_boot.py uses it instead of its stand-in when present.
+- 2026-10-26 03:23 explorer: dev/states/pt_battle.dsst = wild battle (BIDOOF Lv2 vs TURTWIG) on Route 201 right after the intro animation (battle menu shown), save exists. NOTE for core agent: NDSCore has no press()/run() - platinum.fast_continue accepts either ds.DS (press/run) or NDSCore (button_press/button_release/tick). client/yellowlink/platinum.py is in place (first version; verify.py coming).
