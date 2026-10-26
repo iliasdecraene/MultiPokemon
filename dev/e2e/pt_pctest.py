@@ -286,6 +286,29 @@ check("reopen", pt_open(P, "withdraw"))
 held = [pk4.PK4(pk4.decrypt(r)).item for r in P.game.box_raw(0)[:3]]
 check("box: ?EGG without an item, PIDGEY with Leftovers", held == [0, LEFTOVERS, 0], held)
 check("closing again returns nothing more", pt_close(P) and leftovers(P) == 1 and P.pcsync.count() == 3)
+
+# 3c. PIDGEY is offered in a trade (locked); taking its Leftovers into the bag is undone (no duplicate item) ----
+pid_entry = dict(P.pcsync.working["boxes"][0][1])
+P.pcsync.lock("t-e2e", [pid_entry["id"]])
+check("MOVE ITEMS again", pt_open(P, "items"))
+press(P, "right", 60)
+press(P, "a", 70)                       # pick up PIDGEY's Leftovers: GIVE / BAG / INFO / CANCEL
+press(P, "down", 30)
+press(P, "a", 90)                       # BAG
+for _ in range(2):
+    if pk4.PK4(pk4.decrypt(P.game.box_raw(0)[1])).item == 0 and leftovers(P) == 2:
+        break
+    press(P, "a", 70)
+check("the game moved PIDGEY's Leftovers into the bag", pk4.PK4(pk4.decrypt(P.game.box_raw(0)[1])).item == 0
+      and leftovers(P) == 2, (pk4.PK4(pk4.decrypt(P.game.box_raw(0)[1])).item, leftovers(P)))
+check("PC closes", pt_close(P))
+steps(P, 30)
+check("that Leftovers left the bag again (it stays with PIDGEY, who is in a trade)", leftovers(P) == 1, leftovers(P))
+check("PIDGEY's entry unchanged, nothing new", P.pcsync.working["boxes"][0][1] == pid_entry and P.pcsync.count() == 3)
+P.pcsync.unlock("t-e2e")
+check("reopen: PIDGEY holds Leftovers again", pt_open(P, "withdraw")
+      and pk4.PK4(pk4.decrypt(P.game.box_raw(0)[1])).item == LEFTOVERS)
+check("and closing changes nothing", pt_close(P) and leftovers(P) == 1 and P.pcsync.count() == 3)
 P.shutdown()
 
 # 4. Yellow again ---------------------------------------------------------------------------------------------------

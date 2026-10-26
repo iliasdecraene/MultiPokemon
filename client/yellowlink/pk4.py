@@ -195,9 +195,39 @@ def valid(data: bytes) -> bool:
     return checksum(p) == struct.unpack_from("<H", p, 6)[0]
 
 
-def _plain_of(data: bytes) -> bytes:
-    """Accept encrypted or plain bytes (whichever has a valid checksum); returns plain."""
+FLAG_PARTY_DECRYPTED, FLAG_BOX_DECRYPTED, FLAG_CHECKSUM_FAILED = 1, 2, 4      # BoxPokemon +4 bit field
+
+
+def in_place_decrypted(data: bytes) -> bool:
+    """The game is working on this mon right now (BoxPokemon_EnterDecryptionContext: boxDecrypted set, the data
+    blocks XOR-decrypted in place but still in their PID-shuffled order; pret src/pokemon.c). A DS frame can end in
+    the middle of that."""
     data = bytes(data)
+    return len(data) >= BOX_SIZE and bool(struct.unpack_from("<H", data, 4)[0] & FLAG_BOX_DECRYPTED) and \
+        checksum(data) == struct.unpack_from("<H", data, 6)[0]          # the word sum ignores the block order
+
+
+def reencrypt_in_place(data: bytes) -> bytes:
+    """What BoxPokemon_ExitDecryptionContext / Pokemon_ExitDecryptionContext write back for an in-place decrypted
+    mon: flags cleared, XOR with the checksum (blocks stay where they are), party section XOR with the PID if it
+    was decrypted too. Encrypted data is returned with the flags cleared."""
+    data = bytearray(data)
+    flags, chk = struct.unpack_from("<HH", data, 4)
+    if flags & FLAG_BOX_DECRYPTED:
+        data[8:BOX_SIZE] = _crypt(bytes(data[8:BOX_SIZE]), chk)
+    if len(data) == PARTY_SIZE and flags & FLAG_PARTY_DECRYPTED:
+        data[BOX_SIZE:] = _crypt(bytes(data[BOX_SIZE:]), struct.unpack_from("<I", data, 0)[0])
+    struct.pack_into("<H", data, 4, flags & ~0x7)
+    return bytes(data)
+
+
+def _plain_of(data: bytes) -> bytes:
+    """Accept encrypted, plain (A,B,C,D order, as decrypt() returns) or in-place decrypted bytes (the game's
+    working state, see in_place_decrypted); returns plain."""
+    data = bytes(data)
+    if len(data) in (BOX_SIZE, PARTY_SIZE) and struct.unpack_from("<H", data, 4)[0] & FLAG_BOX_DECRYPTED:
+        if in_place_decrypted(data):
+            return decrypt(reencrypt_in_place(data))
     p = decrypt(data)
     if checksum(p) == struct.unpack_from("<H", p, 6)[0]:
         return p

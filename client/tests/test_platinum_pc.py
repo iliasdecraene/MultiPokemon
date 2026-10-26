@@ -525,15 +525,57 @@ def test_traded_away_yellow_mon_left_in_the_box_does_not_come_back(tmp_path):
     assert [e["nick"] for e in sync.working["boxes"][0]] == ["RATTY"]
 
 
+def in_place(rec):
+    """What the game's own BoxPokemon_EnterDecryptionContext leaves in RAM: boxDecrypted set, the data blocks
+    XOR-decrypted with the checksum seed but still in their PID-shuffled order (pret src/pokemon.c)."""
+    rec = bytearray(rec)
+    flags, chk = struct.unpack_from("<HH", rec, 4)
+    struct.pack_into("<H", rec, 4, flags | 0x2)
+    rec[8:136] = pk4._crypt(bytes(rec[8:136]), chk)
+    return bytes(rec)
+
+
+def test_in_place_decrypted_records_every_shuffle():
+    """4 / review 2 #1: for every block order, an in-place decrypted record is read as the same mon and turned
+    back into exactly the stored bytes (pk4.encrypt would shuffle the blocks a second time)."""
+    for sv in range(24):
+        r = native(species=387, pid=(sv << 13) | 0x15, tid=7, sid=9, level=12)
+        assert ((r and pk4.decrypt(r)) and (struct.unpack_from("<I", r)[0] >> 13) & 31) % 24 == sv
+        ip = in_place(r)
+        assert not pk4.valid(ip) and pk4.in_place_decrypted(ip)
+        assert platinum_pc.normalise(ip) == ("mon", r)
+        assert pk4.PK4(pk4._plain_of(ip)).species == 387 and pk4.mon_key(ip) == pk4.mon_key(r)
+        assert Gen4PC.same_mon(r, ip) and Gen4PC.held_item(ip) == 0
+        exiting = bytearray(ip)                                           # ExitDecryptionContext half-way:
+        struct.pack_into("<H", exiting, 4, 0)                             # flags already cleared, data plain
+        assert platinum_pc.normalise(bytes(exiting)) == ("mon", r)
+    garbage = bytearray(in_place(mon(1)))
+    garbage[40] ^= 0x5A                                                   # flag set but not a valid mon
+    assert platinum_pc.normalise(bytes(garbage))[0] == "bad"
+    ip_party = bytearray(pk4.to_party(mon(1), ROM))
+    flags, chk = struct.unpack_from("<HH", ip_party, 4)
+    struct.pack_into("<H", ip_party, 4, flags | 0x3)
+    ip_party[8:136] = pk4._crypt(bytes(ip_party[8:136]), chk)
+    ip_party[136:] = pk4._crypt(bytes(ip_party[136:]), struct.unpack_from("<I", ip_party)[0])
+    assert pk4.reencrypt_in_place(bytes(ip_party)) == pk4.to_party(mon(1), ROM)
+
+
 def test_box_slot_read_mid_update_is_not_a_withdrawal(tmp_path):
-    """4: a slot the game has decrypted in place at the close frame is the same mon, not a removal."""
-    e = pk4.entry_from_pk4(mon(5), ROM)
-    pm, pc, sync = session(tmp_path, [e])
-    plain = bytearray(pk4.decrypt(pm.box_raw(0)[0]))
-    struct.pack_into("<H", plain, 4, 0x2)                                 # the game's 'box decrypted' flag
-    set_slot(pm, 0, 0, bytes(plain))
+    """4: a slot the game has decrypted in place at the close frame is the same mon (no removal, no new entry)."""
+    entries = [pk4.entry_from_pk4(native(species=387, pid=(sv << 13) | 0x33, tid=sv, level=9), ROM)
+               for sv in range(0, 24, 3)]
+    pm, pc, sync = session(tmp_path, entries)
+    for s_, r in enumerate(pm.box_raw(0)[:len(entries)]):
+        set_slot(pm, 0, s_, in_place(r))
     rep = sync.close_session("platinum", pc)
-    assert rep["removed"] == rep["added"] == 0 and sync.working["boxes"][0] == [e] and pc.unplaced == []
+    assert rep["removed"] == rep["added"] == rep["changed"] == 0 and sync.working["boxes"][0] == entries
+    assert pc.unplaced == [] and not sync.pending
+    pc.write_boxes(sync.open_session("platinum", pc, trust_game=True))   # and the game gets the real bytes back
+    assert [species(r) for r in pm.box_raw(0)[:len(entries)]] == [387] * len(entries)
+
+
+def species(rec):
+    return pk4.PK4(pk4.decrypt(rec)).species
 
 
 def twin(i, level, species=25):
@@ -631,3 +673,159 @@ def test_close_waits_for_a_settled_party_and_boxes(tmp_path):
     pm.m.write(pm.party_addr(0), first)
     poll()
     assert a.closed_with == [[first[:136]]] and a._pt_pc is None
+
+
+def test_first_link_that_would_overflow_platinum_is_refused(tmp_path):
+    """review 2 #2: store 280 + 300 Platinum mons: 300 don't fit the 260 spare slots -> not linked, untouched."""
+    _bus, pm, pc = game()
+    sync = pcdb.PCSync(tmp_path / "pc.json")
+    fill_store(sync, 280)
+    theirs = [mon(i) for i in range(300)]
+    for k, r in enumerate(theirs):
+        set_slot(pm, k // 30, k % 30, r)
+    before = pm.read(pm.box_slot_addr(0, 0), 540 * 136)
+    assert sync.open_session("platinum", pc, trust_game=False) is None
+    assert sync.refused == (300, 0) and "platinum" not in sync.working["linked"] and not sync.session_open
+    assert pm.read(pm.box_slot_addr(0, 0), 540 * 136) == before and sync.count() == 280
+    # 260 fit exactly (store full: all of them stay in the game)
+    for k in range(260, 300):
+        set_slot(pm, k // 30, k % 30, EMPTY)
+    pc.write_boxes(sync.open_session("platinum", pc, trust_game=False))
+    assert all(r in all_game_mons(pm) for r in theirs[:260])
+
+
+def test_layout_raises_instead_of_dropping_and_write_writes_nothing():
+    _bus, pm, pc = game()
+    with pytest.raises(ValueError):
+        layout([[] for _ in range(14)], [mon(i) for i in range(261)])
+    before = pm.read(pm.box_slot_addr(0, 0), 540 * 136)
+    pc.unplaced = [mon(i) for i in range(261)]
+    with pytest.raises(ValueError):
+        pc.write_boxes([[mon(999)]] + [[] for _ in range(13)])
+    assert pm.read(pm.box_slot_addr(0, 0), 540 * 136) == before
+
+
+def test_abort_open_forgets_the_open(tmp_path):
+    e = pk4.entry_from_pk4(mon(1), ROM)
+    _bus, pm, pc = game()
+    set_slot(pm, 0, 0, mon(2))
+    sync = pcdb.PCSync(tmp_path / "pc.json")
+    sync.working["boxes"][0].append(e)
+    sync.open_session("platinum", pc, trust_game=False)                   # links + imports
+    sync.abort_open()
+    assert not sync.session_open and sync.working["linked"] == [] and sync.working["boxes"][0] == [e]
+    assert "platinum" not in sync.last_view
+
+
+def test_merge_keeps_an_entry_edited_only_here(tmp_path):
+    """review 2 #3: an entry changed in place locally (same id) survives a merge when the server didn't change it;
+    a server-side change (trade evolution) still wins when ours didn't change."""
+    a = pk4.entry_from_pk4(mon(1), ROM)
+    b = pk4.entry_from_pk4(mon(2), ROM)
+    sync = pcdb.PCSync(tmp_path / "pc.json")
+    sync.committed["boxes"][0] = [a, b]
+    sync.synced = pcdb._strip_server(sync.committed)
+    a2 = dict(a, gen4=b64(with_item(mon(1), 234)))                        # Leftovers given in the box UI
+    sync.committed["boxes"][0] = [a2, b]
+    sync.working = pcdb.copy.deepcopy(sync.committed)
+    b2 = dict(b, dex=26, nick="RAICHU")                                  # changed on the server
+    remote = {"version": 1, "rev": 9, "srv_rev": 4, "boxes": [[a, b2]] + [[] for _ in range(13)], "linked": []}
+    assert sync.merge_remote(remote)
+    assert sync.committed["boxes"][0] == [a2, b2]
+
+
+def test_items_taken_from_a_kept_mon_leave_the_bag_again(tmp_path):
+    """review 2 #4: a locked mon's stored copy keeps its item -> the copy the box UI put in the bag is taken out
+    again; a swap gives the new item back and takes the old one."""
+    held = pk4.entry_from_pk4(with_item(mon(1), 234), ROM)               # holds Leftovers
+    swap = pk4.entry_from_pk4(with_item(mon(2), 234), ROM)
+    pm, pc, sync = session(tmp_path, [held, swap])
+    sync.lock("t", [held["id"], swap["id"]])
+    shown = pm.box_raw(0)[:2]
+    set_slot(pm, 0, 0, with_item(shown[0], 0))                            # taken into the bag
+    set_slot(pm, 0, 1, with_item(shown[1], 155))                          # swapped for an Oran Berry
+    rep = sync.close_session("platinum", pc)
+    assert sorted(rep["items_taken"]) == [234, 234] and rep["items_back"] == [155]
+    assert sync.working["boxes"][0] == [held, swap] and rep["added"] == 0
+    rep = sync.close_session("platinum", pc)                              # not again before the next write
+    assert rep["items_taken"] == rep["items_back"] == []
+
+
+def test_take_item_from_bag_like_the_game():
+    _bus, pm, _ = game()
+    pockets = [0] * platinum_pc.NUM_ITEMS
+    pc = Gen4PC(pm, ROM, pockets)
+    bag = pm.save_body() + platinum_pc.PAGE_BAG
+    pm.m.write(bag, struct.pack("<6H", 17, 1, 234, 2, 50, 1))
+    assert pc.take_item(234) and struct.unpack("<6H", pm.read(bag, 12)) == (17, 1, 234, 1, 50, 1)
+    assert pc.take_item(17)                                               # emptied: the rest moves up
+    assert struct.unpack("<6H", pm.read(bag, 12)) == (234, 1, 50, 1, 0, 0)
+    assert not pc.take_item(155)
+
+
+def test_released_locked_mon_takes_no_lookalike_out_of_the_party(tmp_path):
+    """review 2 #6: a locked mon that left the box without reaching the party (released) must not take a party
+    mon with the same key."""
+    a = pk4.entry_from_pk4(mon(6), ROM)
+    pm, pc, sync = session(tmp_path, [a])
+    sync.lock("t2", [a["id"]])
+    set_slot(pm, 0, 0, EMPTY)                                             # released
+    lookalike = twin(6, 30)
+    rep = sync.close_session("platinum", pc, [mon(900), lookalike])
+    assert rep["locked_returned"] and rep["standin_party_slots"] == [] and rep["party_removals"] == {}
+    # the same mon given an item in the party is still that mon
+    withdrawn = with_item(pc.record_for(a), 234)
+    rep = sync.close_session("platinum", pc, [mon(900), lookalike, withdrawn])
+    assert rep["standin_party_slots"] == [2]
+
+
+def test_gb_released_locked_mon_takes_no_lookalike(tmp_path):
+    from test_pcdb import rec as g1rec, setup_game
+    mem, ypc = setup_game([[g1rec(0x54, "PIKA"), g1rec(0xA5, "RATTY")]])
+    sync = pcdb.PCSync(tmp_path / "s.json")
+    ypc.write_boxes(sync.open_session("yellow", ypc, True))
+    sync.close_session("yellow", ypc)
+    sync.commit()
+    ratty = next(e for e in sync.committed["boxes"][0] if e["nick"] == "RATTY")
+    sync.lock("t9", [ratty["id"]])
+    ypc.write_boxes(sync.open_session("yellow", ypc, True))
+    boxes = ypc.read_boxes()
+    boxes[0] = boxes[0][:1]                                              # released
+    ypc.write_boxes(boxes)
+    report = sync.close_session("yellow", ypc, party_records=[g1rec(0xA5, "OTHER", level=40)])
+    assert report["standin_party_slots"] == []
+
+
+class FixApp:
+    """What App._pt_fix_party / _pt_bag need."""
+    frame = 0
+    plat_data = None
+
+    def __init__(self, pm, pc):
+        self.game, self.pc_codec, self.toasts = pm, pc, []
+
+    def toast(self, s, *a):
+        self.toasts.append(s)
+
+
+def test_party_fix_items_only_for_mons_really_taken_out():
+    """review 2 #5: the last party mon can't be taken out -> its item change isn't applied (no duplicate);
+    retried until the deadline; a second close merges with a pending fix instead of replacing it."""
+    from yellowlink import app as appmod
+    for name in ("_pt_fix_party", "_pt_bag"):
+        setattr(FixApp, name, getattr(appmod.App, name))
+    st = with_item(pk4.standin({"id": "x", "nick": "EGG", "level": 5}, ROM), 234)
+    _bus, pm, _ = game([st])                                              # the stand-in is the only party mon
+    pockets = [0] * platinum_pc.NUM_ITEMS
+    pc = Gen4PC(pm, ROM, pockets)
+    a = FixApp(pm, pc)
+    a._pt_party_fix = {"remove": [(st, [234], [])], "give": [], "take": [], "until": 10}
+    a._pt_fix_party()
+    bag = pm.save_body() + platinum_pc.PAGE_BAG
+    assert struct.unpack("<HH", pm.read(bag, 4)) == (0, 0)                # nothing given: it's still in the party
+    assert a._pt_party_fix and len(a._pt_party_fix["remove"]) == 1
+    pm.m.write(pm.party_addr(1), pk4.to_party(mon(3), ROM))               # another mon joins: now it can go
+    pm.m.w32(pm.save_body() + platinum.PAGE_PARTY + 4, 2)
+    a._pt_fix_party()
+    assert a._pt_party_fix is None and pm.party_count() == 1
+    assert struct.unpack("<HH", pm.read(bag, 4)) == (234, 1)              # and only now its item goes back

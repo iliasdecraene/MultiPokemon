@@ -1017,7 +1017,14 @@ class App(ChallengeMixin, TradeMixin):
                        "be linked yet and nothing was changed. Make room in another game, then open the PC again.",
                        10, ui.BAD)
             return
-        self.pc_codec.write_boxes(boxes)
+        try:
+            self.pc_codec.write_boxes(boxes)     # computes everything first: raises before writing anything
+        except ValueError:
+            log.exception("PC view doesn't fit the game; not syncing this visit")
+            self.pcsync.abort_open()
+            self.toast("Your PC boxes couldn't be shown in this game (too many Pokémon) - nothing was changed.",
+                       10, ui.BAD)
+            return
         self.pc_trust = True
         if self.ds:
             self._pt_pc_report(opening=True)
@@ -1037,13 +1044,19 @@ class App(ChallengeMixin, TradeMixin):
             # Platinum: party mons are taken out (by their exact bytes) and items given back once the game isn't
             # in the middle of updating the party (_pt_fix_party)
             codec = self.pc_codec
-            remove, items = [], list(report.get("items_back", []))
+            fix = {"remove": [], "give": list(report.get("items_back", [])),
+                   "take": list(report.get("items_taken", [])), "until": self.frame + 600}
             for slot, old in report.get("party_removals", {}).items():
-                remove.append(party[slot])
-                items += codec.items_added(old, party[slot]) if old is not None else \
-                    [i for i in [codec.held_item(party[slot])] if i]
-            if remove or items:
-                self._pt_party_fix = (remove, items, self.frame + 600)
+                # the item changes only count once that party mon is really gone (_pt_fix_party)
+                give, take = codec.item_changes(old, party[slot]) if old is not None else \
+                    ([i for i in [codec.held_item(party[slot])] if i], [])
+                fix["remove"].append((party[slot], give, take))
+            if fix["remove"] or fix["give"] or fix["take"]:
+                old_fix = self._pt_party_fix          # one still waiting (hook path): keep it, add ours
+                if old_fix:
+                    for k in ("remove", "give", "take"):
+                        fix[k] = old_fix[k] + fix[k]
+                self._pt_party_fix = fix
             self._pt_pc_report()
         else:
             for slot in sorted(report["standin_party_slots"], reverse=True):
@@ -1113,8 +1126,15 @@ class App(ChallengeMixin, TradeMixin):
             # can end in the middle of that -> wait until the party reads clean (party_checked) and the boxes read
             # the same on two frames in a row (normally the next frame).
             party = self.game.party_checked()
-            slots = self.game.read(self.game.box_slot_addr(0, 0), platinum_pc.ALL_SLOTS * 136)
+            addr = self.game.box_slot_addr(0, 0)
+            slots = self.game.read(addr, platinum_pc.ALL_SLOTS * 136) if addr is not None else None
             self._pt_close_wait += frames
+            if slots is None:                # the save left memory (soft reset?): the game state is gone
+                if self._pt_close_wait > 120:
+                    log.warning("Platinum PC closed without game data in memory; dropping the PC session")
+                    self._pt_pc = None
+                    self.pcsync.rollback()
+                return
             if (party is not None and slots == self._pt_close_prev) or self._pt_close_wait > 120:
                 if party is None:
                     log.warning("Platinum party didn't settle after the PC closed; harvesting anyway")
@@ -1128,34 +1148,61 @@ class App(ChallengeMixin, TradeMixin):
         return [r[:136] for r in party] if party is not None else None
 
     def _pt_fix_party(self):
-        """Take stand-ins (and traded-away / locked mons) back out of Platinum's party. The game decrypts party
-        records in place while it works on them and a DS frame can end in the middle of that, so this waits for a
-        moment where every record is encrypted with a valid checksum and two reads agree (party_checked)."""
-        remove, items, give_up = self._pt_party_fix
+        """After the PC closed: take stand-ins (and traded-away / locked mons) back out of Platinum's party and set
+        the bag right (items the box UI moved between the bag and a mon whose stored copy we keep). The game
+        decrypts party records in place while it works on them and a DS frame can end in the middle of that, so
+        this waits for a moment where the party reads clean (party_checked). Item changes of a party mon count
+        only if that mon was really taken out; one that can't be (the last party mon) is retried until `until`."""
+        fix = self._pt_party_fix
         recs = self.game.party_checked()
         if recs is None:
-            if self.frame > give_up:
-                log.warning("Platinum party never settled; %d Pokémon left in the party", len(remove))
+            if self.frame > fix["until"]:
+                log.warning("Platinum party never settled; %d Pokémon left in the party", len(fix["remove"]))
                 self._pt_party_fix = None
+                self._pt_bag(fix["give"], fix["take"])
             return
         codec = self.pc_codec
-        drop = set()
-        for target in remove:                # exact bytes: a different mon with a colliding key is never taken
-            i = next((i for i, r in enumerate(recs) if i not in drop and r[:136] == target), None)
+        targets = list(fix["remove"])
+        for r in recs:                       # any stand-in in the party (one we didn't list, e.g. from a crash)
+            if codec.is_standin(r[:136]) and not any(t[0] == r[:136] for t in targets):
+                targets.append((r[:136], [i for i in [codec.held_item(r)] if i], []))
+        slots = {}
+        for t in targets:                    # exact bytes: a look-alike is never taken
+            i = next((i for i, r in enumerate(recs) if i not in slots and r[:136] == t[0]), None)
             if i is not None:
-                drop.add(i)
-        drop |= {i for i, r in enumerate(recs) if codec.is_standin(r[:136])}
-        for i in sorted(drop, reverse=True):
-            codec.remove_party_slot(i)
-        self._pt_party_fix = None
-        if drop:
-            log.info("took %d Pokémon back out of the Platinum party", len(drop))
-        lost = [i for i in items if not codec.give_item(i)]
-        back = [i for i in items if i not in lost]
+                slots[i] = t
+        give, take, left = list(fix["give"]), list(fix["take"]), []
+        for i in sorted(slots, reverse=True):
+            if codec.remove_party_slot(i):
+                give += slots[i][1]
+                take += slots[i][2]
+            else:
+                left.append(slots[i])
+        if left and self.frame <= fix["until"]:
+            self._pt_party_fix = {"remove": left, "give": [], "take": [], "until": fix["until"]}
+        else:
+            if left:
+                log.warning("could not take %d Pokémon out of the Platinum party (last one?)", len(left))
+            self._pt_party_fix = None
+        if len(slots) > len(left):
+            log.info("took %d Pokémon back out of the Platinum party", len(slots) - len(left))
+        self._pt_bag(give, take)
+
+    def _pt_bag(self, give, take):
+        codec = self.pc_codec
         name = (lambda i: self.plat_data.item_name(i)) if self.plat_data is not None else (lambda i: f"item {i}")
+        not_taken = [i for i in take if not codec.take_item(i)]
+        if not_taken:
+            log.warning("items %s should leave the bag (they stay with the stored Pokémon) but aren't there",
+                        not_taken)
+        lost = [i for i in give if not codec.give_item(i)]
+        back = [i for i in give if i not in lost]
         if back:
             self.toast(f"{', '.join(name(i) for i in back[:3])} went back to your bag (that Pokémon stays as it "
                        "was in the PC).", 7, ui.ACCENT)
+        if take and len(not_taken) < len(take):
+            self.toast(f"{', '.join(name(i) for i in take[:3] if i not in not_taken)} stays with the Pokémon in "
+                       "the PC (it can't be changed here).", 7, ui.ACCENT)
         if lost:
             log.warning("could not return items %s: bag pocket full", lost)
             self.toast(f"Your bag is full: couldn't put back {', '.join(name(i) for i in lost[:3])}.", 8, ui.BAD)

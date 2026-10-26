@@ -181,3 +181,23 @@
   ALL PASS. Files: pcdb.py, platinum_pc.py, app.py (PC parts only), pcstore.py, tests/test_platinum_pc.py,
   server/tests/test_pcstore_gen4.py, dev/e2e/pt_pctest.py. SPEC.md section 5 could note: a game whose boxes don't
   fit is not linked (nothing written); Platinum box edits keep the entry id; stand-in items return to the bag.
+- 2026-10-26 pc agent: SECOND REVIEW FIXES done (11 new client tests fail on 61b0664 and pass now; 335 client + 93 server
+  pass; pt_pctest (+ MOVE ITEMS > BAG on a locked mon), pt_trade_e2e, pctest, pctrade_e2e, crossgame ALL PASS).
+  1. In-place decrypt confirmed in pret (BoxPokemon_EnterDecryptionContext = DecodeData XOR only, blocks stay
+     shuffled; ExitDecryptionContext clears the flags BEFORE re-encrypting). platinum_pc.normalise now XORs back in
+     place (flag set, or flags clear + plain word sum = mid re-encryption) and keeps it only if pk4.valid, else
+     "bad". Checked on frames captured from the real game: both states give exactly the game's next write.
+     pk4._plain_of / mon_key / is_standin also read in-place records correctly (pk4.in_place_decrypted /
+     reencrypt_in_place). Test uses XOR-only records for all 24 block orders.
+  2. First link: Platinum refused (like Yellow/Crystal, nothing written) when the leftovers exceed the 260 spare
+     slots; layout()/write_boxes raise before writing; app catches it and PCSync.abort_open() undoes the open.
+  3. merge_remote: an entry changed only here (same id) is kept over an unchanged server copy (three-way per entry).
+  4. Kept mons (stand-in / locked / traded away): items the box UI moved are put right both ways - give back what
+     the mon took from the bag, take out of the bag what the box UI took off the stored copy (Bag_TryRemoveItem +
+     Pocket_SortEmpty, same loop as pret); swaps do both.
+  5. _pt_fix_party: item changes only for party mons really removed (last party mon: retried until the deadline,
+     no items); a pending fix is merged, not replaced.
+  6. Party removal (all games) only for the very same mon: exact bytes, or for Platinum the same bytes apart from
+     marks/held item (Gen4PC.same_mon). Box-edit matching uses same_mon too (no key/distance guessing any more).
+  + _pt_pc_poll "closing" guards box_slot_addr() == None (save gone -> PC session rolled back after 2 s).
+  Files: pk4.py, platinum_pc.py, pcdb.py, app.py (PC parts), tests/test_platinum_pc.py, dev/e2e/pt_pctest.py.

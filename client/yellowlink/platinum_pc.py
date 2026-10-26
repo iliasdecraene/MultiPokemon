@@ -93,17 +93,25 @@ def load_data(path):
 
 
 def normalise(rec: bytes) -> tuple:
-    """(kind, record): kind 'empty', 'mon' or 'bad'. A record the game has decrypted in place right now (it does
-    that while working on a mon, and a DS frame can end in the middle) is valid *plain* data: it is returned
-    encrypted again (= what the game writes back). 'bad' = no valid checksum either way (a Bad Egg in the game):
-    never harvested or erased."""
+    """(kind, record): kind 'empty', 'mon' or 'bad'. A record the game is working on right now (decrypted in
+    place: XOR only, blocks still shuffled, boxDecrypted set - pret BoxPokemon_EnterDecryptionContext; a DS frame
+    can end in the middle) is returned as the game will write it back (pk4.reencrypt_in_place), and only if that
+    is a valid record. 'bad' = no valid record either way (a Bad Egg in the game, or data we can't read): never
+    harvested or erased."""
     rec = bytes(rec)
     if rec == EMPTY:
         return "empty", rec
+    flags, chk = struct.unpack_from("<HH", rec, 4)
+    if pk4.valid(rec):
+        if flags & 0x7:                              # flag set, data not decrypted yet: the game clears it again
+            rec = rec[:4] + struct.pack("<H", flags & ~0x7) + rec[6:]
+    elif len(rec) == BOX_MON_SIZE and (flags & pk4.FLAG_BOX_DECRYPTED or pk4.checksum(rec) == chk):
+        # decrypted in place (flag set), or being encrypted again (ExitDecryptionContext clears the flags first):
+        # XOR back in place = exactly what the game writes next (checked on captured frames of the real game)
+        fixed = rec[:4] + struct.pack("<H", flags & ~0x7) + rec[6:8] + pk4._crypt(rec[8:], chk)
+        if pk4.valid(fixed):
+            rec = fixed
     if not pk4.valid(rec):
-        if pk4.checksum(rec) == struct.unpack_from("<H", rec, 6)[0]:      # plain, mid-update
-            enc = pk4.encrypt(rec)
-            return ("empty" if pk4.is_empty(enc) else "mon"), enc
         return "bad", rec
     return ("empty" if pk4.is_empty(rec) else "mon"), rec
 
@@ -154,19 +162,24 @@ def fold(slots: list, known=frozenset()) -> tuple:
     return boxes, unplaced, len(extra)
 
 
+# slots outside the store's view, where Pokémon the store can't take are kept: boxes 15-18, then slots 21-30
+SPARE = [(b, s) for b in range(STORE_BOXES, NUM_BOXES) for s in range(BOX_SLOTS)] + \
+        [(b, s) for b in range(STORE_BOXES) for s in range(MONS_PER_BOX, BOX_SLOTS)]       # 260
+
+
 def layout(boxes: list, unplaced=()) -> list:
-    """Store-shaped boxes (+ records to keep in the game) -> 18 x 30 records for Platinum."""
+    """Store-shaped boxes (+ records to keep in the game) -> 18 x 30 records for Platinum. Raises ValueError
+    (nothing written) if `unplaced` doesn't fit the spare slots."""
     slots = [[EMPTY] * BOX_SLOTS for _ in range(NUM_BOXES)]
     for b in range(min(STORE_BOXES, len(boxes))):
         for s, rec in enumerate(list(boxes[b])[:MONS_PER_BOX]):
             assert len(rec) == BOX_MON_SIZE
             slots[b][s] = bytes(rec)
-    spare = [(b, s) for b in range(STORE_BOXES, NUM_BOXES) for s in range(BOX_SLOTS)] + \
-            [(b, s) for b in range(STORE_BOXES) for s in range(MONS_PER_BOX, BOX_SLOTS)]
+    spare = SPARE
+    if len(unplaced) > len(spare):                      # the caller must not write anything then
+        raise ValueError("%d Pokémon wouldn't fit in Platinum's PC" % (len(unplaced) - len(spare)))
     for (b, s), rec in zip(spare, unplaced):
         slots[b][s] = bytes(rec)
-    if len(unplaced) > len(spare):                      # can't happen: 540 slots - 280 >= anything left over
-        log.error("%d Pokémon didn't fit anywhere in Platinum's PC", len(unplaced) - len(spare))
     return slots
 
 
@@ -174,6 +187,7 @@ class Gen4PC:
     """Read/write Platinum's 18 x 30 PC boxes in the save RAM as the store's 14 x 20 view."""
 
     edits_in_box = True             # the box UI can mark a mon or give/take its item in place (pcdb._match_edits)
+    spare = len(SPARE)              # Pokémon the store can't take can be kept in the game (pcdb._import)
 
     def __init__(self, pm, rom, pockets=None):
         """pm: platinum.PlatinumMemory (memory bus at pm.m); rom: ndsrom.PlatinumData of the running ROM;
@@ -216,7 +230,7 @@ class Gen4PC:
         if self.pm.pc_open():
             raise RuntimeError("Platinum's box UI is running; not writing the boxes under it")
         addr = self._mons_addr()
-        slots = layout(boxes, self.unplaced)
+        slots = layout(boxes, self.unplaced)            # raises before anything is written if it doesn't fit
         self.pm.m.write(addr, b"".join(rec for box in slots for rec in box))
 
     def remove_party_slot(self, slot: int) -> bool:
@@ -290,10 +304,29 @@ class Gen4PC:
         except ValueError:
             return 0
 
-    def items_added(self, old: bytes, new: bytes) -> list:
-        """[item] if `new` holds an item `old` didn't (given to a mon whose stored copy we put back)."""
-        item = self.held_item(new)
-        return [item] if item and item != self.held_item(old) else []
+    def item_changes(self, old: bytes, new: bytes) -> tuple:
+        """(give, take) when the game's copy `new` replaces nothing and the stored `old` is kept: the box UI took
+        an item from the bag that `new` holds (give it back) and/or put `old`'s item into the bag (take it out
+        again, or it would exist twice)."""
+        a, b = self.held_item(old), self.held_item(new)
+        return ([b] if b and b != a else []), ([a] if a and a != b else [])
+
+    @staticmethod
+    def same_mon(old: bytes, new: bytes) -> bool:
+        """`new` is `old` after what Platinum's box UI can do to a stored mon in place: MARK and MOVE ITEMS change
+        only the markings and the held item (and so the checksum). Anything else = a different mon."""
+        try:
+            a = pk4.PK4(pk4._plain_of(bytes(old))[:pk4.BOX_SIZE])
+            b = pk4.PK4(pk4._plain_of(bytes(new))[:pk4.BOX_SIZE])
+            if not (a.checksum_ok() and b.checksum_ok()):
+                return False
+        except ValueError:
+            return False
+        for pk in (a, b):
+            pk.markings = 0
+            pk.item = 0
+        pa, pb = a.plain(), b.plain()
+        return pa[:4] == pb[:4] and pa[8:] == pb[8:]
 
     @staticmethod
     def distance(a: bytes, b: bytes) -> int:
@@ -307,16 +340,10 @@ class Gen4PC:
     def give_item(self, item: int) -> bool:
         """Bag_TryAddItem(bag, item, 1): onto the pocket's stack of that item, else its first empty slot (max 999,
         TMs/HMs 99). False if it doesn't fit or the item is unknown."""
-        if not self.pockets or not 0 < item < len(self.pockets):
+        where = self._pocket(item)
+        if where is None:
             return False
-        pocket = self.pockets[item]
-        if pocket not in BAG_POCKETS:
-            return False
-        body = self.pm.save_body()
-        if not body:
-            return False
-        off, size = BAG_POCKETS[pocket]
-        base = body + PAGE_BAG + off
+        pocket, base, size = where
         m = self.pm.m
         slots = [struct.unpack_from("<HH", m.read(base + 4 * k, 4)) for k in range(size)]
         cap = 99 if pocket == POCKET_TMHMS else 999
@@ -332,6 +359,38 @@ class Gen4PC:
         if free is None:
             return False
         m.write(base + 4 * free, struct.pack("<HH", item, 1))
+        return True
+
+    def _pocket(self, item: int):
+        if not self.pockets or not 0 < item < len(self.pockets) or self.pockets[item] not in BAG_POCKETS:
+            return None
+        body = self.pm.save_body()
+        if not body:
+            return None
+        pocket = self.pockets[item]
+        off, size = BAG_POCKETS[pocket]
+        return pocket, body + PAGE_BAG + off, size
+
+    def take_item(self, item: int) -> bool:
+        """Bag_TryRemoveItem(bag, item, 1): one off that item's stack; an emptied slot is cleared and the pocket's
+        empty slots moved to the end (Pocket_SortEmpty, same loop). False if the bag has none."""
+        where = self._pocket(item)
+        if where is None:
+            return False
+        _pocket, base, size = where
+        m = self.pm.m
+        slots = [list(struct.unpack_from("<HH", m.read(base + 4 * k, 4))) for k in range(size)]
+        k = next((k for k, (it, _q) in enumerate(slots) if it == item), None)
+        if k is None or slots[k][1] < 1:
+            return False
+        slots[k][1] -= 1
+        if slots[k][1] == 0:
+            slots[k][0] = 0
+            for i in range(size - 1):
+                for j in range(i + 1, size):
+                    if slots[i][1] == 0:
+                        slots[i], slots[j] = slots[j], slots[i]
+        m.write(base, b"".join(struct.pack("<HH", it, q) for it, q in slots))
         return True
 
     @staticmethod
