@@ -166,16 +166,19 @@ def party_base():
     return pm.save_body() + PAGE_PARTY
 
 
-def read_party(tries=120):
-    """The save party, once every record is valid and two reads a frame apart agree."""
+def read_party(tries=600):
+    """The save party, once every record is valid and two valid reads agree. (After a battle the field keeps
+    working on party records for a while: a record can read in the game's half re-encrypted state on every
+    other frame.)"""
     last = None
     for _ in range(tries):
         base = party_base()
         n = core.r32(base + 4)
         raw = [core.read(base + 8 + 236 * i, 236) for i in range(n)]
-        if raw == last and all(pk4.valid(r) for r in raw):
-            return [pk4.PK4(pk4.decrypt(r)) for r in raw]
-        last = raw
+        if all(pk4.valid(r) for r in raw):
+            if raw == last:
+                return [pk4.PK4(pk4.decrypt(r)) for r in raw]
+            last = raw
         core.tick(1)
     raise RuntimeError("party records not stable/valid")
 
