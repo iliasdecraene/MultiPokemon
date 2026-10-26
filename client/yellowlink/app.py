@@ -19,10 +19,11 @@ from .config import Config, app_dir
 from .diag import Diagnostics, send_report_sync, show_report_window
 from .game import GameMemory
 from . import crystal
-from .challenge import ChallengeMixin
+from .challenge import ChallengeMixin, run_title
 from .tradeevo import TradeEvoMixin
 from .trades import TradeMixin
 from .badgesync import BadgeMixin
+from .defplat import DefPlatMixin, resume_rom_path
 from . import badge_art
 from .net import NetClient
 
@@ -144,7 +145,7 @@ class GhostBattle:
     result: int | None = None
 
 
-class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
+class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, DefPlatMixin):
     def __init__(self, cfg: Config, diag: Diagnostics | None = None):
         self.cfg = cfg
         self.diag = diag
@@ -157,10 +158,13 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         self.init_trades()
         self.init_badges()
         self.init_tradeevo()
+        self.init_defplat()
         # in a challenge: that run's own game + separate save (Config paths follow active_challenge)
         self.game_id = cfg.challenge["game"] if cfg.challenge else (self.lib.current or "yellow")
         self.save_tag = f"challenge-{cfg.challenge['id']}" if cfg.challenge else self.game_id
-        self.game_info = self.lib.info(self.game_id)
+        # Sinnoh: Pokémon Platinum or Definitive Platinum (a run's own; SPEC.md section 10) - same game id
+        self.variant = self.lib.variant(self.game_id) if self.game_id == "platinum" else None
+        self.game_info = self.lib.info(self.game_id, self.variant)
         self.travel_to = None
         # per server (each group of friends has its own) - or shared by servers that share one save (SPEC.md 8)
         self.pcsync = pcdb.PCSync(cfg.pc_path, *cfg.pc_keys)
@@ -183,14 +187,22 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         self.ds = self.game_info.platform == "nds"
         self.gen2 = self.game_id == "crystal"
         self.G = _platinum_adapter() if self.ds else (crystal if self.gen2 else game)
+        sha = library.sha1_file(cfg["rom_path"])
+        self.rom_sha1 = sha
+        if self.ds and getattr(self.G, "select_rom", None):
+            try:
+                self.G.select_rom(sha)           # the adapter's per-variant tables (vanilla / Definitive)
+            except Exception:  # noqa: BLE001 - unknown ROM: the adapter stays on vanilla, App.full is False
+                log.exception("platinum.select_rom failed")
         rom_cls = getattr(self.G, "RomData", None)
         self.rom = rom_cls.from_file(cfg["rom_path"]) if rom_cls else None
         # Multiplayer features rely on memory addresses verified on these exact ROMs.
         # Live/practice battles and wide view are Yellow-only (self.hooks / self.wv).
-        sha = library.sha1_file(cfg["rom_path"])
         if self.ds:
-            self.full = (self.game_info.full_support and sha == library.PLATINUM_SHA1
-                         and getattr(self.G, "PLATINUM_SHA1", None) == library.PLATINUM_SHA1)
+            # Platinum: the adapter lists the ROMs it was verified on (Definitive once defplat-game verified it)
+            supported = getattr(self.G, "SUPPORTED_SHA1S", None) or (getattr(self.G, "PLATINUM_SHA1", None),)
+            self.full = (self.game_info.full_support and sha in library.PLATINUM_VARIANTS.values()
+                         and sha in supported)
         else:
             self.full = self.game_info.full_support and sha in (game.YELLOW_SHA1, crystal.CRYSTAL_SHA1)
         self.keymap = DS_KEYMAP if self.ds else KEYMAP
@@ -403,6 +415,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         if save.exists():
             shutil.copy2(save, self.cfg.backup_dir / time.strftime(f"{self.save_tag}-%Y%m%d-%H%M%S.sav"))
             self._prune_backups()
+        if self.variant == "definitive" and not self.chal and self.had_save:
+            self.defplat_backup()          # once per server: the Sinnoh save as it was before Definitive Platinum
         self.nds = nds_core.NDSCore(self.cfg["rom_path"], save if len(data) == nds_core.SAVE_SIZE else None,
                                     volume=self._ds_volume())
         self.emu = self.nds
@@ -464,6 +478,22 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         path = self.cfg.resume_path
         if not self.cfg.get("auto_resume", True) or not path.exists():
             return False
+        if self.ds:
+            # a snapshot belongs to the ROM it was taken on (Platinum / Definitive Platinum): never load it into
+            # the other one - start from the battery save instead (SPEC.md section 10). No tag = vanilla (<0.7.7)
+            tag = resume_rom_path(path)
+            try:
+                taken_on = tag.read_text().strip() if tag.exists() else library.PLATINUM_SHA1
+            except OSError:
+                taken_on = ""
+            if taken_on != self.rom_sha1:
+                log.info("resume snapshot is from another ROM (%s): starting from the save", taken_on[:12])
+                try:
+                    os.replace(path, path.with_suffix(".other-rom"))
+                    tag.unlink(missing_ok=True)
+                except OSError:
+                    log.exception("could not move the other ROM's snapshot aside")
+                return False
         try:
             with open(path, "rb") as f:
                 self.emu.load_state(f)
@@ -503,6 +533,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             log.exception("snapshot failed")
             return False
         ok = write_atomic(self.cfg.resume_path, buf.getvalue())
+        if ok and self.ds:
+            write_atomic(resume_rom_path(self.cfg.resume_path), self.rom_sha1.encode())
         if ok:
             self.flush_sram()
             if not self.chal:
@@ -683,6 +715,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         self.roster = msg.get("roster", [])
         self.server_features = set(msg.get("features") or [])
         self.badges_on_welcome(msg)
+        self.defplat_on_welcome(msg)
 
     def on_player_join(self, msg):
         p = msg["player"]
@@ -1551,7 +1584,17 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         self._loading_screen("Adding your game file...")
         try:
             info = self.lib.add_rom(path)
-            self.toast(f"Added {info.title}! Click Travel to play it.", 5, ui.GOOD)
+            if info.variant == "rev1":
+                self.toast("Added your Platinum (Rev 1). YellowLink can't play this version as it is, but it can "
+                           "make Definitive Platinum from it (Regions > Sinnoh) when your server has the patch.", 9,
+                           ui.ACCENT)
+            elif info.variant == "definitive":
+                self.lib.pick_variant("platinum", "definitive")
+                self.toast(f"Added {info.title}! Click Travel to play it.", 5, ui.GOOD)
+            else:
+                self.toast(f"Added {info.title}! Click Travel to play it.", 5, ui.GOOD)
+            if self.net.status == "online":
+                self.send_library()
         except ValueError as e:
             self.toast(str(e), 6, ui.BAD)
         except OSError as e:
@@ -1731,6 +1774,9 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             return
         if p["kind"] == "challenge":
             self.respond_challenge(accept)
+        elif p["kind"] == "defplat":
+            self.answer_defplat(accept)
+            return
         elif p["kind"] == "tradeevo":
             self.respond_tradeevo(accept)
         elif p["kind"] == "battle":
@@ -2156,15 +2202,15 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             left = max(0, int(self.prompt["until"] - time.time()))
             if self.prompt["kind"] == "challenge":
                 p = self.prompt
-                game = library.GAMES_BY_ID.get(p["game"])
+                title = run_title(p["game"], p.get("variant"))
                 rules = p.get("rules") or {}
                 if p.get("continue"):
                     lines = [f"{p['name']} wants to continue your Soul Link!",
-                             (f"{game.title if game else p['game']} - you'll both jump into your run.", ui.DIM),
+                             (f"{title} - you'll both jump into your run.", ui.DIM),
                              (panels.rules_line(rules, p["game"]).capitalize(), ui.DIM)]
                 else:
                     lines = [f"{p['name']} challenges you to a Soul Link!",
-                             (f"{game.title if game else p['game']}, fresh save (your main game is kept safe).",
+                             (f"{title}, fresh save (your main game is kept safe).",
                               ui.DIM),
                              (panels.rules_line(rules, p["game"]).capitalize(), ui.DIM)]
                 r = ui.modal(sub, self.fonts, self.game_w, self.game_h, "Challenge!", lines + [(f"({left}s)", ui.DIM), ""],
@@ -2174,6 +2220,15 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
                               lambda: self.respond_challenge(True), offset=off, primary=True)
                 panels.button(sub, self, self.fonts, pygame.Rect(r.right - 128, r.bottom - 52, 110, 36), "Decline",
                               lambda: self.respond_challenge(False), offset=off)
+            elif self.prompt["kind"] == "defplat":
+                title, lines, yes, no = self.defplat_prompt_lines(self.prompt)
+                r = ui.modal(sub, self.fonts, self.game_w, self.game_h, title, lines + [""],
+                             f"[Y] {yes.lower()}    [N] {no.lower()}")
+                off = (0, self.game_y)
+                panels.button(sub, self, self.fonts, pygame.Rect(r.right - 250, r.bottom - 52, 110, 36), yes,
+                              lambda: self.answer_defplat(True), offset=off, primary=True)
+                panels.button(sub, self, self.fonts, pygame.Rect(r.right - 128, r.bottom - 52, 110, 36), no,
+                              lambda: self.answer_defplat(False), offset=off)
             elif self.prompt["kind"] == "tradeevo":
                 p = self.prompt
                 name = self.dex_name(p.get("dex", 0))
@@ -2291,6 +2346,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         self.chal_step()
         self.trades_step()
         self.badges_step()
+        self.defplat_step()
         if self.update_dl and self.update_dl.status != "downloading" and not getattr(self.update_dl, "announced", False):
             self.update_dl.announced = True
             if self.update_dl.status == "ready":
@@ -2466,6 +2522,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
 
     def shutdown(self):
         try:
+            self.defplat_shutdown()
             if self.battle:
                 self._restore_battle()
             if self.live:

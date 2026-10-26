@@ -96,7 +96,7 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 ### Server -> Client
 | type | fields |
 |---|---|
-| `welcome` | `you` uid, `players` list[PlayerInfo], `roster` list[RosterEntry], `latest_client` str, `download_url` str, `motd` str, `server_name` str (may be empty; env `YL_SERVER_NAME`), `features` list[str] (0.7.5: `["badges"]`, 0.7.6: + `"trade_evo"` (section 7); missing = older server) |
+| `welcome` | `you` uid, `players` list[PlayerInfo], `roster` list[RosterEntry], `latest_client` str, `download_url` str, `motd` str, `server_name` str (may be empty; env `YL_SERVER_NAME`), `features` list[str] (0.7.5: `["badges"]`, 0.7.6: + `"trade_evo"` (section 7), 0.7.7: + `"defplat"`; missing = older server), 0.7.7: `sinnoh`, `patches` (section 10) |
 | `player_join` | `player` PlayerInfo |
 | `player_leave` | `uid` |
 | `state` | `uid` + all state fields (relayed to everyone else) |
@@ -512,7 +512,7 @@ Summaries (`ledger` omitted, plus `"online": [uid...]` = players currently in th
 ### Messages
 | client → server | fields | notes |
 |---|---|---|
-| `library` | `games` list[str], `challenge_games` list[str] (optional), `challenge_rules` list[str] (optional) | games the player has installed with the verified ROM (sent on connect); shown in roster as `games`. `challenge_games` (clients 0.7.4+) = the games this client can run a challenge in; `challenge_rules` (clients 0.7.4+) = optional run rules it knows, today `["exp_share"]`, plus (clients 0.7.6+) `trade_evo` = it can do Soul Link trade evolutions (below; not a rule, always allowed). Both shown in the roster under the same names (null = offline or older client) |
+| `library` | `games` list[str], `challenge_games` list[str] (optional), `challenge_rules` list[str] (optional) | games the player has installed with the verified ROM (sent on connect); shown in roster as `games`. `challenge_games` (clients 0.7.4+) = the games this client can run a challenge in; `challenge_rules` (clients 0.7.4+) = optional run rules it knows, today `["exp_share"]`, plus (clients 0.7.6+) `trade_evo` = it can do Soul Link trade evolutions (below; not a rule, always allowed). Both shown in the roster under the same names (null = offline or older client). 0.7.7: `variants` = `{"platinum": [...]}` (section 10) |
 | `challenge_request` | `to`, `kind`, `game`, `rules` — or `to`, `challenge_id` to continue | target must be online and free |
 | `challenge_respond` | `request_id`, `accept` bool | |
 | `challenge_join` | `challenge_id` | sent after loading into the challenge game (and after every reconnect while in it) |
@@ -777,3 +777,74 @@ toasts it when its own roster entry shows a new or better Soul Link badge (the r
 doesn't mention the badge). A server without the `badges` feature: friends' badges show "Badges need a server
 update" instead of empty sockets. A badge book that isn't valid JSON of the right shape is kept aside as
 `badges.bad-<time>.json` and a fresh one is started (detection fills it again). `merge.py` (section 8) copies badges.json entries like players.
+
+## 10. Definitive Platinum — added in 0.7.7
+
+"Pokémon Definitive Platinum" by BigNation (PokéCommunity: https://www.pokecommunity.com/threads/pok%C3%A9mon-definitive-platinum-complete.539178/)
+is a second **variant** of the Sinnoh game. The game id stays `platinum` everywhere (state, roster, PC store, badges,
+challenges); only the ROM file differs. YellowLink never ships the hack or the patch: the server's host puts BigNation's
+two xdelta patches in the server's data folder, and each client patches **the player's own** Platinum.
+
+| variant | ROM | SHA1 |
+|---|---|---|
+| `vanilla` | Pokémon Platinum (USA) rev 0 | `ce81046eda7d232513069519cb2085349896dec7` |
+| `definitive` | rev 0 or rev 1 + BigNation's patch (both patches give the same file, 105,001,364 bytes, code `CPUE`) | `2f368f0f68f98058699a8dd0b1f9af3c970172a2` |
+| (rev 1) | Pokémon Platinum (USA) rev 1: header game code `CPUE` and ROM version byte 0x1E = 1. Not playable as vanilla, only a patch source (the patch's Adler-32 checks + the final SHA1 prove it) | - |
+
+### Server
+- Patch files: `<data_dir>/patches/definitive_platinum/rev0.xdelta` and `rev1.xdelta` (Docker: `server/data/...` on
+  the host). Looked at on start and again on every `hello` (size + mtime; the SHA1 is recomputed only when a file
+  changed, so the host can add them without a restart). A file is offered only if it starts with the VCDIFF magic
+  `D6 C3 C4` and is at most 64 MB.
+- `YL_SINNOH` (config `sinnoh`): `any` (default: players choose vanilla or Definitive) | `definitive` (the server asks
+  every player to switch; new Platinum Soul Link runs are Definitive). Anything else = `any` (logged).
+- `welcome` gets `features` + `"defplat"` (the messages below are known), `sinnoh` (`"any"` | `"definitive"`) and
+  `patches` = `{"definitive_platinum": {"rev0": {"size": int, "sha1": hex}, "rev1": {...}}}` (only the files that
+  are there; `{}` when none).
+
+| dir | type | fields |
+|---|---|---|
+| C→S | `patch_get` | `name` = `"definitive_platinum"`, `rev` = `"rev0"` \| `"rev1"`, `sha1` (of the file the client is downloading, from `welcome`), `offset` (>= 0), `length` (1..1 MiB) |
+| S→C | `patch_chunk` | `name`, `rev`, `sha1`, `size` (whole file), `offset`, `data` (base64, at most 48 KiB raw per chunk); one request is answered by consecutive chunks covering `[offset, min(offset+length, size))` |
+| S→C | `patch_error` | `name`, `rev`, `reason`: `"missing"` (no such file now) \| `"changed"` (the file's SHA1 isn't `sha1` any more; `sha1` + `size` of the current file are included) \| `"bad"` (bad request), `message` |
+
+One range at a time per client: a new `patch_get` cancels the chunks still to be sent for the previous one, and a
+disconnect cancels everything. Chunks are sent by a per-client task (`await send` = backpressure), so a download never
+holds up other players or that player's own messages. `patch_get` counts against the normal rate limit (1 per MiB).
+
+### Client
+- **Library** (`library.py`): `cfg["games"]["platinum"]` stays the vanilla rev 0 file (`roms/platinum.nds`, as
+  before); other variants in `cfg["variants"]["platinum"]` = `{"definitive": path, "rev1": path}`
+  (`roms/platinum-definitive.nds`, `roms/platinum-rev1.nds`). "Add a game file" accepts all three (rev 1 by header).
+  `cfg["variant"]["platinum"]` = the player's pick. The variant used: in a run, the run's `variant`; else
+  Definitive when the server (last `welcome.sinnoh`, remembered in the server entry as `sinnoh`) requires it and the
+  player has it; else the pick if that file exists; else whichever exists (vanilla first). `Library.games` lists
+  `platinum` when vanilla or Definitive exists (rev 1 alone: no).
+- `App.full` on Definitive = the Platinum adapter lists its SHA1 in `platinum.SUPPORTED_SHA1S` (defplat-game owns it).
+- **Making it** (`defplat.py`, Regions panel, Sinnoh card): when the server offers a patch for a Platinum the player
+  has (rev 0 preferred, else rev 1) and they don't have Definitive yet: "Make Definitive Platinum from your Platinum"
+  (optional) — or, with `sinnoh: definitive`, a prompt when they play vanilla Sinnoh (and a chat line elsewhere).
+  Download (`patch_get` ranges of 1 MiB to `<appdir>/downloads/definitive_platinum-<rev>-<sha1[:12]>.xdelta.part`,
+  resumed from the part's size after a reconnect/restart, restarted on `changed`; the finished file's SHA1 must match),
+  then patch in a background thread (`vcdiff.decode_file`, progress bar; result written as `.part`, kept only if the
+  SHA1 is `2f368f0f…`), store it as `roms/platinum-definitive.nds`, delete the patch, pick Definitive. The player's
+  original ROM is never written. A wrong ROM (e.g. a damaged rev 1) ends with "This Platinum file can't be made into
+  Definitive Platinum" and nothing is stored.
+- **Switching** (Regions, Sinnoh card: "Play with: Platinum | Definitive", hidden when the server requires Definitive)
+  = travel (save + restart). Both variants use the same battery save `saves/platinum.sav` (BigNation: vanilla saves
+  stay compatible). Before the first start of Definitive with an existing save, the save is copied once per server
+  folder to `saves/backups/before-definitive-platinum-<time>.sav` (never pruned). Resume snapshots remember the ROM
+  they were taken on (`<resume>.rom` = SHA1); a snapshot from the other variant is never loaded (kept as
+  `.other-rom`), the game starts from the battery save instead (so: save in-game before switching; the switch
+  button says so). A snapshot without `.rom` is from vanilla (older clients).
+- `library` gets `variants` = `{"platinum": ["vanilla", "definitive"]}` (the playable ones); the server keeps it on the
+  client and in the roster entry (`variants`, null = offline or older client: treated as `["vanilla"]` if `games` has
+  `platinum`).
+
+### Soul Link
+A Platinum run has a `variant` (`"vanilla"` | `"definitive"`; missing = vanilla, also for every run before 0.7.7).
+`challenge_request` (new run, game `platinum`) takes `variant` (default vanilla); on a `sinnoh: definitive` server it is
+always `definitive`. Both players must have that variant (from `library.variants`), checked again when the run is
+continued: "X doesn't have Definitive Platinum yet (Regions → Make Definitive Platinum)" / "X needs a newer
+YellowLink for Definitive Platinum (press U)". The record and its summaries carry `variant`; `challenge_request`
+(server → client) too. The client plays the run on that variant's ROM (`active_challenge.variant`).

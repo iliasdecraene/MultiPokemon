@@ -7,7 +7,7 @@ import pygame
 
 from . import badge_art, library
 from .badges import REGION_NAMES, REGIONS, entry_is_shiny
-from .challenge import CHALLENGE_GAMES
+from .challenge import CHALLENGE_GAMES, partner_variants, run_title
 from .ui import ACCENT, BAD, DIM, GOOD, PANEL, PANEL_HI, TEXT, box, text, wrap
 
 BTN = (58, 64, 86)
@@ -397,9 +397,8 @@ def _status_line(app, c):
     other = next((u for u in c["players"] if u != me), None)
     prog = c.get("progress", {})
     stats = c.get("stats", {})
-    game = library.GAMES_BY_ID.get(c.get("game"))
     mine = stats.get(me, {})
-    return (f"In progress · {game.title if game else c.get('game')} · you: {mine.get('caught', 0)} caught, "
+    return (f"In progress · {run_title(c.get('game'), c.get('variant'))} · you: {mine.get('caught', 0)} caught, "
             f"{mine.get('dead', 0)} lost · badges {bin(prog.get(me, {}).get('badges', 0)).count('1')}"
             f"/{bin(prog.get(other, {}).get('badges', 0)).count('1')}"), TEXT
 
@@ -570,6 +569,13 @@ def _game_tip(app, form, g) -> str:
     if g not in app.challenge_games():
         return f"Add {title} in Regions first" + (" (v1.0)." if g == "crystal" else ".")
     e = next((x for x in app.roster if x.get("uid") == form["uid"]), {}) or {}
+    if g == "platinum" and g in (e.get("challenge_games") or []):
+        v = app.run_variant()
+        if v not in partner_variants(e):
+            if v == "definitive" and e.get("variants") is None:
+                return f"{form['name']} needs to update YellowLink (press U) for a Definitive Platinum Soul Link."
+            return f"{form['name']} doesn't have {library.VARIANT_TITLES[v]}" + (
+                " yet (Regions > Make Definitive Platinum)." if v == "definitive" else ".")
     if g not in ("yellow", "crystal") and g in (e.get("games") or []) and not e.get("challenge_games"):
         if "challenge_games" not in e:            # the server doesn't send it at all: it's the server that's old
             return f"The server needs updating for a {title} Soul Link (ask the host)."
@@ -597,14 +603,14 @@ def _draw_challenge_form(surf, f, app, r, y, offset):
     games = CHALLENGE_GAMES
     x0 = r.x + 82 if narrow else r.x + 100
     gw = (r.right - 18 - x0 - 10 * (len(games) - 1)) // len(games)
-    full = not narrow and all(f.body.size(library.GAMES_BY_ID[g].title)[0] <= gw - 14 for g in games)
+    full = not narrow and all(f.body.size(run_title(g, app.run_variant()))[0] <= gw - 14 for g in games)
     for i, g in enumerate(games):
-        info = library.GAMES_BY_ID[g]
+        title = run_title(g, app.run_variant()) if g == "platinum" else library.GAMES_BY_ID[g].title
         rect = pygame.Rect(x0 + i * (gw + 10), y, gw, 34)
         sel = form["game"] == g
         if sel:
             pygame.draw.rect(surf, ACCENT, rect.inflate(6, 6), 2, border_radius=9)
-        label = info.title if full else info.title.replace("Pokémon ", "")
+        label = title if full else title.replace("Pokémon ", "").replace("Definitive Platinum", "Definitive")
         button(surf, app, f, rect, label, lambda g=g: form.__setitem__("game", g), enabled=g in shared,
                offset=offset, primary=sel, tip=_game_tip(app, form, g))
     y += 54

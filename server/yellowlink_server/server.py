@@ -24,6 +24,7 @@ from .config import Config
 from . import pcstore
 from .challenges import ChallengeError, ChallengeHub
 from . import badges as badgemod
+from . import patches as patchmod
 from .store import PlayerStore
 
 log = logging.getLogger("yellowlink.server")
@@ -49,8 +50,9 @@ CLOSE_REPLACED = 4002
 CLOSE_BAD_HELLO = 4003
 CLOSE_MOVED = 4005          # this server was merged into another one (Config.moved_to); see SPEC.md section 8
 MOVE_SUPPORTED = (0, 7, 1)  # clients from this version on follow a "moved" message by themselves
-FEATURES = ("badges", "trade_evo")   # optional message groups this server knows (welcome.features; SPEC.md
-                                    # section 9 badges, section 7 trade evolutions in a run)
+FEATURES = ("badges", "trade_evo", "defplat")   # optional message groups this server knows (welcome.features;
+                     # SPEC.md section 9 badges, section 7 trade evolutions in a run, section 10 Definitive Platinum)
+VARIANTS = {"platinum": ("vanilla", "definitive")}   # game variants a client may list in `library.variants`
 
 
 def _version_tuple(v: str) -> tuple:
@@ -170,6 +172,8 @@ class Client:
     games: list | None = None         # installed games (from `library`), None = unknown (old client)
     challenge_games: list | None = None   # games it can run a challenge in (`library`, 0.7.4+); None = old
     challenge_rules: list | None = None   # optional run rules it knows (`library`, 0.7.4+), e.g. ["exp_share"]
+    variants: dict | None = None      # playable variants per game (`library`, 0.7.7+), e.g. {"platinum": [...]}
+    download: asyncio.Task | None = None  # the patch chunks being sent (SPEC.md section 10), one range at a time
     last_report: float = 0.0
     _rate_window: float = 0.0
     _rate_count: int = 0
@@ -250,6 +254,7 @@ class YellowLinkServer:
         self.challenges = ChallengeHub(self, config.data_dir, debounce=store_debounce)
         self.badges = badgemod.BadgeStore(config.data_dir, debounce=store_debounce)
         self.badges.backfill(self.challenges.records.values())      # runs completed before badges existed
+        self.patches = patchmod.PatchStore(config.data_dir)
         self._server = None
 
     # ------------------------------------------------------------ lifecycle
@@ -272,6 +277,9 @@ class YellowLinkServer:
         for t in [*self.trades.values(), *self.battles.values()]:
             if t.timer:
                 t.timer.cancel()
+        for c in self.clients.values():
+            if c.download:
+                c.download.cancel()
         await self.challenges.flush()
         await self.badges.flush()
         await self.store.flush()
@@ -328,6 +336,7 @@ class YellowLinkServer:
                 # games they can run a challenge in right now (None: offline, or a client from 0.7.2 or older)
                 "challenge_games": self.clients[uid].challenge_games if online else None,
                 "challenge_rules": self.clients[uid].challenge_rules if online else None,
+                "variants": self.clients[uid].variants if online else None,
                 "online": online,
                 "party_size": len(species),
                 "levels": levels,
@@ -422,6 +431,7 @@ class YellowLinkServer:
         if self.config.moved_to:
             return await self._moved_hello(ws, uid, name.strip(), version[:32])
         client = Client(ws=ws, uid=uid, name=name.strip(), version=version[:32])
+        self.patches.refresh()            # the host may have added/replaced patch files (only changed ones are hashed)
 
         old = self.clients.get(uid)
         if old is not None:
@@ -429,6 +439,8 @@ class YellowLinkServer:
             await self._cancel_trade_of(old, "partner left")
             await self._abort_battle_of(old, disconnected=True)
             del self.clients[uid]
+            if old.download:
+                old.download.cancel()
             await self.challenges.client_gone(old)
             await self.broadcast({"type": "player_leave", "uid": uid})
             asyncio.get_running_loop().create_task(
@@ -448,6 +460,8 @@ class YellowLinkServer:
             "motd": self.config.motd,
             "server_name": self.config.name,
             "features": list(FEATURES),
+            "sinnoh": self.config.sinnoh,
+            "patches": self.patches.offer(),
         })
         await self.send(client, {"type": "challenge_list", "challenges": self.challenges.mine(uid)})
         for c in others:
@@ -484,6 +498,8 @@ class YellowLinkServer:
         if self.clients.get(client.uid) is not client:
             return  # already replaced; the replacement handled cleanup
         del self.clients[client.uid]
+        if client.download:
+            client.download.cancel()
         await self._cancel_trade_of(client, "partner left")
         await self._abort_battle_of(client, disconnected=True)
         await self.challenges.client_gone(client)
@@ -1243,8 +1259,69 @@ class YellowLinkServer:
         if cr is not None and sorted(set(cr)) != client.challenge_rules:
             client.challenge_rules = sorted(set(cr))
             changed = True
+        va = msg.get("variants")                          # optional (clients 0.7.7+), see SPEC.md section 10
+        if va is not None:
+            if not isinstance(va, dict) or len(va) > 4 or not all(
+                    isinstance(g, str) and isinstance(v, list) and len(v) <= 4 and all(
+                        isinstance(x, str) and re.fullmatch(r"[a-z0-9_]{1,16}", x) for x in v)
+                    for g, v in va.items()):
+                raise Invalid("variants must map game ids to lists of variant names")
+            va = {g: sorted(set(v) & set(VARIANTS[g])) for g, v in va.items() if g in VARIANTS}
+            if va != client.variants:
+                client.variants = va
+                changed = True
         if self.store.set_games(client.uid, client.games) or changed:
             await self.broadcast_roster()
+
+    # ------------------------------------------------------- patch files (SPEC.md section 10)
+    async def on_patch_get(self, client: Client, msg: dict) -> None:
+        name, rev = msg.get("name"), msg.get("rev")
+        if name not in patchmod.PATCHES or rev not in patchmod.PATCHES[name]:
+            await self.send(client, {"type": "patch_error", "name": name if isinstance(name, str) else "",
+                                     "rev": rev if isinstance(rev, str) else "", "reason": "bad",
+                                     "message": "unknown patch"})
+            return
+        offset = _int(msg, "offset", 0, patchmod.MAX_PATCH)
+        length = _int(msg, "length", 1, patchmod.MAX_RANGE)
+        sha1 = msg.get("sha1")
+        pf = self.patches.get(name, rev)
+        if client.download:
+            client.download.cancel()               # one range at a time: the newest request wins
+            client.download = None
+        if pf is None:
+            await self.send(client, {"type": "patch_error", "name": name, "rev": rev, "reason": "missing",
+                                     "message": "this server doesn't have that patch file (any more)"})
+            return
+        if sha1 != pf.sha1:
+            await self.send(client, {"type": "patch_error", "name": name, "rev": rev, "reason": "changed",
+                                     "sha1": pf.sha1, "size": pf.size,
+                                     "message": "the patch file on the server changed - starting over"})
+            return
+        if offset >= pf.size:
+            raise Invalid("offset is past the end of the patch")
+        client.download = asyncio.get_running_loop().create_task(
+            self._send_patch(client, pf, offset, min(offset + length, pf.size)))
+
+    async def _send_patch(self, client: Client, pf, start: int, end: int) -> None:
+        pos = start
+        try:
+            while pos < end:
+                data = await asyncio.to_thread(patchmod.PatchStore.read, pf, pos, min(patchmod.CHUNK, end - pos))
+                if not data:
+                    break                          # the file got shorter: the client's SHA1 check notices
+                await client.ws.send(json.dumps({
+                    "type": "patch_chunk", "name": pf.name, "rev": pf.rev, "sha1": pf.sha1, "size": pf.size,
+                    "offset": pos, "data": base64.b64encode(data).decode("ascii")}, separators=(",", ":")))
+                pos += len(data)
+        except (ConnectionClosed, asyncio.CancelledError):
+            pass
+        except OSError as exc:
+            log.warning("patch %s/%s: read failed: %s", pf.name, pf.rev, exc)
+            await self.send(client, {"type": "patch_error", "name": pf.name, "rev": pf.rev, "reason": "missing",
+                                     "message": "the server couldn't read the patch file"})
+        finally:
+            if client.download is asyncio.current_task():
+                client.download = None
 
     def _chal(name):  # noqa: N805 - builds a handler that maps ChallengeError -> Invalid
         async def handler(self, client, msg):
@@ -1259,6 +1336,7 @@ class YellowLinkServer:
 
     _handlers = {
         "library": on_library,
+        "patch_get": on_patch_get,
         "badges": on_badges,
         "get_badges": on_get_badges,
         "challenge_request": _chal("on_request"),

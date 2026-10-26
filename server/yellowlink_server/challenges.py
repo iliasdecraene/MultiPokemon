@@ -96,6 +96,29 @@ def _missing(client, me, game: str, anymore: bool = False) -> str:
     return f"{who} {'don' if client is me else 'doesn'}'t have {GAMES[game]} added{end}"
 
 
+VARIANT_NAMES = {"vanilla": "Pokémon Platinum", "definitive": "Definitive Platinum"}   # Platinum runs (section 10)
+
+
+def has_variant(client, variant: str) -> bool:
+    """Whether this client can play a Platinum run on `variant` (`library.variants`, clients 0.7.7+; older clients
+    only know vanilla Platinum)."""
+    va = getattr(client, "variants", None)
+    if va is None:
+        return variant == "vanilla"
+    return variant in (va.get("platinum") or [])
+
+
+def _variant_missing(client, me, variant: str) -> str:
+    who = "You" if client is me else client.name
+    if getattr(client, "variants", None) is None:
+        return (f"{who} need{'' if client is me else 's'} a newer YellowLink for {VARIANT_NAMES[variant]} "
+                f"(press U to update)")
+    if variant == "definitive":
+        return (f"{who} {'don' if client is me else 'doesn'}'t have Definitive Platinum yet "
+                f"(Regions > Make Definitive Platinum)")
+    return f"{who} only {'have' if client is me else 'has'} Definitive Platinum, not the original Platinum"
+
+
 def _str(v, what, maxlen=40, pattern=ID_RE):
     if not isinstance(v, str) or len(v) > maxlen or (pattern and not pattern.match(v)):
         raise ChallengeError(f"{what} is invalid")
@@ -155,6 +178,7 @@ class Request:
     rules: dict
     challenge_id: str | None
     timer: asyncio.Task | None = None
+    variant: str | None = None        # Platinum runs: "vanilla" | "definitive" (SPEC.md section 10)
 
 
 @dataclass(eq=False)
@@ -363,11 +387,14 @@ class ChallengeHub:
             if target.uid not in rec["players"]:
                 raise ChallengeError("that challenge is with someone else")
             kind, game, rules = rec["kind"], rec["game"], rec["rules"]
+            variant = rec.get("variant", "vanilla") if game == "platinum" else None
             for c in (client, target):
                 if not can_play(c, game):
                     raise ChallengeError(_missing(c, client, game, anymore=True))
                 if not knows_rules(c, rules):
                     raise ChallengeError(_rules_missing(c, client))
+                if variant and not has_variant(c, variant):
+                    raise ChallengeError(_variant_missing(c, client, variant))
         else:
             kind, game = msg.get("kind"), msg.get("game")
             if kind not in KINDS:
@@ -381,19 +408,27 @@ class ChallengeHub:
             if existing:
                 raise ChallengeError(f"you already have a {KINDS[kind]} with {target.name} - continue it, "
                                      f"or abandon it first")
+            variant = None
+            if game == "platinum":
+                variant = "definitive" if getattr(self.server.config, "sinnoh", "any") == "definitive" \
+                    else msg.get("variant", "vanilla")
+                if variant not in VARIANT_NAMES:
+                    raise ChallengeError("unknown Platinum variant")
             for c in (client, target):
                 if not can_play(c, game):
                     raise ChallengeError(_missing(c, client, game))
                 if not knows_rules(c, rules):
                     raise ChallengeError(_rules_missing(c, client))
-        req = Request(uuid.uuid4().hex[:12], client.uid, target.uid, kind, game, rules, cid)
+                if variant and not has_variant(c, variant):
+                    raise ChallengeError(_variant_missing(c, client, variant))
+        req = Request(uuid.uuid4().hex[:12], client.uid, target.uid, kind, game, rules, cid, variant=variant)
         self.requests[req.id] = req
         req.timer = asyncio.get_running_loop().create_task(self._expire(req))
         log.info("challenge request %s: %s -> %s (%s, %s, continue=%s)", req.id, client.name, target.name,
                  kind, game, cid)
         await self.server.send(target, {"type": "challenge_request", "request_id": req.id, "from": client.uid,
                                         "name": client.name, "kind": kind, "game": game, "rules": rules,
-                                        "challenge_id": cid})
+                                        "challenge_id": cid, "variant": variant})
 
     async def _expire(self, req):
         await asyncio.sleep(REQUEST_TIMEOUT)
@@ -441,6 +476,8 @@ class ChallengeHub:
                    "reason": "", "progress": {req.frm: {"badges": 0, "hof": False},
                                               req.to: {"badges": 0, "hof": False}},
                    "ledger": []}
+            if req.game == "platinum":
+                rec["variant"] = req.variant or "vanilla"
             self.records[rec["id"]] = rec
             self.schedule_save()
             log.info("challenge %s created: %s + %s (%s, %s)", rec["id"], requester.name, client.name,

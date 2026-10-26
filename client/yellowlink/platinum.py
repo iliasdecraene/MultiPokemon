@@ -2,6 +2,8 @@
 
 Every address below was found with the pret/pokeplatinum decompilation and **verified on the real ROM**
 (SHA1 below) by dev/platinum/verify.py; details and how each one was found: dev/platinum/MEMORY_MAP.md.
+The same addresses hold for Definitive Platinum (BigNation's hack of rev 0, DEFPLAT_SHA1): see VARIANTS below and
+dev/defplat/STATUS.md (ROM diff + the suite run with YL_PT_ROM=defplat).
 Pure Python, no pygame. `bus` = any object with read(addr, n) / r8 / r16 / r32 / write / w8 / w16 / w32
 (client/yellowlink/nds_core.NDSCore, dev/platinum/ds.DS).
 
@@ -21,9 +23,70 @@ from __future__ import annotations
 
 import struct
 
+from dataclasses import dataclass
+
 from . import pk4
 
 PLATINUM_SHA1 = "ce81046eda7d232513069519cb2085349896dec7"   # Pokémon Platinum (USA) rev 0, "POKEMON PL" CPUE
+VANILLA_SHA1 = PLATINUM_SHA1
+DEFPLAT_SHA1 = "2f368f0f68f98058699a8dd0b1f9af3c970172a2"    # "Pokémon Definitive Platinum" (BigNation) on rev 0
+
+# ---------------------------------------------------------------------------------------------------------
+# ROM variants. Every address in this module (and platinum_exp / platinum_pc / sinnoh_view) was verified on each
+# ROM below; a feature is listed for a variant only after the whole Platinum suite passed on that exact ROM
+# (dev/platinum/verify.py etc. with YL_PT_ROM=defplat; dev/defplat/verify_rom.py proves the code/data we use is
+# byte-identical). A ROM that isn't listed gets nothing (single player only) - never guess.
+#   memory     PlatinumMemory reads/writes (party, boxes, position, states, fast_continue)
+#   pc         PC database: HOOK_PC_OPEN + box UI polling (platinum_pc.Gen4PC)
+#   exp_share  Exp. Share All hooks in battle overlay 16 (platinum_exp)
+#   friends    friends drawn in the 3D overworld (sinnoh_view: camera pointer, player sprites from mmodel.narc)
+#   soullink   Soul Link referee helpers (battle_info, forced moves, Day Care, Hall of Fame)
+#   trade_evo  Soul Link trade evolutions from the ROM's evolution table
+#   badges     champion / Sinnoh dex / shiny progress + Pokédex marking (mark_dex)
+# ---------------------------------------------------------------------------------------------------------
+FEATURES = frozenset({"memory", "pc", "exp_share", "friends", "soullink", "trade_evo", "badges"})
+
+
+@dataclass(frozen=True)
+class Variant:
+    key: str                 # "vanilla" | "definitive" (Soul Link run records, library.PLATINUM_VARIANTS)
+    sha1: str
+    title: str
+    features: frozenset
+
+
+VARIANTS = {
+    "vanilla": Variant("vanilla", VANILLA_SHA1, "Pokémon Platinum", FEATURES),
+    "definitive": Variant("definitive", DEFPLAT_SHA1, "Pokémon Definitive Platinum", frozenset()),
+}
+VARIANT_BY_SHA1 = {v.sha1: v for v in VARIANTS.values()}
+# ROMs the app may run with every multiplayer feature (App.full): the variants with at least "memory"
+SUPPORTED_SHA1S = tuple(v.sha1 for v in VARIANTS.values() if "memory" in v.features)
+
+_selected = VARIANTS["vanilla"]
+
+
+def variant_of(sha1: str):
+    """The Variant of a ROM SHA1, or None for a ROM nobody verified."""
+    return VARIANT_BY_SHA1.get((sha1 or "").lower())
+
+
+def select_rom(sha1: str):
+    """Tell the adapter which ROM runs (the app calls it before creating PlatinumMemory). Returns the Variant, or
+    None for an unknown ROM - then supports() is False for every feature until a known ROM is selected."""
+    global _selected
+    _selected = variant_of(sha1)
+    return _selected
+
+
+def selected():
+    return _selected
+
+
+def supports(feature: str, sha1: str | None = None) -> bool:
+    """Feature verified for the given ROM (default: the one passed to select_rom; vanilla before any call)."""
+    v = variant_of(sha1) if sha1 is not None else _selected
+    return bool(v and feature in v.features)
 
 RAM_LO, RAM_HI = 0x02000000, 0x02400000
 

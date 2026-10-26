@@ -1,7 +1,7 @@
 """Shared helper for driving Pokémon Platinum headless in py-desmume (dev/test use only).
 
     from ds import DS
-    d = DS()                      # boots dev/states/platinum.nds (or YL_PLATINUM_ROM)
+    d = DS()                      # boots dev/states/platinum.nds (YL_PT_ROM=defplat: defplat.nds; or YL_PLATINUM_ROM)
     d.press("a"); d.run(60)       # tap A, then 60 frames
     d.hold("up", 16)              # hold for 16 frames
     d.touch(128, 96)              # tap the bottom screen
@@ -18,7 +18,8 @@ import sys
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 _HERE = os.path.dirname(os.path.abspath(__file__))
-ROM = os.environ.get("YL_PLATINUM_ROM", os.path.join(_HERE, "..", "states", "platinum.nds"))
+sys.path.insert(0, _HERE)
+from ptrom import ROM  # noqa: E402  (YL_PT_ROM=vanilla|defplat; YL_PLATINUM_ROM = explicit path)
 
 from desmume.emulator import DeSmuME  # noqa: E402
 from desmume.controls import Keys, keymask  # noqa: E402

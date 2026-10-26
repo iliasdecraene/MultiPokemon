@@ -24,6 +24,22 @@ REFEREE_HELPERS = ("battle_info", "battle_party_slot", "has_poke_balls", "curren
                    "move_box_to_party", "daycare_records", "badges")
 
 
+def run_title(game: str, variant: str | None = None) -> str:
+    """'Pokémon Crystal', 'Definitive Platinum'... (a Platinum run's variant: SPEC.md section 10)."""
+    if game == "platinum" and variant:
+        return library.VARIANT_TITLES.get(variant, "Pokémon Platinum")
+    info = library.GAMES_BY_ID.get(game)
+    return info.title if info else game
+
+
+def partner_variants(e: dict) -> list:
+    """A roster entry's playable Platinum variants (older clients/servers don't say: original Platinum)."""
+    va = e.get("variants")
+    if isinstance(va, dict):
+        return list(va.get("platinum") or [])
+    return ["vanilla"]
+
+
 class ChallengeMixin:
     def init_challenges(self):
         self.challenges: dict = {}           # id -> summary of my challenges (from the server)
@@ -82,13 +98,20 @@ class ChallengeMixin:
         # only games the rules can be enforced in (e.g. not Crystal v1.1); `challenge_games` tells the server which
         # of them this client can run a challenge in (0.7.x clients list Platinum in `games` but have no Platinum
         # Soul Link, so the server only allows Platinum for clients that send it - SPEC.md section 7)
-        self.net.send({"type": "library", "games": sorted(g for g in self.lib.games if self._game_supported(g)),
-                       "challenge_games": self.challenge_games(),
-                       "challenge_rules": list(CHALLENGE_RULES) + list(CHALLENGE_CAPS)})
+        self.send_library()
         if self.chal:
             if self.chal_wait == "offline":
                 self.chal_wait = "load"           # back online: wait until the server says both are in
             self.net.send({"type": "challenge_join", "challenge_id": self.chal["id"]})
+
+    def send_library(self):
+        """Which games (and Platinum variants, SPEC.md section 10) we have; again whenever that changes."""
+        self.__dict__.pop("_sup_cache", None)
+        self.net.send({"type": "library", "games": sorted(g for g in self.lib.games if self._game_supported(g)),
+                       "challenge_games": self.challenge_games(),
+                       "challenge_rules": list(CHALLENGE_RULES) + list(CHALLENGE_CAPS),
+                       "variants": {"platinum": self.defplat_variants() if hasattr(self, "defplat_variants")
+                                    else ["vanilla"]}})
 
     def chal_on_disconnected(self):
         if self.chal and not self._chal_leaving and self.chal_wait != "load":
@@ -121,16 +144,17 @@ class ChallengeMixin:
     def on_challenge_request(self, msg):
         busy = self.chal or self.trade or self.battle or self.live or self.prompt
         game = msg.get("game", "yellow")
-        playable = game in self.challenge_games()
+        variant = (msg.get("variant") or "vanilla") if game == "platinum" else None
+        playable = game in self.challenge_games() and (variant is None or variant in self.defplat_variants())
         if busy or not playable:
             self.net.send({"type": "challenge_respond", "request_id": msg.get("request_id"), "accept": False})
             if not playable:
-                info = library.GAMES_BY_ID.get(game)
-                self.toast(f"{msg.get('name')} invited you to a Soul Link in {info.title if info else game}, "
+                title = run_title(game, variant)
+                self.toast(f"{msg.get('name')} invited you to a Soul Link in {title}, "
                            f"but you don't have that game added (Regions; Crystal needs v1.0).", 8, ui.BAD)
             return
         self.prompt = {"kind": "challenge", "id": msg["request_id"], "name": msg.get("name", "?"),
-                       "until": time.time() + 55, "shown": None, "game": game,
+                       "until": time.time() + 55, "shown": None, "game": game, "variant": variant,
                        "rules": msg.get("rules") or {}, "continue": msg.get("challenge_id")}
         self._maybe_show_prompt()
 
@@ -155,7 +179,8 @@ class ChallengeMixin:
         if "id" not in c:
             return
         self.challenges[c["id"]] = c
-        if c.get("game") not in self.challenge_games():
+        if c.get("game") not in self.challenge_games() or (
+                c.get("game") == "platinum" and (c.get("variant") or "vanilla") not in self.defplat_variants()):
             self.net.send({"type": "challenge_leave", "challenge_id": c["id"], "reason": "game missing"})
             self.toast("You don't have that game added (Regions; Crystal needs v1.0).", 6, ui.BAD)
             return
@@ -171,6 +196,8 @@ class ChallengeMixin:
         self.close_panel()
         # the run's rules travel with it (Exp Share All applies from the first frame, before the server's record)
         self.enter_challenge = {"id": c["id"], "game": c["game"], "rules": dict(c.get("rules") or {})}
+        if c["game"] == "platinum":
+            self.enter_challenge["variant"] = c.get("variant") or "vanilla"     # the run's Sinnoh game
         _, partner = self.chal_partner(c)
         self.cfg["_travel_msg"] = f"Starting your Soul Link with {partner}..."
         self.quit_requested = True
@@ -416,6 +443,9 @@ class ChallengeMixin:
                 ok = theirs is None or g in theirs
             else:
                 ok = g in their_chal and (theirs is None or g in theirs)
+            if ok and g == "platinum":
+                rv = getattr(self, "run_variant", None)          # DefPlatMixin (App); "vanilla" without it
+                ok = (rv() if rv else "vanilla") in partner_variants(e)
             if ok:
                 out.append(g)
         return out
@@ -443,6 +473,8 @@ class ChallengeMixin:
     def _game_supported(self, game_id) -> bool:
         """The exact ROM the rules were verified on (hashing a ROM is slow: cached per path)."""
         info = library.GAMES_BY_ID.get(game_id)
+        if game_id == "platinum":           # either Sinnoh game, if the adapter is verified on it
+            return any(library.variant_full(v) for v in self.lib.variants("platinum"))
         path = self.lib.rom_path(game_id)
         if not info or not path:
             return False
@@ -458,8 +490,11 @@ class ChallengeMixin:
         f = self.chal_form
         if not f or not f.get("game"):
             return
-        self.net.send({"type": "challenge_request", "to": f["uid"], "kind": "soul_link", "game": f["game"],
-                       "rules": {"dupes": f["dupes"], "shiny": f["shiny"], "exp_share": bool(f.get("exp_share"))}})
+        msg = {"type": "challenge_request", "to": f["uid"], "kind": "soul_link", "game": f["game"],
+               "rules": {"dupes": f["dupes"], "shiny": f["shiny"], "exp_share": bool(f.get("exp_share"))}}
+        if f["game"] == "platinum":
+            msg["variant"] = self.run_variant()
+        self.net.send(msg)
         self.toast(f"Soul Link invite sent to {f['name']}...", 4)
         self.chal_form = None
         self.close_panel()
@@ -478,6 +513,10 @@ class ChallengeMixin:
     def continue_challenge(self, c):
         if c.get("game") not in self.challenge_games():
             self.toast("You need that game added (Regions; Crystal needs v1.0).", 5, ui.BAD)
+            return
+        if c.get("game") == "platinum" and (c.get("variant") or "vanilla") not in self.defplat_variants():
+            self.toast(f"This run is played with {run_title('platinum', c.get('variant'))} - add or make it in "
+                       f"Regions first.", 6, ui.BAD)
             return
         if not self.has_challenge_save(c["id"]):
             self.toast("This run's save isn't on this computer - continue from the one you started on.", 6,

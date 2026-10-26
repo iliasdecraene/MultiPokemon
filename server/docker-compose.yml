@@ -18,6 +18,9 @@ services:
       # Optional: after merging this server into another one, forward players there (see DEPLOY.md "Merging").
       YL_MOVED_TO: ${YL_MOVED_TO:-}
       YL_MOVED_KEY: ${YL_MOVED_KEY:-}
+      # Optional: which Sinnoh game - "any" (players choose Platinum or Definitive Platinum) or "definitive"
+      # (everyone is asked to play Definitive Platinum). See DEPLOY.md "Definitive Platinum".
+      YL_SINNOH: ${YL_SINNOH:-any}
     volumes:
       # players.json (and optionally config.json) live here on the host.
       - ./data:/data

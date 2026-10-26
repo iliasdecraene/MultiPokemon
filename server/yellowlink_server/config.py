@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, fields
 
@@ -23,6 +24,12 @@ class Config:
     # address + password and switch themselves; older clients only get the update notice.
     moved_to: str = ""
     moved_key: str = ""
+    # Sinnoh game (SPEC.md section 10): "any" = players choose Platinum or Definitive Platinum, "definitive" = the
+    # server asks everyone to play Definitive Platinum (made from their own Platinum with the server's patch files)
+    sinnoh: str = "any"
+
+
+SINNOH_MODES = ("any", "definitive")
 
 
 def load_config(path: str | None = None, *, host: str | None = None,
@@ -31,7 +38,7 @@ def load_config(path: str | None = None, *, host: str | None = None,
 
     Precedence (lowest to highest): built-in defaults, the JSON file at
     ``path``, environment variables (YL_KEY, YL_PORT, YL_DATA_DIR, YL_SERVER_NAME, YL_MOTD,
-    YL_MOVED_TO, YL_MOVED_KEY), and
+    YL_MOVED_TO, YL_MOVED_KEY, YL_SINNOH), and
     finally explicit ``host``/``port`` arguments (from the command line).
     """
     env = os.environ if env is None else env
@@ -59,6 +66,8 @@ def load_config(path: str | None = None, *, host: str | None = None,
         cfg.moved_to = env["YL_MOVED_TO"]
     if env.get("YL_MOVED_KEY"):
         cfg.moved_key = env["YL_MOVED_KEY"]
+    if env.get("YL_SINNOH"):
+        cfg.sinnoh = env["YL_SINNOH"]
     if host is not None:
         cfg.host = host
     if port is not None:
@@ -70,4 +79,10 @@ def load_config(path: str | None = None, *, host: str | None = None,
     if cfg.moved_to and "://" not in cfg.moved_to:
         cfg.moved_to = "ws://" + cfg.moved_to
     cfg.moved_key = str(cfg.moved_key or "")
+    sinnoh = str(cfg.sinnoh or "any").strip().lower()
+    if sinnoh not in SINNOH_MODES:
+        logging.getLogger("yellowlink").warning("YL_SINNOH=%r is not one of %s: using 'any'", cfg.sinnoh,
+                                                "/".join(SINNOH_MODES))
+        sinnoh = "any"
+    cfg.sinnoh = sinnoh
     return cfg
