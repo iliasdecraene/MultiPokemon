@@ -409,6 +409,13 @@ the games' own two-pass award (EXP.ALL / Exp. Share machinery), so level-ups, mo
 Passive in link battles (Yellow wLinkState D12A = 4, Crystal wLinkMode C2DC != 0) and the Battle Tower. The opcode
 byte at every hook is checked before installing. Verified by `dev/e2e/expshare_gb.py` (real battles, ALL PASS).
 
+**Closing mid-award (all games).** The per-award steering lives in Python (`handle.busy()`), so no resume snapshot
+is taken while busy. On close/leave/travel the app first lets the game run (no buttons held, ≤ 3 s) until the award
+is over (`App._settle_exp_award`). If it still waits for a button: in the main game the last snapshot (before this
+battle) is kept; in a Soul Link the hooks are removed (Platinum undoes its changes) and the snapshot is taken anyway,
+so the rest of that one award follows the game's own rule - an older resume would make the referee treat mons caught
+since then as gone.
+
 ## 7. Challenges (Soul Link) — added in 0.6.0
 
 A challenge is a co-op run between two players on **fresh, separate saves** of the same game (Yellow, Crystal or

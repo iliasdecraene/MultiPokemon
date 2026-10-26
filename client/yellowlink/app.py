@@ -2314,6 +2314,45 @@ class App(ChallengeMixin, TradeMixin):
             log.exception("Exp Share busy() failed")
             return True
 
+    def _settle_exp_award(self, max_frames=None, max_seconds=3.0) -> bool:
+        """Closing/leaving while the game hands out experience (busy(): no snapshot possible). Let the game run on,
+        no buttons held, until the award is over (DS: up to ~10 s of game time, GB: ~20 s, at most `max_seconds`).
+        Still busy (it waits for a button on a text box, a level-up window or a move prompt):
+          * in a Soul Link the resume must be NOW - an older one makes the referee think mons caught since then
+            are gone (and kill them for both players). The hooks are removed, so the rest of this one award goes
+            by the game's own rule (Platinum: our changes are undone first), and the snapshot is taken from there;
+          * in the main game the last snapshot (from before this battle) is kept, as before.
+        Returns True when a snapshot can be taken now."""
+        if not self._exp_award_busy():
+            return True
+        frames = max_frames if max_frames is not None else (600 if self.ds else 1200)
+        try:
+            self.release_all()
+        except Exception:  # noqa: BLE001
+            log.exception("release_all before settling the exp award failed")
+        if self.ds:
+            self._pause_ds_audio(True)
+        start, n = time.monotonic(), 0
+        try:
+            while n < frames and self._exp_award_busy() and time.monotonic() - start < max_seconds:
+                if self.ds:
+                    self.nds.tick(1)
+                else:
+                    self.pyboy.tick(1, False)
+                n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("running the game to the end of the exp award failed")
+        if not self._exp_award_busy():
+            log.info("exp award finished after %d frame(s); snapshot can be taken", n)
+            return True
+        if self.chal:
+            log.warning("exp award still running after %d frame(s) (waits for a button): Soul Link needs a current "
+                        "resume - removing the Exp Share hooks, the rest of this award uses the game's own rule", n)
+            self._remove_exp_share()
+            return True
+        log.info("exp award still running after %d frame(s): keeping the last snapshot", n)
+        return False
+
     def _install_exp_share(self):
         """Every adapter can offer install_exp_share(emulator, enabled) (Platinum: platinum_exp). Only on the
         verified ROMs (it hooks game code)."""
@@ -2356,7 +2395,8 @@ class App(ChallengeMixin, TradeMixin):
             if self.live:
                 self.net.send({"type": "battle_leave", "battle_id": self.live.battle_id})
                 self._end_live("", ui.DIM)
-            self.autosave(force=True)            # skipped while experience is being handed out
+            self._settle_exp_award()             # mid-award: let it finish (Soul Link: never keep an old resume)
+            self.autosave(force=True)            # skipped while experience is still being handed out
             self.flush_sram(force=True)
             self._remove_exp_share()                # after the snapshot (removing mid-award changes game RAM)
             if self.ds:
