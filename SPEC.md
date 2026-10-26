@@ -65,6 +65,11 @@ All messages are JSON objects with a `"type"` field. Binary game data is base64 
 {"data": "<b64 44 bytes (Yellow) or 48 bytes (Crystal) party_struct>", "ot": "<b64 11 bytes>", "nick": "<b64 11 bytes>"}
 ```
 State `map` for Crystal is `group << 8 | number` (can exceed 255).
+State for Platinum (`game` = `platinum`, no server change - the relay already passes these ints): `map` = map header id
+(0-592; outdoor maps share one global Sinnoh grid, so x/y/px/py are comparable across them), `x`/`y` = tile (y = the
+DS z axis), `px`/`py` = MapObject position in world units minus 8 (= tile*16 when standing), `facing` 0 up, 1 down,
+2 left, 3 right, `img` = bit 0 gender (1 = Dawn) | bit 1 running | bits 2-3 avatar (0 walking, 1 bike, 2 surfing,
+3 other) | height `pos.y` (world units, signed) << 4 (`client/yellowlink/sinnoh_view.py` pack_img/unpack_img).
 Server treats these as opaque except for validation: data decodes to exactly 44 or 48 bytes (roster level is byte 33 or 31), ot/nick exactly 11 bytes, species byte (data[0]) != 0.
 
 ### Client -> Server
@@ -276,9 +281,24 @@ of it, refreshed whenever the player opens Bill's PC and harvested when they lea
 ```
 PCStore = {"version": 1, "rev": int, "boxes": [[Entry, ...] x 14], "linked": ["yellow", ...]}
 Entry   = {"id": "<uuid4 hex>", "origin": "yellow"|"crystal", "dex": int, "level": int, "nick": str, "ot": str,
-           "otid": int, "gen1": "<b64 33+11+11 bytes>" | null, "gen2": "<b64 ...>" | null}
+           "otid": int, "gen1": "<b64 33+11+11 bytes>" | null, "gen2": "<b64 ...>" | null,
+           "gen4": "<b64 136-byte encrypted Platinum box PK4>" | null}       # gen4 + origin "platinum": 0.7.0
 ```
 - 14 boxes of up to 20 (Crystal has 14; Yellow shows boxes 1-12 — 13/14 are only visible in Crystal).
+- **Current representation** (0.7.0): the one named by `origin` (yellow → gen1, crystal → gen2, platinum → gen4;
+  an entry harvested from a game is re-created with that game as origin), else the first present of gen1, gen2,
+  gen4. Other games convert from it (`pk4.gen1_record` / `gen2_record` / `record_for`, else a stand-in). A server-side
+  trade evolution changes the current representation and nulls the others. Platinum shows store box i in its box i,
+  slots 1-20; Pokémon put anywhere else in Platinum's 18x30 boxes are compacted into free store slots on close.
+  If the store is full, new Platinum Pokémon stay in the game (boxes 15-18) and the player is told. Platinum sync:
+  the view is written on the exec hook `0x0203D754` (FieldSystem_OpenPokemonStorage, after DEPOSIT/WITHDRAW/MOVE is
+  picked, before the box app reads PCBoxes); close is polled (box app = field child overlay 19 gone). Party records
+  are decrypted in place mid-frame by the game: always read them via `PlatinumMemory.party_checked()`.
+  First link of a game whose boxes don't fit the store: Yellow/Crystal are not linked at all (nothing written, the
+  player is told); Platinum keeps what doesn't fit in its boxes 15-18. Edits made in Platinum's box screen (MARK,
+  MOVE ITEMS) keep the entry id (matched by mon_key); an item given to a stand-in, locked or traded-away Pokémon goes
+  back to the bag. The last view records what the game really holds, so a traded-away Pokémon still sitting in a box
+  is never harvested again.
 - `gen1`/`gen2` hold the exact game bytes (box_struct + OT name + nickname) of the last version seen in that
   generation, so a Pokémon that never leaves its game round-trips byte-identically. Readable fields (dex, level, names)
   are for UI/conversion only.

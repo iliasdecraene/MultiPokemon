@@ -1,6 +1,6 @@
 # YellowLink
 
-Private multiplayer for Pokémon Yellow (Kanto) and Pokémon Crystal (Johto), for you and your friends.
+Private multiplayer for Pokémon Yellow (Kanto), Pokémon Crystal (Johto) and Pokémon Platinum (Sinnoh), for you and your friends.
 
 Everyone plays their **own** game with their own save and story. On top of that:
 
@@ -11,7 +11,8 @@ Everyone plays their **own** game with their own save and story. On top of that:
 - **Wide view** (press **V**): see twice as much of the world around you, NPCs and friends included. The real Game Boy picture stays untouched in the middle.
 - **Straight into your game**: with a save, the intro and title screen are skipped and Continue is picked for you.
 - **Two regions**: Kanto is Pokémon Yellow, Johto is Pokémon Crystal. Add your Crystal game file in **Regions** and travel between them from the sidebar. Each game keeps its own progress. In Crystal you see friends and trade (trade evolutions included, Metal Coat and friends too); live battles, practice and wide view are Yellow-only for now.
-- **One PC for both games**: your PC boxes live in your own database (also backed up on the server). Deposit a Pokémon in Yellow and it's in the PC in Crystal, and the other way round. Pokémon that can't exist in a game (a Chikorita in Yellow) show up as `?CHIKORITA` and stay safely in the PC.
+- **Sinnoh (Pokémon Platinum, Nintendo DS)**: add your Platinum game file in **Regions** and travel there like any region. Both DS screens are shown (top above bottom) and the **mouse is the touch screen** (click/drag on the lower screen). You see your Platinum friends walking around in Sinnoh, and trades/gifts work with Yellow and Crystal players through the shared PC. Battles, practice, wide view and Soul Link aren't available in Platinum (yet).
+- **One PC for all games**: your PC boxes live in your own database (also backed up on the server). Deposit a Pokémon in Yellow and it's in the PC in Crystal and Platinum, and the other way round. In Platinum your YellowLink PC fills boxes 1-14, 20 per box; anything you put elsewhere is tidied into free spots. Pokémon that can't exist in a game (a Chikorita in Yellow) show up as `?CHIKORITA` and stay safely in the PC.
 - **No saving needed**: closing YellowLink remembers exactly where you were (it also snapshots every 30 seconds), and every game resumes where you left it.
 - **Challenges: Soul Link.** In Multiplayer, click a friend → **Challenges** → *Start a Soul Link*. You both start a
   fresh save (separate from your main games) of Yellow or Crystal, and YellowLink referees the Nuzlocke for you: only the
@@ -21,7 +22,7 @@ Everyone plays their **own** game with their own save and story. On top of that:
 - **Chat.** You can also see who's online, and the app shows a notice when an update is available.
 
 > **No ROM is included, and none ever should be.** Each player needs their own copy of
-> *Pokémon Yellow Version (USA, Europe)*, plus *Pokémon Crystal Version (USA, Europe)* (v1.0 for multiplayer) for Johto. The repo contains only original code; all graphics come from
+> *Pokémon Yellow Version (USA, Europe)*, plus *Pokémon Crystal Version (USA, Europe)* (v1.0 for multiplayer) for Johto and *Pokémon Platinum Version (USA)* (`.nds`) for Sinnoh. The repo contains only original code; all graphics come from
 > your own game while it runs.
 
 ---
@@ -33,7 +34,7 @@ Everyone plays their **own** game with their own save and story. On top of that:
    - **Your name.** Friends see this above your character.
    - **Server address**, e.g. `ws://123.45.67.89:8765`. Ask whoever hosts the server.
    - **Room password.** Same source.
-   - **Your Pokémon Yellow ROM** (`.gb` file).
+   - **Your Pokémon game file**: Yellow (`.gb`), Crystal (`.gbc`) or Platinum (`.nds`). Add the others later in **Regions**.
    - *(optional)* **An existing save** (`.sav`) from another emulator, to continue your adventure.
 3. Play.
 
@@ -51,6 +52,9 @@ Everyone plays their **own** game with their own save and story. On top of that:
 | − / + | Volume (or drag the slider in the sidebar) |
 | **V** | Wide view on/off |
 | F5 / F6 | Smaller / bigger window |
+| **D / C** | Platinum: X / Y buttons |
+| **Q / W** | Platinum: L / R buttons |
+| Mouse on the lower screen | Platinum: touch screen |
 | F1 | Help |
 | **F3** | Report a problem (shows the log with Copy / Send to host) |
 | F2 | Settings (opens after you close the game) |
@@ -108,6 +112,11 @@ addresses in `SPEC.md`, which are taken from the pret/pokeyellow disassembly and
 - **Trades:** between PC databases. The server swaps the entries in both players' stored PCs atomically and sends each a delta, which the client applies to its local store (see SPEC.md).
 - **Live battles:** both games run the game's own *link battle* engine (normally used with a link cable), started from the overworld with the same random-number list on both sides. Each turn's choice travels over the server instead of a cable, so both screens show the exact same battle. A save state taken before the battle is restored afterwards.
 - **Practice battles:** a normal trainer battle with the friend's team swapped in and the game's AI in control.
+- **Platinum (DS):** runs in [DeSmuME](https://github.com/TASEmulators/desmume) through
+  [py-desmume](https://github.com/SkyTemple/py-desmume) (both GPL; the Windows exe bundles them, their source is at
+  those links). Addresses come from the pret/pokeplatinum decompilation, verified on the ROM
+  (`dev/platinum/MEMORY_MAP.md`). Friends are projected into the 3D overworld with the game's own camera and drawn
+  with Lucas/Dawn sprites decoded from your own ROM.
 
 ### Roadmap
 

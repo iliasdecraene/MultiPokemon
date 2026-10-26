@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,16 +15,23 @@ log = logging.getLogger("yellowlink.library")
 class GameInfo:
     id: str
     title: str
-    region: str          # "kanto" | "johto"
+    region: str          # "kanto" | "johto" | "sinnoh"
     full_support: bool   # multiplayer features (friends, trades, battles, wide view) verified
+    platform: str = "gb"  # "gb" | "gbc" | "nds" (which emulator core runs it, ROM file extension)
+
+    @property
+    def ext(self) -> str:
+        return "." + self.platform
 
 
 # Supported games (English releases; SHA1s from the pret disassembly projects).
-# Only Yellow (Kanto) and Crystal (Johto) are supported — one game per region keeps things simple.
+# Yellow (Kanto), Crystal (Johto) and Platinum (Sinnoh, Nintendo DS) — one game per region keeps things simple.
+PLATINUM_SHA1 = "ce81046eda7d232513069519cb2085349896dec7"     # Pokémon Platinum (USA, rev 0)
 KNOWN_GAMES = {
     "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1": GameInfo("yellow", "Pokémon Yellow", "kanto", True),
-    "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133": GameInfo("crystal", "Pokémon Crystal", "johto", True),   # v1.0
-    "f2f52230b536214ef7c9924f483392993e226cfb": GameInfo("crystal", "Pokémon Crystal", "johto", False),  # v1.1: unverified
+    "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133": GameInfo("crystal", "Pokémon Crystal", "johto", True, "gbc"),  # v1.0
+    "f2f52230b536214ef7c9924f483392993e226cfb": GameInfo("crystal", "Pokémon Crystal", "johto", False, "gbc"),  # v1.1
+    PLATINUM_SHA1: GameInfo("platinum", "Pokémon Platinum", "sinnoh", True, "nds"),
 }
 CRYSTAL_REVISIONS = {
     "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133": "1.0",
@@ -35,21 +43,31 @@ for _g in KNOWN_GAMES.values():          # first entry per id wins (Crystal v1.0
 REGIONS = [
     ("kanto", "Kanto", ["yellow"]),
     ("johto", "Johto", ["crystal"]),
+    ("sinnoh", "Sinnoh", ["platinum"]),
 ]
+GAME_FILE_TYPES = [("Pokémon game file", "*.gb *.gbc *.nds"), ("All files", "*.*")]
 
 
 def region_name(game_id) -> str:
-    """'Kanto' / 'Johto' for a game id, '' if unknown (e.g. still on the title screen)."""
+    """'Kanto' / 'Johto' / 'Sinnoh' for a game id, '' if unknown (e.g. still on the title screen)."""
     info = GAMES_BY_ID.get(game_id or "")
     return next((name for rid, name, _ in REGIONS if info and rid == info.region), "")
 
 
+_SHA_CACHE: dict = {}
+
+
 def sha1_file(path) -> str:
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 16), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    """SHA1 of a file (cached per path/size/mtime: a DS ROM is 128 MB)."""
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_size, st.st_mtime_ns)
+    if key not in _SHA_CACHE:
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        _SHA_CACHE[key] = h.hexdigest()
+    return _SHA_CACHE[key]
 
 
 def identify(path) -> GameInfo | None:
@@ -108,8 +126,8 @@ class Library:
         """Identify a ROM and keep a private copy. Raises ValueError for unknown files."""
         info = identify(path)
         if info is None:
-            raise ValueError("That file isn't English Pokémon Yellow or Crystal (the two supported games).")
-        dest = self.dir / "roms" / f"{info.id}.gb{'c' if info.region == 'johto' else ''}"
+            raise ValueError("That file isn't English Pokémon Yellow, Crystal or Platinum (the supported games).")
+        dest = self.dir / "roms" / f"{info.id}{info.ext}"
         if Path(path).resolve() != dest.resolve():
             shutil.copy2(path, dest)
         self.cfg.setdefault("games", {})[info.id] = str(dest)

@@ -47,7 +47,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r client/requirements.txt pyinstaller
           # setup_dialog.py needs tkinter; fail early if this Python lacks it
-          python -c "import tkinter, pygame, pyboy, websockets, numpy; print('deps ok')"
+          python -c "import tkinter, pygame, pyboy, websockets, numpy, desmume.emulator; print('deps ok')"
 
       - name: Build YellowLink.exe
         run: pyinstaller --noconfirm --clean client/yellowlink.spec
@@ -67,6 +67,32 @@ jobs:
             exit 1
           fi
           sha256sum "$EXE" | tee dist/YellowLink.exe.sha256
+
+      - name: Smoke test - the exe can start the DS emulator (Pokémon Platinum)
+        # Starts pygame, our sound device and DeSmuME exactly like the game, then runs a 1 MB do-nothing test
+        # .nds (zeros + header, made by the exe itself - no Nintendo data). A missing libdesmume.dll / SDL2.dll,
+        # a broken import or a crash fails the build. Run twice: dummy audio, and the runner's real (absent)
+        # sound card, which must fall back to silence instead of crashing.
+        run: |
+          mkdir -p smoke
+          for mode in dummy real; do
+            if [[ "$mode" == "dummy" ]]; then export SDL_AUDIODRIVER=dummy; else unset SDL_AUDIODRIVER; fi
+            set +e
+            SDL_VIDEODRIVER=dummy ./dist/YellowLink.exe --selftest-ds "smoke/selftest-$mode.txt" make
+            CODE=$?
+            set -e
+            echo "--- selftest ($mode audio): exit $CODE"
+            cat "smoke/selftest-$mode.txt" || echo "::error::no selftest report ($mode)"
+            # also as an annotation (readable with `gh run view` without downloading the log)
+            echo "::notice title=DS selftest ($mode audio)::$(tr -d '\r' < "smoke/selftest-$mode.txt" 2>/dev/null | tr '\n' ' ')"
+            if [[ $CODE -ne 0 ]] || ! grep -q "^OK$" "smoke/selftest-$mode.txt"; then
+              echo "::error::YellowLink.exe could not start the DS emulator ($mode audio)"
+              exit 1
+            fi
+          done
+          echo "--- files DeSmuME left next to the exe (should be none):"
+          ls -la dist
+          echo "::notice title=dist after the DS selftest::$(ls dist | tr '\n' ' ')"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

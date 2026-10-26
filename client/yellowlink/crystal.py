@@ -1094,16 +1094,25 @@ class Gen2PC:
                 "ot": text.decode(rec[BOX_MON_SIZE:BOX_MON_SIZE + NAME_SIZE]),
                 "otid": (rec[6] << 8) | rec[7], "gen1": None, "gen2": b64(rec[:RECORD_SIZE])}
 
+    plat_rom = None             # Platinum ROM data (ndsrom.PlatinumData) if the player has that game
+
     def record_for(self, entry: dict) -> bytes:
-        """Bytes to show in Crystal: own Gen-2 data, else a Time-Capsule conversion of the Gen-1 data,
-        else a stand-in."""
-        if entry.get("gen2"):
-            return unb64(entry["gen2"])
-        if entry.get("gen1"):
-            rec = gen1_to_gen2(unb64(entry["gen1"]), int(entry.get("dex") or 0))
-            if rec is not None:
-                return rec
-        return self.standin(entry)
+        """Bytes to show in Crystal, from the entry's current representation (SPEC.md section 5): own Gen-2 data,
+        else a Time-Capsule conversion of the Gen-1 data or a conversion of the Gen-4 data, else a stand-in."""
+        from .pcdb import current_rep
+        rep, data = current_rep(entry, "gen2")
+        rec = None
+        try:
+            if rep == "gen2":
+                return data
+            if rep == "gen1":
+                rec = gen1_to_gen2(data, int(entry.get("dex") or 0))
+            elif rep == "gen4":
+                from . import pk4
+                rec = pk4.to_gen2(data, rom=self.plat_rom, g2rom=self.rom)
+        except Exception:  # noqa: BLE001 - damaged data from a friend: show a stand-in instead
+            rec = None
+        return rec if rec is not None else self.standin(entry)
 
     def standin(self, entry: dict) -> bytes:
         level = max(2, min(100, int(entry.get("level") or 5)))

@@ -9,6 +9,11 @@ from . import library, text
 from .config import app_dir, normalize_url, url_looks_ok
 
 
+def save_size(info) -> int:
+    """Battery save size: 32 KB for the Game Boy games, 512 KB for Pokémon Platinum."""
+    return 512 * 1024 if info.platform == "nds" else 32768
+
+
 def run_setup(cfg, first_run: bool) -> bool:
     """Show the settings form. Returns True if the user saved valid settings."""
     import tkinter as tk
@@ -36,11 +41,11 @@ def run_setup(cfg, first_run: bool) -> bool:
     several = len(getattr(cfg, "servers", None) or []) > 1
     row(2, "Server address" + (" (this server)" if several else ""), "server_url")
     row(3, "Room password", "room_key", show="•")
-    row(4, "Your game file (.gb / .gbc)", "rom_path")
+    row(4, "Your game file (.gb / .gbc / .nds)", "rom_path")
 
     def browse_rom():
-        p = filedialog.askopenfilename(title="Select your Pokémon Yellow ROM",
-                                       filetypes=[("Game Boy ROM", "*.gb *.gbc"), ("All files", "*.*")])
+        p = filedialog.askopenfilename(title="Select your Pokémon game file",
+                                       filetypes=library.GAME_FILE_TYPES)
         if p:
             fields["rom_path"].set(p)
 
@@ -51,8 +56,8 @@ def run_setup(cfg, first_run: bool) -> bool:
     tk.Entry(root, textvariable=sav_var, width=42).grid(row=5, column=1, sticky="we", **pad)
 
     def browse_sav():
-        p = filedialog.askopenfilename(title="Select a Pokémon Yellow save file",
-                                       filetypes=[("Save file", "*.sav *.srm *.ram"), ("All files", "*.*")])
+        p = filedialog.askopenfilename(title="Select a Pokémon save file",
+                                       filetypes=[("Save file", "*.sav *.srm *.ram *.dsv"), ("All files", "*.*")])
         if p:
             sav_var.set(p)
 
@@ -75,18 +80,19 @@ def run_setup(cfg, first_run: bool) -> bool:
             return
         rom = fields["rom_path"].get().strip().strip('"')
         if not rom or not Path(rom).is_file():
-            messagebox.showerror("YellowLink", "Please select your Pokémon game file (.gb/.gbc).")
+            messagebox.showerror("YellowLink", "Please select your Pokémon game file (.gb/.gbc/.nds).")
             return
         info = library.identify(rom)
         if info is None:
-            messagebox.showerror("YellowLink", "That file isn't English Pokémon Yellow or Crystal.\n"
-                                               "Those are the two games YellowLink supports.")
+            messagebox.showerror("YellowLink", "That file isn't English Pokémon Yellow, Crystal or Platinum.\n"
+                                               "Those are the games YellowLink supports.")
             return
         sav = sav_var.get().strip().strip('"')
         if sav:
             p = Path(sav)
-            if not p.is_file() or p.stat().st_size < 32768:
-                messagebox.showerror("YellowLink", "That save file looks invalid (needs to be 32 KB).")
+            size = save_size(info)
+            if not p.is_file() or p.stat().st_size < size:
+                messagebox.showerror("YellowLink", f"That save file looks invalid (needs to be {size // 1024} KB).")
                 return
             cfg["current_game"] = info.id
             try:
@@ -96,7 +102,7 @@ def run_setup(cfg, first_run: bool) -> bool:
             if cfg.save_path.exists():
                 shutil.copy2(cfg.save_path, cfg.backup_dir / f"before-import-{int(time.time())}.sav")
             with open(p, "rb") as f:
-                data = f.read(32768)
+                data = f.read(size)       # DS .dsv files: the raw save comes first, then DeSmuME's footer
             cfg.save_path.write_bytes(data)
         cfg["name"] = name
         cfg["server_url"] = url

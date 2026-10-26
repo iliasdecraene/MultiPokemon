@@ -171,10 +171,16 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
 
     hy = h - hint_h + 6
     pygame.draw.line(surf, PANEL_HI, (x0 + 10, hy - 6), (x0 + SIDEBAR_W - 10, hy - 6))
-    hints = ["A button: X or A  ·  B button: Z or S",
-             "Start: Enter · Select: Bksp · Space: fast",
-             "Tab: multiplayer · T: chat · F4: leave battle",
-             "F1: help · F3: report · V: wide view"]
+    if getattr(app, "ds", False):
+        hints = ["A: X or A · B: Z or S · X: D · Y: C · L/R: Q/W",
+                 "Start: Enter · Select: Bksp · Space: fast",
+                 "Mouse on the lower screen: touch",
+                 "Tab: multiplayer · T: chat · F1: help"]
+    else:
+        hints = ["A button: X or A  ·  B button: Z or S",
+                 "Start: Enter · Select: Bksp · Space: fast",
+                 "Tab: multiplayer · T: chat · F4: leave battle",
+                 "F1: help · F3: report · V: wide view"]
     for hline in hints:
         text(surf, f.small, hline, (x, hy), DIM)
         hy += 19
@@ -313,7 +319,24 @@ def draw_link_menu(surf, f, app, game_w, game_h):
     modal(surf, f, game_w, game_h, "Link menu", lines, footer)
 
 
-def draw_help(surf, f, game_w, game_h):
+def draw_help(surf, f, game_w, game_h, ds=False):
+    if ds:
+        lines = [
+            ("Nintendo DS controls", ACCENT),
+            "  A: X or A     B: Z or S",
+            "  X: D     Y: C     L: Q     R: W",
+            "  Start: Enter     Select: Backspace",
+            "  D-pad: arrows     Touch: mouse",
+            ("  (click / drag on the lower screen)", DIM),
+            ("YellowLink", ACCENT),
+            "  Tab: multiplayer     T: chat",
+            "  Space: fast-forward     M: mute",
+            "  -/+: volume     F5/F6: window size",
+            "  F3: report a problem",
+            ("Save in-game as usual (X > Save).", DIM),
+        ]
+        modal(surf, f, game_w, game_h, "How to play", lines, "[Esc / Enter / F1] close")
+        return
     lines = [
         ("Game Boy controls", ACCENT),
         "  A button (talk, confirm, next text):  X  or  A",
