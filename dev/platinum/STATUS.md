@@ -204,3 +204,6 @@
 
 ## Soul Link for Platinum (2026-10-26 afternoon) — branch platinum-soullink
 - coordinator: two agents: "sl-mem" (platinum.py Soul Link helpers, areas, states, verify) and "sl-app" (challenge_view/challenge/panels/server/SPEC/e2e). Helper names = crystal.py Soul Link section names.
+
+## Soul Link for Platinum (restarted 2026-10-26 ~15:00, on top of 0.7.2) - branch platinum-soullink, checkout /home/claude/yellowlink
+- coordinator: two agents: "sl-mem" (platinum.py Soul Link helpers, areas, states, verify) and "sl-app" (challenge_view/challenge/panels/server/SPEC/e2e). Helper names = crystal.py Soul Link section names. Exp Share All is being built in parallel on branch exp-share-all (/home/claude/yl-exp) - do not touch that checkout.
