@@ -188,6 +188,37 @@ YL_RAID_OPEN=20       # each raid stays open 20 minutes instead of 15
 ```
 The current raid and the last 100 are kept in `data/raids.json` (a raid continues after a restart).
 
+### Open a raid yourself: `yl-raid`
+Install it **once** (after `sudo yl-update` brought your servers to the version that has it). It is a link to the
+copy in `/opt/yellowlink`, so every later update also updates the command - nothing to change in `yl-update`:
+```bash
+sudo ln -sf /opt/yellowlink/server/tools/yl-raid /usr/local/bin/yl-raid
+```
+Then, on the server:
+```bash
+sudo yl-raid                                                          # a random raid, right now
+sudo yl-raid --region sinnoh --pokemon rayquaza --place "Route 210"   # exactly this one
+sudo yl-raid --region kanto --pokemon random --place random --shiny yes
+sudo yl-raid --list                                                   # all regions, places and raid Pokémon
+sudo yl-raid --list --region johto                                    # ... of one region
+sudo yl-raid --help                                                   # every option
+```
+- Region, place and Pokémon can each be `random` or left out (= random). Upper/lower case doesn't matter; a Pokémon
+  can also be its number (`--pokemon 384`). A place is a route or town of that region; the den still goes on a
+  good spot there. `--shiny yes|no|random` (random = the normal 1 in 20), `--minutes 20` (default 15).
+- It answers in one sentence, e.g. `Raid opened on Fly: Rayquaza on Route 210 (Sinnoh), 15 minutes. 2 players
+  online were notified.` A wrong name gets a "did you mean ...?" and nothing happens.
+- If a raid is still running it says so and does nothing; add `--replace` to end that one (its players are told)
+  and open yours.
+- It opens even when nobody is online (it tells you; whoever comes online while it's open sees it).
+- The normal 2-hour raids carry on as before: if one is due while yours is open, it waits until yours is over
+  (plus 2 minutes).
+- Several servers on this machine: it asks which one (or add `--server Fly`, `--server yellowlink` or
+  `--server all`; `sudo yl-raid --servers` lists them). It finds them by itself in `/opt/yellowlink*/` - a new
+  server there works without changing anything.
+- `... runs an older YellowLink without this command` = update first (`sudo yl-update`); `... isn't running` = start
+  that server (`sudo docker compose up -d` in its `server` folder).
+
 ## Merging two servers into one
 
 Everything a player has (saves, PC, Soul Link runs) stays: the second server's data is copied into the first, and

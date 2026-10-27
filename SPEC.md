@@ -1081,6 +1081,41 @@ the pool never goes below 0. Damage log per player (claimed, dealt, hits) in the
   {region: {"species", "map"}}, "history": [raid, ... last 100]}` (atomic, debounced). After a restart the current
   raid continues (its timers re-armed; one that closed meanwhile ends with reason `time`).
 
+### Admin raids (`yl-raid`, added after 0.7.9; server only, no protocol change)
+The host opens a raid by hand: `sudo yl-raid [--region R] [--place P] [--pokemon X] [--shiny yes|no|random]
+[--minutes N] [--replace] [--server NAME|all]`, `sudo yl-raid --list [--region R]` (DEPLOY.md "Raids").
+- `server/tools/yl-raid` (bash, on the host, symlinked into /usr/local/bin) finds the servers itself: every
+  `/opt/yellowlink*/server` with a `docker-compose.yml`; container = `YL_NAME` from its `.env` (default `yellowlink`);
+  servers with `YL_MOVED_TO` (forwarders) are skipped. `--server` matches the container name, the folder or
+  `YL_SERVER_NAME` (any case); without it: the only server, else a numbered question (or, without a keyboard, the
+  list + exit 2). It runs `docker exec <container> python -m yellowlink_server.raidctl --label <container> ...`.
+- `yellowlink_server/raidctl.py` (inside the container, same config/env as the server) checks the choices against
+  the server's own data, loosely (case, accents, spaces and dashes don't matter; Pokémon also by dex number; a bare
+  number as place = that route), with "did you mean" suggestions: region in `REGIONS` (`yellow`/`crystal`/`platinum`
+  also accepted), the Pokémon in that region's pool, the place = a map name in that region's spot data. Each can be
+  `random` or left out. Region random + Pokémon/place given = only the regions that fit. Then it writes
+  `<data_dir>/admin/raid-<id>.json` = `{"version": 1, "action": "spawn", "created" (unix time), "regions": [...],
+  "species": dex|null, "place": name|null, "shiny": bool|null, "minutes": 1-120 (default `YL_RAID_OPEN`),
+  "replace": bool}` and waits up to 10 s for the server to take it; if it didn't, the request is deleted again
+  (withdrawn: a server started later never acts on it), else up to 10 s more for the answer.
+- The server (`RaidHub._loop`, every second; the scheduler still every 5 s) takes a request by renaming it
+  (`.taken`), answers `<data_dir>/admin/raid-<id>.result.json` = `{"ok", "message", ...}` and the command prints
+  `Raid opened on <container>: <message>` (or `<container>: <message>`). Requests older than 60 s are answered
+  "too old" and not done. Exit codes: 0 opened, 1 refused / no answer, 2 a wrong choice (nothing sent).
+- The raid opens through the normal `spawn` (notice, system line, persistence, everything); region weighted by
+  who's online like the scheduler (any fitting region when nobody is); Pokémon/shiny random like a scheduled raid
+  when not given; a chosen place is a map name (several maps can share it) and the spot on it is still picked
+  (reachable for the players online if possible, else the easiest spots of that place). The record gets
+  `"forced": true` (server-only, not in the raid object sent to clients). It opens even when nobody is online (the
+  answer says so; whoever logs in while it's open gets the catch-up `raid_open`).
+- A raid already running: refused ("A raid is already running: ... Nothing was changed - add --replace") unless
+  `replace`: the running raid ends with reason `ended` (fighting players -> `fled`; system line `The host ended
+  the raid against Mew.`; in phase `down` the players keep their state: their throw was rolled already), then the
+  new one opens. The old raid is ended only once the new one can open.
+- The schedule isn't touched: a forced raid doesn't set `last_slot` and doesn't count for the gap rule (min(60 min,
+  every / 2) after the last *scheduled* raid). A slot's raid that comes due while a forced raid is open waits until
+  it is over plus `FORCED_BREATHER` (2 minutes), and is skipped as usual if it no longer fits into its slot.
+
 ### Raid object (S→C)
 `{"id", "region", "game", "species" (national dex), "name" (species), "form", "shiny", "spot": {"map", "x", "y",
 "name"}, "opens", "closes" (server unix time), "now" (server time when sent), "pool", "pool_max", "bars_per_player",
@@ -1096,7 +1131,7 @@ the pool never goes below 0. Damage log per player (claimed, dealt, hits) in the
 | C→S | `raid_damage` | `id`, `dealt` (int, running total in milli-bars, 0..10^7) | unknown/finished raid or not fighting: ignored silently |
 | S→C | `raid_down` | `id`, `chance` (0..1 = dealt / dealt of everyone still fighting), `catch` bool (the server's roll) | to every participant still `fighting` when the pool hits 0 (again after a reconnect until they reported); the game then allows one ball, which catches iff `catch` |
 | C→S | `raid_result` | `id`, `outcome`: `caught` \| `missed` \| `blackout` \| `left` \| `fled` \| `unstarted` | ends that player's raid; `caught` -> system line `Ilias caught Rayquaza!`. `unstarted` (the raid battle never started in that game, e.g. no quiet moment within 20 s): the player is taken off the raid as if they had never joined (no damage dealt yet: their bars are taken back off the pool, at most down to 1 milli-bar) and can join again. Stale ids / repeats: ignored |
-| S→C | `raid_end` | `id`, `reason`: `down` \| `time`, `caught` [names], `raid` | the raid is over (phase `over`); `time` = the boss fled in every game still fighting. Plus a system line: `Rayquaza fled - the raid is over.` / `Raid over: Ilias and Alex caught Rayquaza!` / `Raid over: Rayquaza got away.` |
+| S→C | `raid_end` | `id`, `reason`: `down` \| `time` \| `ended`, `caught` [names], `raid` | the raid is over (phase `over`); `time` = the boss fled in every game still fighting; `ended` = the host ended it (`yl-raid --replace`; clients 0.7.9 handle it like any reason but `time`: a running raid battle flees without the "Time's up" toast - the system line says it; in the catch phase the throw goes on, its result was rolled already). Plus a system line: `Rayquaza fled - the raid is over.` / `Raid over: Ilias and Alex caught Rayquaza!` / `Raid over: Rayquaza got away.` |
 
 Phase `down` ends when every participant who was fighting at that moment reported, or 3 minutes after it began
 (`DOWN_GRACE`). Phase `open` ends at `closes`. A participant who never reports is listed with the state they had.

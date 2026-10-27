@@ -16,6 +16,7 @@ import re
 import secrets
 import tempfile
 import time
+import unicodedata
 
 log = logging.getLogger("yellowlink.raids")
 
@@ -30,6 +31,12 @@ SHINY_ODDS = 20                  # 1 in 20 (decision 8)
 TICK = 5.0                       # scheduler interval (seconds)
 MIN_GAP_MAX = 3600.0             # a raid opens at least min(this, every / 2) after the previous one ended
 RETRY_MARGIN = 30.0              # the slot's raid must open at least this long before the slot's end - open time
+# Admin raids (`yl-raid` on the host -> `raidctl` in the container -> <data_dir>/admin/raid-<id>.json, SPEC.md 12)
+ADMIN_POLL = 1.0                 # seconds between looks into the admin folder
+ADMIN_MAX_AGE = 60.0             # an older request (the server was down when it was made) is answered, not done
+ADMIN_KEEP = 600.0               # leftover result files are removed after this long
+FORCED_BREATHER = 120.0          # a scheduled raid opens at least this long after a forced raid ended
+FORCED_MINUTES_MAX = 120
 
 REGIONS = ("kanto", "johto", "sinnoh")
 REGION_NAMES = {"kanto": "Kanto", "johto": "Johto", "sinnoh": "Sinnoh"}
@@ -53,6 +60,7 @@ DEOXYS = 386
 OUTCOMES = ("caught", "missed", "blackout", "left", "fled", "unstarted")
 SPOTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "raid_spots.json")
 RAID_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+ADMIN_REQ_RE = re.compile(r"^raid-([A-Za-z0-9_-]{1,40})\.json$")
 
 
 class RaidInvalid(Exception):
@@ -107,6 +115,24 @@ def parse_force(text: str):
     return parts[0], species, shiny
 
 
+def norm(text) -> str:
+    """Loose match key for names typed by a person: 'Ho-Oh' / 'hooh', 'route210' / 'Route 210', 'pokemon league'."""
+    t = unicodedata.normalize("NFKD", str(text or "")).casefold()
+    return "".join(ch for ch in t if ch.isalnum() and not unicodedata.combining(ch))
+
+
+def describe(r) -> str:
+    """'Rayquaza on Route 210 (Sinnoh)' / 'shiny Mew in Cerulean City (Kanto)'."""
+    return (f"{'shiny ' if r.get('shiny') else ''}{r['name']} {place_phrase(r['spot']['name'])} "
+            f"({REGION_NAMES.get(r['region'], r['region'])})")
+
+
+def place_maps(data: dict, place: str) -> set:
+    """Map ids (as strings) of a region's spot data whose name is `place` (loose match)."""
+    key = norm(place)
+    return {str(m) for m, name in (data.get("names") or {}).items() if norm(name) == key}
+
+
 def load_spots(path: str = SPOTS_FILE) -> dict:
     """The vendored spot sample: {region: {"names": {map: name}, "spots": [[map, x, y, reach], ...]}}."""
     try:
@@ -153,20 +179,59 @@ def pick(seed: str, online: list, spots: dict, last: dict, force=None) -> dict |
         shiny = force[2]
     form = rng.randrange(4) if species == DEOXYS else 0
     # spot: reachable for everyone online who plays that region (the lowest badge count among them)
+    spot = _spot(rng, spots[region], _reach_limit(online, region), prev.get("map"))
+    return {"region": region, "species": species, "shiny": shiny, "form": form, "spot": spot}
+
+
+def _reach_limit(online: list, region: str) -> int:
+    """The lowest badge count among the online raid-capable players of that region (0 if none)."""
     reaches = [int((o.get("reach") or {}).get(region, 0) or 0) for o in online
                if GAME_OF_REGION[region] in (o.get("games") or ())]
-    limit = min(reaches) if reaches else 0
-    data = spots[region]
-    cands = [s for s in data["spots"] if s[3] <= limit]
+    return min(reaches) if reaches else 0
+
+
+def _spot(rng, data: dict, limit: int, prev_map=None, maps: set | None = None) -> dict | None:
+    """A spot everyone online can reach (reach <= limit; else the easiest ones), on another map than `prev_map`
+    if possible. `maps` (map ids as strings): only spots on those maps (an admin's chosen place)."""
+    pool = data["spots"] if maps is None else [s for s in data["spots"] if str(s[0]) in maps]
+    if not pool:
+        return None
+    cands = [s for s in pool if s[3] <= limit]
     if not cands:
-        low = min(s[3] for s in data["spots"])
-        cands = [s for s in data["spots"] if s[3] == low]
-    maps = sorted({s[0] for s in cands})                   # each map equally likely, then a spot on it
-    m = rng.choice([v for v in maps if v != prev.get("map")] or maps)
+        low = min(s[3] for s in pool)
+        cands = [s for s in pool if s[3] == low]
+    ids = sorted({s[0] for s in cands})                     # each map equally likely, then a spot on it
+    m = rng.choice([v for v in ids if v != prev_map] or ids)
     x, y = rng.choice([(s[1], s[2]) for s in cands if s[0] == m])
     name = data["names"].get(str(m)) or f"map {m}"
-    return {"region": region, "species": species, "shiny": shiny, "form": form,
-            "spot": {"map": m, "x": x, "y": y, "name": name}}
+    return {"map": m, "x": x, "y": y, "name": name}
+
+
+def pick_admin(rng, online: list, spots: dict, last: dict, regions, species=None, place=None, shiny=None):
+    """An admin's raid (`yl-raid`): region among `regions` (weighted by who is online there, like the scheduler;
+    any of them when nobody plays one), `species` / `place` / `shiny` or random (None) like a scheduled raid.
+    A chosen place = a map; the spot on it is still picked (reachable for the players online if possible).
+    None = no raid possible with those choices."""
+    regions = sorted(r for r in set(regions or ()) if r in POOLS and r in spots and spots[r]["spots"]
+                     and (species is None or species in POOLS[r])
+                     and (not place or place_maps(spots[r], place)))
+    if not regions:
+        return None
+    weights = [sum(1 for o in online if GAME_OF_REGION[r] in (o.get("games") or ())) for r in regions]
+    region = rng.choices(regions, weights)[0] if any(weights) else rng.choice(regions)
+    prev = last.get(region) or {}
+    if species is None:
+        species = rng.choice([s for s in POOLS[region] if s != prev.get("species")] or list(POOLS[region]))
+    shiny = (rng.randrange(SHINY_ODDS) == 0) if shiny is None else bool(shiny)
+    form = rng.randrange(4) if species == DEOXYS else 0
+    data = spots[region]
+    if place:
+        spot = _spot(rng, data, _reach_limit(online, region), None, place_maps(data, place))
+    else:
+        spot = _spot(rng, data, _reach_limit(online, region), prev.get("map"))
+    if spot is None:
+        return None
+    return {"region": region, "species": species, "shiny": shiny, "form": form, "spot": spot}
 
 
 def new_participant(name: str, level: int, now: float) -> dict:
@@ -190,6 +255,9 @@ class RaidHub:
         self.clock = time.time
         self.rng = random.SystemRandom()
         self.update_every = 0.5
+        self.admin_dir = os.path.join(data_dir, "admin")
+        self.admin_every = ADMIN_POLL
+        self._admin_cleaned = 0.0
         self.spots = load_spots(getattr(config, "raid_spots", "") or SPOTS_FILE) if self.enabled else {}
         self.salt = secrets.token_hex(8)
         self.current: dict | None = None
@@ -286,6 +354,10 @@ class RaidHub:
         if self.first >= 0:
             self._first_at = self.clock() + self.first
         if self.enabled:
+            try:
+                os.makedirs(self.admin_dir, exist_ok=True)
+            except OSError as exc:
+                log.warning("no admin folder %s (%s): yl-raid won't work", self.admin_dir, exc)
             self._loop_task = asyncio.get_running_loop().create_task(self._loop())
 
     async def stop(self):
@@ -296,11 +368,21 @@ class RaidHub:
             self._try_save()
 
     async def _loop(self):
+        """Every second: admin requests (yl-raid); every TICK seconds: the scheduler."""
+        next_tick = time.monotonic() + TICK
         while True:
             try:
-                await asyncio.sleep(TICK)
-                if self.auto:
-                    await self.tick()
+                await asyncio.sleep(self.admin_every)
+                await self.check_admin()
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001 - the scheduler must keep running
+                log.exception("raid admin request failed")
+            try:
+                if time.monotonic() >= next_tick:
+                    next_tick = time.monotonic() + TICK
+                    if self.auto:
+                        await self.tick()
             except asyncio.CancelledError:
                 return
             except Exception:  # noqa: BLE001 - the scheduler must keep running
@@ -346,44 +428,57 @@ class RaidHub:
             self.last_slot = slot
             self.schedule_save()
             return
-        last_end = self.history[-1].get("ended") if self.history else None
+        # the gap rule counts scheduled raids only: a forced raid (yl-raid) is an extra that doesn't move the
+        # schedule; the slot's raid just waits until it is over (+ a short breather)
+        sched = next((h for h in reversed(self.history) if not h.get("forced")), None)
+        last_end = sched.get("ended") if sched else None
         if isinstance(last_end, (int, float)) and now < last_end + min(MIN_GAP_MAX, self.every / 2):
             return                                            # the previous raid (a late one) ended too recently
+        prev = self.history[-1] if self.history else {}
+        if prev.get("forced") and isinstance(prev.get("ended"), (int, float)) and now < prev["ended"] + FORCED_BREATHER:
+            return
         if not self.capable_online():
             return                                            # try again at the next tick
         await self.spawn(slot=slot, scheduled=True)
 
-    async def spawn(self, region=None, species=None, shiny=None, slot=None, scheduled=False):
-        """Open a raid now (scheduler, YL_RAID_FIRST, tests). Returns the live record or None. `scheduled`: the
-        slot's raid (last_slot is set and saved together with it)."""
+    async def spawn(self, region=None, species=None, shiny=None, slot=None, scheduled=False, choice=None,
+                    open_secs=None, forced=False):
+        """Open a raid now (scheduler, YL_RAID_FIRST, yl-raid, tests). Returns the live record or None. `scheduled`:
+        the slot's raid (last_slot is set and saved together with it). `choice` (from `pick_admin`), `open_secs` and
+        `forced`: an admin's raid (yl-raid) - the same path, the record gets `forced: true` (server-only)."""
         now = self.clock()
         slot = int(now // self.every) if slot is None else slot
-        force = self.force or (None, None, None)
-        if region is not None:
-            force = (region, species, shiny)
-        online = self.capable_online()
-        if force[0] and not online:
-            online = [{"games": [GAME_OF_REGION[force[0]]], "reach": {}}]
-        n = len(self.history) + 1
-        choice = pick(f"{self.salt}:{slot}:{n}", online, self.spots, self.last, force)
+        if choice is None:
+            force = self.force or (None, None, None)
+            if region is not None:
+                force = (region, species, shiny)
+            online = self.capable_online()
+            if force[0] and not online:
+                online = [{"games": [GAME_OF_REGION[force[0]]], "reach": {}}]
+            n = len(self.history) + 1
+            choice = pick(f"{self.salt}:{slot}:{n}", online, self.spots, self.last, force)
         if choice is None:
             if self._quiet_slot != slot:                  # the scheduler retries every few seconds: say it once
                 self._quiet_slot = slot
                 log.info("no raid possible right now (regions online: none with spot data)")
             return None
+        open_secs = self.open_secs if open_secs is None else float(open_secs)
         rid = f"{slot}-{secrets.token_hex(3)}"
         name = SPECIES_NAMES.get(choice["species"], f"#{choice['species']}")
         self.current = r = {
             "id": rid, "region": choice["region"], "game": GAME_OF_REGION[choice["region"]],
             "species": choice["species"], "name": name, "form": choice["form"], "shiny": choice["shiny"],
-            "spot": choice["spot"], "opens": now, "closes": now + self.open_secs, "pool": 0, "pool_max": 0,
+            "spot": choice["spot"], "opens": now, "closes": now + open_secs, "pool": 0, "pool_max": 0,
             "bars_per_player": BARS_PER_PLAYER, "phase": "open", "participants": {}}
+        if forced:
+            r["forced"] = True                            # server-only (summary() doesn't send it)
         self.last[r["region"]] = {"species": r["species"], "map": r["spot"]["map"]}
         if scheduled:
             self.last_slot = max(self.last_slot, slot)
-        log.info("raid %s: %s%s in %s at %s", rid, "shiny " if r["shiny"] else "", name, r["region"], r["spot"])
+        log.info("raid %s: %s%s in %s at %s%s", rid, "shiny " if r["shiny"] else "", name, r["region"], r["spot"],
+                 " (forced by the host)" if forced else "")
         self._try_save()
-        minutes = max(1, int(round(self.open_secs / 60)))
+        minutes = max(1, int(round(open_secs / 60)))
         who = f"A shiny {name}" if r["shiny"] else name
         await self.server.broadcast({"type": "raid_open", "raid": self.summary(r), "fresh": True})
         await self.server.system(("✨ " if r["shiny"] else "") + f"RAID! {who} appeared {place_phrase(r['spot']['name'])} "
@@ -396,11 +491,14 @@ class RaidHub:
     async def end(self, r, reason: str):
         if self.current is not r:
             return
+        was = r["phase"]
         r["phase"] = "over"
         r["ended"] = self.clock()
         r["reason"] = reason
         for p in r["participants"].values():
-            if p["state"] == "fighting" and reason == "time":
+            # `ended` (the host, yl-raid --replace) while open = the boss fled; while down the throws were rolled
+            # already: those players keep their state, like after DOWN_GRACE
+            if p["state"] == "fighting" and (reason == "time" or (reason == "ended" and was == "open")):
                 p["state"] = "fled"
         caught = [p["name"] for p in r["participants"].values() if p["state"] == "caught"]
         self.current = None
@@ -413,10 +511,136 @@ class RaidHub:
                                      "raid": self.summary(r)})
         if reason == "time":
             await self.server.system(f"{r['name']} fled - the raid is over.")
+        elif reason == "ended":
+            await self.server.system(f"The host ended the raid against {r['name']}.")
         elif caught:
             await self.server.system(f"Raid over: {names_text(caught)} caught {r['name']}!")
         else:
             await self.server.system(f"Raid over: {r['name']} got away.")
+
+    # ------------------------------------------------------------------ admin (yl-raid -> raidctl -> files)
+    async def check_admin(self):
+        """Answer the admin requests in <data_dir>/admin (raid-<id>.json -> raid-<id>.result.json). A request is
+        taken by renaming it first, so the waiting command and the server never both act on it."""
+        try:
+            names = sorted(os.listdir(self.admin_dir))
+        except OSError:
+            return
+        for fname in names:
+            m = ADMIN_REQ_RE.fullmatch(fname)
+            if not m:
+                continue
+            path = os.path.join(self.admin_dir, fname)
+            taken = path + ".taken"
+            try:
+                os.replace(path, taken)
+            except OSError:
+                continue                                  # the command gave up on it meanwhile
+            try:
+                with open(taken, encoding="utf-8") as fh:
+                    req = json.load(fh)
+                result = await self.admin_request(req)
+            except Exception as exc:  # noqa: BLE001 - always answer
+                log.exception("admin request %s failed", fname)
+                result = {"ok": False, "message": f"The server couldn't do that ({exc.__class__.__name__}: {exc})."}
+            finally:
+                try:
+                    os.unlink(taken)
+                except OSError:
+                    pass
+            self._write_admin_result(m.group(1), result)
+        self._clean_admin()
+
+    def _write_admin_result(self, rid: str, result: dict):
+        final = os.path.join(self.admin_dir, f"raid-{rid}.result.json")
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=".result-", suffix=".tmp", dir=self.admin_dir)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(result, fh)
+            os.replace(tmp, final)
+        except OSError:
+            log.exception("could not write the admin result %s", final)
+
+    def _clean_admin(self):
+        """Leftovers (results nobody read, half-taken requests) older than ADMIN_KEEP; at most once a minute."""
+        mono = time.monotonic()
+        if mono - self._admin_cleaned < 60:
+            return
+        self._admin_cleaned = mono
+        try:
+            for fname in os.listdir(self.admin_dir):
+                path = os.path.join(self.admin_dir, fname)
+                if fname.endswith((".result.json", ".taken", ".tmp")) and time.time() - os.path.getmtime(path) > ADMIN_KEEP:
+                    os.unlink(path)
+        except OSError:
+            pass
+
+    async def admin_request(self, req) -> dict:
+        """One yl-raid request (already checked by raidctl against this server's data; checked again here):
+        {"action": "spawn", "created", "regions": [...], "species": dex|null, "place": name|null,
+        "shiny": bool|null, "minutes": n|null, "replace": bool} -> {"ok", "message", "raid"?, "online"?}."""
+        if not isinstance(req, dict) or req.get("action") != "spawn":
+            return {"ok": False, "message": "Unknown request (is yl-raid newer than this server? sudo yl-update)."}
+        created = req.get("created")
+        if not isinstance(created, (int, float)) or time.time() - created > ADMIN_MAX_AGE:
+            return {"ok": False, "message": "That request is too old (the server wasn't running when it was made) - "
+                                            "nothing was done. Run the command again."}
+        if not self.enabled:
+            return {"ok": False, "message": "Raids are turned off on this server (YL_RAIDS=off in its .env)."}
+        regions = req.get("regions") or list(REGIONS)
+        species = req.get("species")
+        place = req.get("place") or None
+        shiny = req.get("shiny")
+        minutes = req.get("minutes")
+        if (not isinstance(regions, list) or not all(r in POOLS for r in regions)
+                or (species is not None and (isinstance(species, bool) or species not in SPECIES_NAMES))
+                or (place is not None and not isinstance(place, str))
+                or (shiny is not None and not isinstance(shiny, bool))
+                or (minutes is not None and (isinstance(minutes, bool) or not isinstance(minutes, (int, float))
+                                             or not 1 <= minutes <= FORCED_MINUTES_MAX))):
+            return {"ok": False, "message": "That request doesn't make sense to this server (sudo yl-update?)."}
+        open_secs = minutes * 60 if minutes is not None else self.open_secs
+        cur = self.current
+        if cur is not None and not req.get("replace"):
+            if cur["phase"] == "down":
+                state = "the boss is down and the players are throwing their Poké Balls"
+            else:
+                left = max(0, int(round((cur["closes"] - self.clock()) / 60)))
+                state = f"{left} minute{'s' if left != 1 else ''} left"
+            return {"ok": False, "busy": True,
+                    "message": f"A raid is already running: {describe(cur)}, {state}. Nothing was changed - add "
+                               f"--replace to end it and open yours."}
+        online = self.capable_online()
+        choice = pick_admin(random.Random(secrets.token_hex(8)), online, self.spots, self.last, regions, species,
+                            place, shiny)
+        if choice is None:
+            return {"ok": False, "message": "No raid fits those choices on this server (no spot data for that "
+                                            "region or place). Nothing was changed."}
+        ended = None
+        if cur is not None:
+            ended = describe(cur)
+            await self.end(cur, "ended")
+        r = await self.spawn(choice=choice, open_secs=open_secs, forced=True)
+        if r is None:
+            return {"ok": False, "message": "The raid couldn't open (see the server log)."}
+        n = len(self.server.clients)
+        can = sum(1 for o in online if r["game"] in o["games"])
+        mins = max(1, int(round(open_secs / 60)))
+        text = f"{describe(r)[0].upper()}{describe(r)[1:]}, {mins} minute{'s' if mins != 1 else ''}."
+        if n == 0:
+            text += (f" Nobody is online right now - it's open anyway: whoever comes online in the next {mins} "
+                     f"minute{'s' if mins != 1 else ''} sees it.")
+        else:
+            text += f" {n} player{'s' if n != 1 else ''} online {'were' if n != 1 else 'was'} notified"
+            if can < n:
+                text += (f" ({can} of them can join: the raid needs Pokémon {r['game'].capitalize()} and not being "
+                         f"in a Soul Link run)")
+            text += "."
+        if ended:
+            text += f" The raid that was running ({ended}) was ended first; its players were told."
+        return {"ok": True, "message": text, "online": n, "can_join": can, "replaced": ended,
+                "raid": {k: r[k] for k in ("id", "region", "species", "name", "shiny", "form", "spot", "opens",
+                                           "closes")}}
 
     # ------------------------------------------------------------------ views
     def summary(self, r) -> dict:

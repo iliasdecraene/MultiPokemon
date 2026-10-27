@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# yl-raid - open a YellowLink raid right now on one of the servers on this machine (or list the choices).
+#
+# Install once (it then updates itself with every `git pull` / `sudo yl-update`):
+#   sudo ln -sf /opt/yellowlink/server/tools/yl-raid /usr/local/bin/yl-raid
+#
+# It finds the servers by itself (every /opt/yellowlink*/server with a docker-compose.yml; the container name is
+# YL_NAME in its .env, default "yellowlink") and runs the server's own checker inside the container:
+#   docker exec <container> python -m yellowlink_server.raidctl ...
+# which hands the raid to the running server through its data folder (SPEC.md section 12, "Admin raids").
+
+set -u
+
+SERVERS_GLOB="${YL_SERVERS_GLOB:-/opt/yellowlink*}"     # (tests point this somewhere else)
+
+usage() {
+    cat <<'EOF'
+yl-raid - open a raid right now on your YellowLink server
+
+  sudo yl-raid                                   a random raid (like the 2-hour ones)
+  sudo yl-raid --region sinnoh --pokemon rayquaza --place "Route 210"
+  sudo yl-raid --region kanto --pokemon random --place random --shiny yes
+  sudo yl-raid --list                            regions, places and raid Pokémon
+  sudo yl-raid --list --region johto             ... of one region
+
+Choices (each can be "random" or left out = random):
+  --region R      kanto, johto or sinnoh
+  --place P       a route or town in that region, e.g. "Route 210" (quotes when it has a space)
+  --pokemon X     a raid Pokémon of that region, by name or number (rayquaza or 384)
+  --shiny S       yes, no or random (random = the normal 1 in 20)
+  --minutes N     how long it stays open (default 15)
+
+  --replace       if a raid is still running: end it first (its players are told) and open yours
+  --server NAME   which server: its name (e.g. Fly) or folder (yellowlink2), or "all".
+                  Only needed when there is more than one server on this machine.
+  --servers       show the servers on this machine
+  -h, --help      this text
+
+Upper/lower case doesn't matter. A raid opened this way works exactly like a normal one, opens even when nobody
+is online, and doesn't change the normal 2-hour raids.
+EOF
+}
+
+env_get() {   # env_get FILE KEY -> the value of KEY=... in a .env file (last one wins, quotes removed)
+    local line
+    line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?$2[[:space:]]*=" "$1" 2>/dev/null | tail -n 1) || true
+    line="${line#*=}"
+    line="${line%$'\r'}"
+    line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    case "$line" in
+        \"*\") line="${line#\"}"; line="${line%\"}" ;;
+        \'*\') line="${line#\'}"; line="${line%\'}" ;;
+    esac
+    printf '%s' "$line"
+}
+
+# ---------------------------------------------------------------- arguments (yl-raid only looks at its own)
+server_arg=""
+listing=0
+pass=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help|help) usage; exit 0 ;;
+        --server) [ $# -ge 2 ] || { echo "--server needs a name (see: sudo yl-raid --servers)"; exit 2; }
+                  server_arg="$2"; shift 2; continue ;;
+        --server=*) server_arg="${1#*=}"; shift; continue ;;
+        --servers) server_arg="?"; shift; continue ;;
+        --list) listing=1; pass+=("$1") ;;
+        --label|--label=*|--data-dir|--data-dir=*|--wait|--wait=*)
+                  echo "Unknown option $1 (see: yl-raid --help)"; exit 2 ;;
+        *) pass+=("$1") ;;
+    esac
+    shift
+done
+
+# ---------------------------------------------------------------- find the servers
+names=(); dirs=(); labels=(); folders=()
+for d in $SERVERS_GLOB; do
+    d="${d%/}"
+    [ -f "$d/server/docker-compose.yml" ] || continue
+    envf="$d/server/.env"
+    cname="yellowlink"; sname=""; moved=""; port="8765"
+    if [ -f "$envf" ]; then
+        v=$(env_get "$envf" YL_NAME); [ -n "$v" ] && cname="$v"
+        sname=$(env_get "$envf" YL_SERVER_NAME)
+        moved=$(env_get "$envf" YL_MOVED_TO)
+        v=$(env_get "$envf" YL_HOST_PORT); [ -n "$v" ] && port="$v"
+    fi
+    [ -n "$moved" ] && continue                       # a forwarder (after a merge) has no players
+    names+=("$cname"); dirs+=("$d"); folders+=("$(basename "$d")")
+    info="$d, port $port"
+    [ -n "$sname" ] && info="$info, shown to players as \"$sname\""
+    labels+=("$info")
+done
+
+if [ ${#names[@]} -eq 0 ]; then
+    echo "No YellowLink server found on this machine (looked for $SERVERS_GLOB/server/docker-compose.yml)."
+    exit 1
+fi
+
+show_servers() {
+    local i
+    for i in "${!names[@]}"; do
+        printf '  %s  (%s)\n' "${names[$i]}" "${labels[$i]}"
+    done
+}
+
+if [ "$server_arg" = "?" ]; then
+    echo "YellowLink servers on this machine:"
+    show_servers
+    exit 0
+fi
+
+# ---------------------------------------------------------------- which server(s)
+chosen=()
+if [ -n "$server_arg" ]; then
+    want="${server_arg,,}"
+    if [ "$want" = "all" ]; then
+        chosen=("${!names[@]}")
+    else
+        for i in "${!names[@]}"; do
+            if [ "${names[$i],,}" = "$want" ] || [ "${folders[$i],,}" = "$want" ]; then
+                chosen=("$i"); break
+            fi
+        done
+        if [ ${#chosen[@]} -eq 0 ]; then
+            for i in "${!names[@]}"; do                 # also the name players see (YL_SERVER_NAME)
+                case "${labels[$i],,}" in *"\"$want\""*) chosen=("$i"); break ;; esac
+            done
+        fi
+        if [ ${#chosen[@]} -eq 0 ]; then
+            echo "There's no server called '$server_arg'. The servers on this machine:"
+            show_servers
+            echo "Use one of these names, or --server all."
+            exit 2
+        fi
+    fi
+elif [ ${#names[@]} -eq 1 ] || [ $listing -eq 1 ]; then
+    chosen=(0)                                         # the list is the same on every server
+elif [ -t 0 ]; then
+    echo "There are ${#names[@]} servers on this machine - which one?"
+    for i in "${!names[@]}"; do
+        printf '  %d) %s  (%s)\n' $((i + 1)) "${names[$i]}" "${labels[$i]}"
+    done
+    printf '  a) all of them\n'
+    printf 'Type a number (or a for all) and press Enter: '
+    read -r answer || answer=""
+    answer="$(printf '%s' "$answer" | tr -d '[:space:]')"
+    if [ "${answer,,}" = "a" ] || [ "${answer,,}" = "all" ]; then
+        chosen=("${!names[@]}")
+    elif [[ "$answer" =~ ^[0-9]+$ ]] && [ "$answer" -ge 1 ] && [ "$answer" -le ${#names[@]} ]; then
+        chosen=($((answer - 1)))
+    else
+        echo "Nothing chosen - nothing was done."
+        exit 2
+    fi
+else
+    echo "There are ${#names[@]} servers on this machine - say which one with --server NAME (or --server all):"
+    show_servers
+    exit 2
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker isn't installed on this machine (the YellowLink servers run in Docker)."
+    exit 1
+fi
+
+# ---------------------------------------------------------------- run it inside each chosen server
+run_on() {   # run_on INDEX
+    local cname="${names[$1]}" dir="${dirs[$1]}" out rc
+    out=$(docker exec "$cname" python -m yellowlink_server.raidctl --label "$cname" ${pass[@]+"${pass[@]}"} 2>&1)
+    rc=$?
+    case "$out" in
+        *"No module named yellowlink_server.raidctl"*)
+            echo "$cname runs an older YellowLink without this command - update it first: sudo yl-update"
+            return 1 ;;
+        *"No such container"*|*"is not running"*)
+            echo "$cname isn't running. Start it: cd $dir/server && sudo docker compose up -d"
+            return 1 ;;
+        *"Cannot connect to the Docker daemon"*|*"failed to connect to the docker API"*)
+            echo "Docker isn't running on this machine. Start it: sudo systemctl start docker"
+            return 1 ;;
+        *"permission denied"*"docker"*|*"Got permission denied"*)
+            echo "No permission to use Docker - run it with sudo: sudo yl-raid ..."
+            return 1 ;;
+    esac
+    printf '%s\n' "$out"
+    return $rc
+}
+
+status=0
+first=1
+for i in "${chosen[@]}"; do
+    [ $first -eq 1 ] || echo
+    first=0
+    run_on "$i" || { rc=$?; [ $status -eq 0 ] && status=$rc; }
+done
+exit $status
