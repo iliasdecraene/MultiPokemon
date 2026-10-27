@@ -177,10 +177,17 @@ B.select_player(ca["uid"])
 # 2. Soul Link: gold (Exp Share All off) for Ilias, silver (on) for Alex
 def start_run(exp_share):
     global A, B
+    # Alex's app may have (re)started just now: the server learns which run rules his client plays from its
+    # `library` message (sent right after `welcome`, shown as the roster's `challenge_rules`). A request with Exp
+    # Share All on that gets there first is refused ("Alex needs a newer YellowLink...") - the form only offers the
+    # rule once the roster lists it, so wait for that like a player would.
+    wait(lambda: entry(A, cb["uid"]).get("online") and A.can_exp_share_rule(cb["uid"]))
     A.new_challenge_form(cb["uid"], "Alex")
     A.chal_form["exp_share"] = exp_share
     A.send_challenge()
-    wait(lambda: B.prompt and B.prompt.get("kind") == "challenge")
+    asked = wait(lambda: B.prompt and B.prompt.get("kind") == "challenge")
+    if not asked:
+        print("  (Alex was never asked:", [line[1] for line in A.chat_log[-3:]], ")")
     time.sleep(0.3)
     B.respond_challenge(True)
     wait(lambda: A.enter_challenge and B.enter_challenge)
