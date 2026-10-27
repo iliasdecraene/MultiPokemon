@@ -162,6 +162,8 @@ class ReloadMixin:
             return "Finish your trade first."
         if self.battle or self.live or self.battle_offer:
             return "Finish your battle with your friend first."
+        if getattr(self, "raid_busy", lambda: False)():
+            return "Finish your raid first."
         if self._exp_award_busy():
             return "Wait until the experience is handed out."
         if self.pcsync.session_open or getattr(self, "_pt_pc", None):

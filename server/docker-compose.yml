@@ -18,6 +18,10 @@ services:
       # Optional: after merging this server into another one, forward players there (see DEPLOY.md "Merging").
       YL_MOVED_TO: ${YL_MOVED_TO:-}
       YL_MOVED_KEY: ${YL_MOVED_KEY:-}
+      # Optional: raids (on by default; see DEPLOY.md "Raids"): YL_RAIDS=off, minutes between raids, minutes open.
+      YL_RAIDS: ${YL_RAIDS:-}
+      YL_RAID_EVERY: ${YL_RAID_EVERY:-}
+      YL_RAID_OPEN: ${YL_RAID_OPEN:-}
     volumes:
       # players.json (and optionally config.json) live here on the host.
       - ./data:/data

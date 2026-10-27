@@ -40,6 +40,12 @@ def _panel_w(game_w):
     return min(game_w - 30, 620)
 
 
+def _raid_busy(app) -> bool:
+    """In a raid (joining / fighting): no travel, no server switch (raid.py)."""
+    fn = getattr(type(app), "raid_busy", None)
+    return bool(fn(app)) if fn is not None else False
+
+
 def button(surf, app, f, rect, label, cb, enabled=True, offset=(0, 0), primary=False, tip=""):
     """Draw a button and register its click target (in screen coordinates)."""
     screen_rect = rect.move(offset)
@@ -215,8 +221,8 @@ def draw_servers(surf, f, app, game_w, game_h, offset):
     else:
         text(surf, f.small, intro, (r.x + 18, y), DIM)
         y += 28
-    busy = bool(app.trade or app.battle or app.live or app.chal)
-    tip = "Pause your Soul Link first." if app.chal else "Finish your trade or battle first."
+    busy = bool(app.trade or app.battle or app.live or app.chal or _raid_busy(app))
+    tip = "Pause your Soul Link first." if app.chal else "Finish your trade, battle or raid first."
     row_h = 58
     for s in app.cfg.servers:
         if y + row_h > r.bottom - (98 if narrow else 60):
@@ -336,8 +342,8 @@ def draw_regions(surf, f, app, game_w, game_h, offset):
                 app.click_targets.append((br.move(offset), lambda: None, "you are here"))
             else:
                 button(surf, app, f, br, "Travel", lambda g=gid: app.travel(g), offset=offset, primary=True,
-                       enabled=not (app.trade or app.battle or app.live),
-                       tip="Finish your trade or battle first.")
+                       enabled=not (app.trade or app.battle or app.live or _raid_busy(app)),
+                       tip="Finish your trade, battle or raid first.")
             if len(have) > 1:
                 # optional: which version to play this region with
                 text(surf, f.small, "Play with:", (card.x + 14, card.y + 64 + extra), DIM)

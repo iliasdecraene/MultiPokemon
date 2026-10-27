@@ -85,14 +85,23 @@ class ChallengeMixin:
         # only games the rules can be enforced in (e.g. not Crystal v1.1); `challenge_games` tells the server which
         # of them this client can run a challenge in (0.7.x clients list Platinum in `games` but have no Platinum
         # Soul Link, so the server only allows Platinum for clients that send it - SPEC.md section 7)
-        self.net.send({"type": "library", "games": sorted(g for g in self.lib.games if self._game_supported(g)),
-                       "challenge_games": self.challenge_games(),
-                       "challenge_rules": list(CHALLENGE_RULES) + list(CHALLENGE_CAPS) + self._sinnoh_caps()
-                       + ([SINNOH_FAILED] if self._sinnoh_failed() else [])})
+        self.net.send(self.library_message())
         if self.chal:
             if self.chal_wait == "offline":
                 self.chal_wait = "load"           # back online: wait until the server says both are in
             self.net.send({"type": "challenge_join", "challenge_id": self.chal["id"]})
+
+    def library_message(self) -> dict:
+        """`library`: installed games, what this client can do in a run, and (0.7.9+, SPEC.md section 12) the badge
+        count per region for raid spots (`raid_reach`, from raid.py)."""
+        msg = {"type": "library", "games": sorted(g for g in self.lib.games if self._game_supported(g)),
+               "challenge_games": self.challenge_games(),
+               "challenge_rules": list(CHALLENGE_RULES) + list(CHALLENGE_CAPS) + self._sinnoh_caps()
+               + ([SINNOH_FAILED] if self._sinnoh_failed() else [])}
+        reach = getattr(self, "raid_reach_for_server", None)
+        if reach is not None:
+            msg["raid_reach"] = reach()
+        return msg
 
     def chal_on_disconnected(self):
         if self.chal and not self._chal_leaving and self.chal_wait != "load":
@@ -123,7 +132,8 @@ class ChallengeMixin:
                     self.chal_end_popup("Soul Link abandoned", [c.get("reason", "") + "."])
 
     def on_challenge_request(self, msg):
-        busy = self.chal or self.trade or self.battle or self.live or self.prompt
+        busy = (self.chal or self.trade or self.battle or self.live or self.prompt
+                or getattr(self, "raid_busy", bool)())
         game = msg.get("game", "yellow")
         playable = game in self.challenge_games()
         if busy or not playable:

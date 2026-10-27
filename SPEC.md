@@ -1030,3 +1030,90 @@ on in this save: toast + chat line "Swarm now: <species> on <place> (until HH:MM
 table, place = the map's area name; HH:MM = the end of the slot on the player's own PC clock). The last announced
 slot is kept in the settings (`swarm_told`), so travelling, switching servers or entering a run doesn't repeat it.
 Complete Sinnoh only (main game and Soul Link runs).
+
+## 12. Raids — added in 0.7.9 (design: `dev/raids/DESIGN.md`, Ilias's decisions at its end)
+
+Co-op boss fights, per server (each group of friends has its own). Every 2 hours a raid opens in a random region for
+15 minutes; everyone online hears about it (chat line + toast + a short horn). In that region a **den** (our own drawn
+stone tower) stands on a random reachable spot; walking up to it and pressing A asks "Join the raid?". Each player
+fights **their own copy** of the boss in their own game (a normal wild battle); every hit comes off one **group HP
+pool**. When the pool is empty everyone still in the battle gets **one** catch attempt with **catch chance = their
+share of all the damage done**. Blackout = out of that raid. Not inside Soul Link runs (notice only).
+
+### Group HP pool (milli-bars)
+1 bar = 1000 = one full HP bar of the boss **in the attacker's own game** (bosses can have different levels and max
+HP per player: mythicals are scaled to each player). Each join adds `bars_per_player` (2) bars to the pool and to
+`pool_max`. A hit of n HP on a local boss with max HP M counts `n * 1000 / M`, capped at the rest of the current bar
+(`raid.py` `DamageMeter`). Clients send their **running total** (`dealt`), so a resend is harmless. The local boss's
+HP is the current bar: `seg = ((pool - 1) % 1000 + 1) * M / 1000` rounded up (`raid.segment`); the boss never faints
+in a player's game while the pool is > 0 (the game modules clamp it at 1 HP).
+
+Server limits (friends only, a modified client can always lie): damage only from a joined, fighting participant
+in phase `open`; accepted total <= 1 bar + 1 bar per 2 s since joining (`claimed` is kept, the rest counts later);
+the pool never goes below 0. Damage log per player (claimed, dealt, hits) in the history.
+
+### Schedule (server, `raids.py` `RaidHub`)
+- Slots of `YL_RAID_EVERY` minutes (default 120) on the unix clock; the raid of slot n opens at a random minute
+  inside it (seeded by the server's `salt` + n) such that it closes inside the slot, and stays `YL_RAID_OPEN`
+  minutes (default 15). `YL_RAIDS=off` turns raids off (no `raids` feature). If nobody who can raid is online at
+  that moment, the server retries every few seconds until the raid could no longer fit into the slot (skipped).
+- **Region**: random, weighted by the number of online raid-capable clients (they sent `raid_reach`) whose
+  `library.games` has that region's game (kanto = `yellow`, johto = `crystal`, sinnoh = `platinum`); a region without
+  spot data never gets a raid.
+- **Boss**: from the region's pool (`raids.POOLS`), seeded by salt + slot, never the region's previous boss twice in a
+  row; shiny 1 in 20; Deoxys gets a random `form` 0-3. Pools: Kanto Mew, Articuno, Zapdos, Moltres, Mewtwo; Johto
+  Celebi, Mew, Mewtwo, Articuno, Zapdos, Moltres, Lugia, Ho-Oh, Suicune, Raikou, Entei; Sinnoh Mewtwo, Lugia, Ho-Oh,
+  Raikou, Entei, Suicune, Latias, Latios, Kyogre, Groudon, Rayquaza, Mew, Celebi, Jirachi, Deoxys, Manaphy, Phione,
+  Darkrai, Shaymin, Arceus, Regirock, Regice, Registeel, Regigigas. The level is the client's (`raid_data.boss_for`:
+  legendaries a fixed level per species, mythicals the player's strongest + 5 within 20-70).
+- **Spot**: `yellowlink_server/raid_spots.json` (a sample of the clients' spot files, `dev/raids/server_spots.py`):
+  `{"version": 1, "regions": {region: {"names": {map: name}, "spots": [[map, x, y, reach], ...]}}}`; the server picks
+  among spots whose `reach` (badge count) is <= the lowest `raid_reach` of the online raid-capable players of that
+  region (everyone online there can get to it), preferring another map than the region's previous raid.
+- Testing only: `YL_RAID_FORCE` = `region`, `region:species` or `region:species:shiny` for every raid;
+  `YL_RAID_FIRST` = seconds after the start until a first raid (ignores the slots); `YL_RAID_SPOTS` = another spot file;
+  `YL_RAID_CATCH` = `always` / `never` instead of the catch roll.
+- Persistence: `<data_dir>/raids.json` = `{"version": 1, "salt", "current": raid|null, "last_slot", "last":
+  {region: {"species", "map"}}, "history": [raid, ... last 100]}` (atomic, debounced). After a restart the current
+  raid continues (its timers re-armed; one that closed meanwhile ends with reason `time`).
+
+### Raid object (S→C)
+`{"id", "region", "game", "species" (national dex), "name" (species), "form", "shiny", "spot": {"map", "x", "y",
+"name"}, "opens", "closes" (server unix time), "now" (server time when sent), "pool", "pool_max", "bars_per_player",
+"phase": "open"|"down"|"over", "participants": [{"uid", "name", "dealt", "state"}]}` - `state`: `fighting` |
+`caught` | `missed` | `blackout` | `left` | `fled`.
+
+### Messages
+| dir | type | fields | notes |
+|---|---|---|---|
+| S→C | `raid_open` | `raid`, `fresh` bool | `fresh` = it just opened (to everyone: toast + horn); `false` = catch-up right after `welcome` (and after a reconnect) while a raid is open or down. Plus a `system` line for everyone (older clients too): `RAID! Rayquaza appeared on Route 210 (Sinnoh) - 15 minutes!` (shiny: `✨ RAID! A shiny Rayquaza ...` and the clients show the shiny banner + jingle instead of the horn - the shiny alert of decision 8; `in <place>` unless it starts with `Route`) |
+| S→C | `raid_update` | `raid` | any change (joins, damage, results), coalesced to at most 2 per second, to everyone |
+| C→S | `raid_join` | `id`, `level` (1-100: the boss's level in the joiner's game, history only) | answered `raid_joined {id, raid}` (the pool already includes the joiner's bars) or `raid_refused {id, reason}` (shown as a toast, not red): over / boss already down / time up / "you're out of this raid" (after a blackout, leaving, or a miss) / in a Soul Link run / the raid is in another region / in a trade or battle. A `fighting` participant joining again (reconnect) gets `raid_joined` without new bars |
+| C→S | `raid_damage` | `id`, `dealt` (int, running total in milli-bars, 0..10^7) | unknown/finished raid or not fighting: ignored silently |
+| S→C | `raid_down` | `id`, `chance` (0..1 = dealt / everyone's dealt), `catch` bool (the server's roll) | to every participant still `fighting` when the pool hits 0 (again after a reconnect until they reported); the game then allows one ball, which catches iff `catch` |
+| C→S | `raid_result` | `id`, `outcome`: `caught` \| `missed` \| `blackout` \| `left` \| `fled` | ends that player's raid; `caught` -> system line `Ilias caught Rayquaza!`. Stale ids / repeats: ignored |
+| S→C | `raid_end` | `id`, `reason`: `down` \| `time`, `caught` [names], `raid` | the raid is over (phase `over`); `time` = the boss fled in every game still fighting. Plus a system line: `Rayquaza fled - the raid is over.` / `Raid over: Ilias and Alex caught Rayquaza!` / `Raid over: Rayquaza got away.` |
+
+Phase `down` ends when every participant who was fighting at that moment reported, or 3 minutes after it began
+(`DOWN_GRACE`). Phase `open` ends at `closes`. A participant who never reports is listed with the state they had.
+`raid_` messages share the trade/battle rate budget (never dropped behind `state` spam). Players who are
+`fighting` count as **busy**: no trade, battle, challenge or trade-evolution requests to or from them.
+
+`library` gets an optional `raid_reach` = `{region: badge count}` (clients 0.7.9+; Yellow badges, Crystal Johto + Kanto
+badges, Platinum badges; regions it doesn't know yet = 0) - a client that sends it can raid. Clients only send
+`raid_*` messages to servers listing `raids` in `welcome.features`; older clients just see the chat lines.
+
+### Client (`client/yellowlink/raid.py` + the game modules `raid_gb.py` / `raid_pt.py`, `raid_data.py`)
+- `raid.py` `RaidMixin` (state machine `idle -> open -> confirm -> joining -> fight -> catch -> done`): the sidebar
+  raid card (boss, place, region, time left, group HP bar, who's in; "Go there" travels to the region), the
+  notice (toast + the raid horn - synthesised like the shiny jingle, own fixed volume), the den (drawn by the game
+  module; the edge-of-screen arrow with the distance in steps is ours), the join dialog (A at the den ->
+  "Join the raid against Rayquaza?" with the warnings: party+box full, Soul Link, wrong region), the battle banner
+  (group HP in bars, players, time left, the **10-second move timer ring**: on timeout `auto_pick()`).
+- Gating: `App.full`, main game (not a Soul Link run: the notice says "back in your main game"), the raid's game =
+  the current game, not in a trade/battle, `RaidBattle.can_join()`.
+- During the raid battle: fast-forward off; no resume snapshot (a forced one right before the battle starts, so
+  closing the game mid-raid = leaving it: `raid_result left`, resume from just before the battle); no `shiny_found`
+  from the raid boss (the raid notice already said it); trade/battle/travel/server switch refused ("busy").
+- A client that finds itself `fighting` in a raid summary without a raid battle running (it crashed or closed)
+  sends `raid_result left`.

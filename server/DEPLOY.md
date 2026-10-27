@@ -177,6 +177,17 @@ Update it like the first one: `cd /opt/yellowlink2 && git pull && cd server && d
 `YL_SERVER_NAME` (shown in every player's sidebar and when they connect) and `YL_MOTD` (welcome line in the chat) can be
 set in a server's `.env`. Apply a change with `docker compose up -d` in that server's `server` folder.
 
+### Raids
+Every server runs its own raids (a co-op boss every 2 hours in a random region, open 15 minutes; skipped while nobody
+who can raid is online). Nothing to set up. To change them, add lines to that server's `.env` and run
+`sudo docker compose up -d` in its `server` folder:
+```bash
+YL_RAIDS=off          # no raids on this server
+YL_RAID_EVERY=60      # a raid every 60 minutes instead of 120
+YL_RAID_OPEN=20       # each raid stays open 20 minutes instead of 15
+```
+The current raid and the last 100 are kept in `data/raids.json` (a raid continues after a restart).
+
 ## Merging two servers into one
 
 Everything a player has (saves, PC, Soul Link runs) stays: the second server's data is copied into the first, and

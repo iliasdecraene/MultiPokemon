@@ -23,6 +23,15 @@ class Config:
     # address + password and switch themselves; older clients only get the update notice.
     moved_to: str = ""
     moved_key: str = ""
+    # Raids (SPEC.md section 12): on by default; every `raid_every` minutes, open `raid_open` minutes.
+    # `raid_force` (testing only): "region", "region:species" or "region:species:shiny" for every raid.
+    raids: bool = True
+    raid_every: float = 120.0
+    raid_open: float = 15.0
+    raid_force: str = ""
+    raid_first: float = -1.0       # testing only (YL_RAID_FIRST): seconds after start until a first raid; -1 = off
+    raid_spots: str = ""           # testing only (YL_RAID_SPOTS): another spot file than the vendored raid_spots.json
+    raid_catch: str = ""           # testing only (YL_RAID_CATCH): "always" / "never" instead of the share roll
 
 
 def load_config(path: str | None = None, *, host: str | None = None,
@@ -31,7 +40,8 @@ def load_config(path: str | None = None, *, host: str | None = None,
 
     Precedence (lowest to highest): built-in defaults, the JSON file at
     ``path``, environment variables (YL_KEY, YL_PORT, YL_DATA_DIR, YL_SERVER_NAME, YL_MOTD,
-    YL_MOVED_TO, YL_MOVED_KEY), and
+    YL_MOVED_TO, YL_MOVED_KEY, YL_RAIDS, YL_RAID_EVERY, YL_RAID_OPEN, YL_RAID_FORCE, YL_RAID_FIRST, YL_RAID_SPOTS,
+    YL_RAID_CATCH), and
     finally explicit ``host``/``port`` arguments (from the command line).
     """
     env = os.environ if env is None else env
@@ -59,6 +69,20 @@ def load_config(path: str | None = None, *, host: str | None = None,
         cfg.moved_to = env["YL_MOVED_TO"]
     if env.get("YL_MOVED_KEY"):
         cfg.moved_key = env["YL_MOVED_KEY"]
+    if env.get("YL_RAIDS"):
+        cfg.raids = env["YL_RAIDS"].strip().lower() not in ("off", "0", "false", "no")
+    if env.get("YL_RAID_EVERY"):
+        cfg.raid_every = float(env["YL_RAID_EVERY"])
+    if env.get("YL_RAID_OPEN"):
+        cfg.raid_open = float(env["YL_RAID_OPEN"])
+    if env.get("YL_RAID_FORCE"):
+        cfg.raid_force = env["YL_RAID_FORCE"]
+    if env.get("YL_RAID_FIRST"):
+        cfg.raid_first = float(env["YL_RAID_FIRST"])
+    if env.get("YL_RAID_SPOTS"):
+        cfg.raid_spots = env["YL_RAID_SPOTS"]
+    if env.get("YL_RAID_CATCH"):
+        cfg.raid_catch = env["YL_RAID_CATCH"]
     if host is not None:
         cfg.host = host
     if port is not None:
@@ -70,4 +94,11 @@ def load_config(path: str | None = None, *, host: str | None = None,
     if cfg.moved_to and "://" not in cfg.moved_to:
         cfg.moved_to = "ws://" + cfg.moved_to
     cfg.moved_key = str(cfg.moved_key or "")
+    if isinstance(cfg.raids, str):
+        cfg.raids = cfg.raids.strip().lower() not in ("off", "0", "false", "no")
+    cfg.raids = bool(cfg.raids)
+    cfg.raid_every = max(1.0, float(cfg.raid_every))
+    cfg.raid_open = max(0.5, min(float(cfg.raid_open), cfg.raid_every))
+    cfg.raid_force = str(cfg.raid_force or "")
+    cfg.raid_first = float(cfg.raid_first)
     return cfg

@@ -24,6 +24,7 @@ from .config import Config
 from . import pcstore
 from .challenges import ChallengeError, ChallengeHub
 from . import badges as badgemod
+from .raids import RaidHub, RaidInvalid
 from .store import PlayerStore
 
 log = logging.getLogger("yellowlink.server")
@@ -40,7 +41,7 @@ BATTLE_RNS_MAX = 252
 BATTLE_CHECK_MAX = 64
 # Trade/battle messages get their own rate budget so position spam can never cause a
 # dropped battle_move (which would desync a link battle) or a dropped trade_done.
-CRITICAL_PREFIXES = ("trade_", "battle_", "challenge_")
+CRITICAL_PREFIXES = ("trade_", "battle_", "challenge_", "raid_")
 CHAT_MAX = 200
 SPRITE_BYTES = 384
 
@@ -51,7 +52,7 @@ CLOSE_MOVED = 4005          # this server was merged into another one (Config.mo
 MOVE_SUPPORTED = (0, 7, 1)  # clients from this version on follow a "moved" message by themselves
 FEATURES = ("badges", "trade_evo", "shiny_alert")   # optional message groups this server knows (welcome.features;
                                     # SPEC.md section 9 badges, section 7 trade evolutions in a run, section 10 shiny
-                                    # alerts)
+                                    # alerts); + "raids" (section 12) unless YL_RAIDS=off
 SHINY_COOLDOWN = 30.0               # seconds between two accepted `shiny_found` of one player (more: dropped silently)
 SHINY_SPECIES_RE = re.compile(r"^[^\W_][\w .'’♀♂:-]{0,11}$")
 SHINY_AREA_MAX = 40
@@ -179,6 +180,8 @@ class Client:
     games: list | None = None         # installed games (from `library`), None = unknown (old client)
     challenge_games: list | None = None   # games it can run a challenge in (`library`, 0.7.4+); None = old
     challenge_rules: list | None = None   # optional run rules it knows (`library`, 0.7.4+), e.g. ["exp_share"]
+    raid_reach: dict | None = None    # `library.raid_reach` {region: badges} (0.7.9+): this client can raid
+    raiding: bool = False             # fighting in the current raid (RaidHub keeps it up to date)
     last_report: float = 0.0
     _rate_window: float = 0.0
     _rate_count: int = 0
@@ -201,7 +204,7 @@ class Client:
 
     @property
     def busy(self) -> bool:
-        return bool(self.trade_id or self.battle_id or self.challenge_id)
+        return bool(self.trade_id or self.battle_id or self.challenge_id or self.raiding)
 
     def info(self) -> dict:
         return {"uid": self.uid, "name": self.name, "state": self.state,
@@ -260,6 +263,7 @@ class YellowLinkServer:
         self.badges = badgemod.BadgeStore(config.data_dir, debounce=store_debounce)
         self.badges.backfill(self.challenges.records.values())      # runs completed before badges existed
         self.shiny_last: dict[str, float] = {}     # uid -> shiny_clock() of their last accepted shiny_found
+        self.raids = RaidHub(self, config.data_dir, config, debounce=store_debounce)   # SPEC.md section 12
         self._server = None
 
     # ------------------------------------------------------------ lifecycle
@@ -269,6 +273,7 @@ class YellowLinkServer:
             self.handler, self.config.host, self.config.port,
             max_size=MAX_MESSAGE_BYTES, ping_interval=20, ping_timeout=20,
         )
+        await self.raids.start()
         return self._server
 
     @property
@@ -282,6 +287,7 @@ class YellowLinkServer:
         for t in [*self.trades.values(), *self.battles.values()]:
             if t.timer:
                 t.timer.cancel()
+        await self.raids.stop()
         await self.challenges.flush()
         await self.badges.flush()
         await self.store.flush()
@@ -309,6 +315,9 @@ class YellowLinkServer:
             pass
         except Exception:
             log.exception("send to %s failed", client.name)
+
+    def features(self) -> list:
+        return list(FEATURES) + (["raids"] if self.raids.enabled else [])
 
     async def system(self, text: str) -> None:
         log.info("system: %s", text)
@@ -457,10 +466,11 @@ class YellowLinkServer:
             "download_url": self.config.download_url,
             "motd": self.config.motd,
             "server_name": self.config.name,
-            "features": list(FEATURES),
+            "features": self.features(),
             "now": time.time(),                 # server time: the clients' shared swarm clock (SPEC.md section 11)
         })
         await self.send(client, {"type": "challenge_list", "challenges": self.challenges.mine(uid)})
+        await self.raids.on_hello(client)
         for c in others:
             if c.sprite is not None:
                 await self.send(client, {"type": "sprite", "uid": c.uid, "data": c.sprite})
@@ -779,7 +789,7 @@ class YellowLinkServer:
         if target is client:
             raise Invalid("cannot trade with yourself")
         if client.busy:
-            raise Invalid("you are already in a trade, battle or challenge")
+            raise Invalid("you are already in a trade, battle, challenge or raid")
         if target.busy:
             raise Invalid(f"{target.name} is busy right now")
         gift = bool(msg.get("gift"))
@@ -1059,7 +1069,7 @@ class YellowLinkServer:
         if target is client:
             raise Invalid("cannot battle yourself")
         if client.busy:
-            raise Invalid("you are already in a trade or battle")
+            raise Invalid("you are already in a trade, battle or raid")
         if target.busy:
             raise Invalid(f"{target.name} is busy with another trade or battle")
         battle = Battle(id=uuid.uuid4().hex[:12], a=client.uid, b=target.uid)
@@ -1282,6 +1292,13 @@ class YellowLinkServer:
         if cr is not None and sorted(set(cr)) != client.challenge_rules:
             client.challenge_rules = sorted(set(cr))
             changed = True
+        rr = msg.get("raid_reach")                        # optional (clients 0.7.9+), SPEC.md section 12
+        if rr is not None:
+            if not isinstance(rr, dict) or len(rr) > 8 or not all(
+                    isinstance(k, str) and re.fullmatch(r"[a-z]{1,16}", k) and isinstance(v, int)
+                    and not isinstance(v, bool) and 0 <= v <= 64 for k, v in rr.items()):
+                raise Invalid("raid_reach must be {region: badge count}")
+            client.raid_reach = dict(rr)
         if self.store.set_games(client.uid, client.games) or changed:
             await self.broadcast_roster()
 
@@ -1296,8 +1313,21 @@ class YellowLinkServer:
                 await self.broadcast_roster()       # "in Soul Link" labels
         return handler
 
+    def _raid(name):  # noqa: N805 - builds a handler that maps RaidInvalid -> Invalid
+        async def handler(self, client, msg):
+            if not self.raids.enabled:
+                return                    # raids off: a stray message from a client is ignored
+            try:
+                await getattr(self.raids, name)(client, msg)
+            except RaidInvalid as exc:
+                raise Invalid(str(exc)) from None
+        return handler
+
     _handlers = {
         "library": on_library,
+        "raid_join": _raid("on_join"),
+        "raid_damage": _raid("on_damage"),
+        "raid_result": _raid("on_result"),
         "badges": on_badges,
         "get_badges": on_get_badges,
         "shiny_found": on_shiny_found,

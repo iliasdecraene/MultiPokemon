@@ -26,7 +26,9 @@ from .trades import TradeMixin
 from .badgesync import BadgeMixin
 from .shiny import ShinyMixin
 from .reloadsave import ReloadMixin
+from .raid import RaidMixin
 from . import badge_art
+from . import raid as raid_mod
 from .net import NetClient
 
 try:                                   # Pokémon Platinum adapter (dev/platinum/BRIEF.md); optional while it's built
@@ -202,7 +204,7 @@ class GhostBattle:
     result: int | None = None
 
 
-class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, ReloadMixin):
+class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, ReloadMixin, RaidMixin):
     def __init__(self, cfg: Config, diag: Diagnostics | None = None):
         self.cfg = cfg
         self.diag = diag
@@ -216,6 +218,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         self.init_badges()
         self.init_tradeevo()
         self.init_shiny()
+        self.init_raid()
         # in a challenge: that run's own game + separate save (Config paths follow active_challenge)
         self.game_id = cfg.challenge["game"] if cfg.challenge else (self.lib.current or "yellow")
         self.save_tag = f"challenge-{cfg.challenge['id']}" if cfg.challenge else self.game_id
@@ -650,6 +653,9 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             return False
         if self.battle or self.live:
             return False
+        if self.raid_no_snapshot():
+            # a raid battle runs (SPEC.md section 12): closing = leaving the raid; resume from just before it
+            return False
         if self._exp_award_busy():
             # the game is in the middle of handing out experience (hook state lives in Python): resuming from
             # here would give wrong amounts - keep the last snapshot, the game resumes from before this battle
@@ -824,7 +830,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             return
         log.info("server moved to %s (twin entry: %s)", url, twin)
         name = self.cfg.server_label(self.cfg.active_server)
-        if self.chal or self.trade or self.battle or self.live:
+        if self.chal or self.trade or self.battle or self.live or self.raid_busy():
             self.sys_msg(f"This server moved - reconnecting to {name}...", ui.ACCENT)
         self._restart_on(sid, "This server moved - reconnecting...")
 
@@ -861,6 +867,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         self.roster = msg.get("roster", [])
         self.server_features = set(msg.get("features") or [])
         self.badges_on_welcome(msg)
+        self.raid_on_welcome()
 
     def on_player_join(self, msg):
         p = msg["player"]
@@ -1022,7 +1029,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         self.net.send({"type": "battle_move", "battle_id": s.battle_id, "n": n, "v": v, "check": check})
 
     def on_battle_request(self, msg):
-        if self.chal or not self.full or self.trade or self.battle or self.live or self.prompt or not self.hooks or not self.game.party():
+        if self.chal or not self.full or self.trade or self.battle or self.live or self.prompt or not self.hooks \
+                or not self.game.party() or self.raid_busy():
             self.net.send({"type": "battle_respond", "battle_id": msg["battle_id"], "accept": False})
             return
         self.prompt = {"kind": "battle", "id": msg["battle_id"], "name": msg.get("name", "?"),
@@ -1572,7 +1580,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             self.toast("Live battles work in Yellow for now.", color=ui.BAD)
         elif not self.game.party():
             self.toast("You need a Pokémon first!", color=ui.BAD)
-        elif self.trade or self.battle or self.live:
+        elif self.trade or self.battle or self.live or self.raid_busy():
             self.toast("Finish what you're doing first.", color=ui.BAD)
         else:
             self.net.send({"type": "battle_request", "to": e["uid"]})
@@ -1593,8 +1601,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         if self.chal:
             self.leave_to_main("travelled", travel_to=game_id)
             return
-        if self.trade or self.battle or self.live:
-            self.toast("Finish your trade or battle first.", color=ui.BAD)
+        if self.trade or self.battle or self.live or self.raid_busy():
+            self.toast("Finish your trade, battle or raid first.", color=ui.BAD)
             return
         info = self.lib.info(game_id)
         self.cfg["_travel_msg"] = f"Travelling to {info.title}..."
@@ -1610,8 +1618,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         if self.chal or self.enter_challenge:
             self.toast("Pause your Soul Link first (Soul Link > Pause & go back).", 5, ui.BAD)
             return
-        if self.trade or self.battle or self.live:
-            self.toast("Finish your trade or battle first.", 4, ui.BAD)
+        if self.trade or self.battle or self.live or self.raid_busy():
+            self.toast("Finish your trade, battle or raid first.", 4, ui.BAD)
             return
         self._restart_on(sid, f"Switching to {self.cfg.server_label(entry)}...")
 
@@ -1824,6 +1832,10 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             return
         if self.live and self.live.phase in ("ready", "starting"):
             return
+        if self.raid_press(b, down):          # A at the raid den -> join dialog; a step onto the den (raid.py)
+            if b in raid_mod.DIRECTIONS:
+                (self.pad_held if source == "pad" else self.kb_held).add(b)
+            return
         src = self.pad_held if source == "pad" else self.kb_held
         if down:
             src.add(b)
@@ -1987,7 +1999,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
                         self.toast("Live battles need the USA/Europe ROM.", color=ui.BAD)
                     elif not self.game.party():
                         self.toast("You need a Pokémon first!", color=ui.BAD)
-                    elif self.trade or self.battle or self.live:
+                    elif self.trade or self.battle or self.live or self.raid_busy():
                         self.toast("Finish what you're doing first.", color=ui.BAD)
                     else:
                         self.net.send({"type": "battle_request", "to": e["uid"]})
@@ -2015,6 +2027,9 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         if self.mode == "reload_confirm":
             self.reload_key(k)
             return
+        if self.mode == "raid_confirm":
+            self.raid_key(k)
+            return
         if self.mode == "update_confirm":
             if k in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 urls = updater.asset_urls(self.download_url, self.update_available)
@@ -2026,8 +2041,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             return
         if self.mode == "update_ready":
             if k in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                if self.trade or self.battle or self.live:
-                    self.toast("Finish your trade/battle first.", 3, ui.BAD)
+                if self.trade or self.battle or self.live or self.raid_busy():
+                    self.toast("Finish your trade/battle/raid first.", 3, ui.BAD)
                 else:
                     self.restart_into = self.update_dl.path
                     self.quit_requested = True
@@ -2060,6 +2075,9 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             self.release_all()
             self.mode = "help"
         elif k == pygame.K_SPACE:                  # toggle (press once = fast, again = normal)
+            if self.raid_fighting() and not self.fast:
+                self.toast("No fast-forward in raid battles.", 2)
+                return
             self.fast = not self.fast
             self._sync_ds_audio()
         elif k in (pygame.K_MINUS, pygame.K_KP_MINUS, pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
@@ -2225,6 +2243,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         return cache[key]
 
     def draw_friends(self, arr):
+        self._friend_mask = None               # (also used by the raid den: it stands behind menus too)
         if not self.full:
             return []
         g = self.game
@@ -2232,6 +2251,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             self.clean_frame = None
             return []
         mask = self.menu_mask(arr)
+        self._friend_mask = mask
         if mask is not None and mask.mean() > 0.85:
             return []  # full-screen menu (party, bag, Pokédex, map...)
         me = g.position()
@@ -2309,6 +2329,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             arr = self.pyboy.screen.ndarray
             self.compose_world(arr)
             tags = self.draw_friends(arr)
+        self.raid_draw_world()                # the raid den (drawn by raid_gb / raid_pt)
         self.screen.fill(ui.BG)
         scaled = pygame.transform.scale(self.game_surf, (self.game_w, self.game_h))
         self.screen.blit(scaled, (0, self.game_y))
@@ -2324,6 +2345,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         if self.wild_owned and not self.ds and self.game_id == "yellow" and self.game.enemy_hud_shown():
             badge_art.draw_owned_ball(sub, int((self.off_x + OWNED_BALL_X) * self.scale),
                                       int((self.off_y + OWNED_BALL_Y) * self.scale), self.scale)
+        self.raid_draw_overlay(sub)          # the 10-second move timer ring in a raid battle
         if self.mode == "panel" and self.panel == "multiplayer":
             panels.draw_multiplayer(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
         elif self.mode == "panel" and self.panel == "settings":
@@ -2427,6 +2449,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             ui.draw_help(sub, self.fonts, self.game_w, self.game_h, ds=self.ds)
         elif self.mode == "reload_confirm":
             self.draw_reload_confirm(sub)
+        elif self.mode == "raid_confirm" and self.raid_confirm:
+            raid_mod.draw_confirm(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
         elif self.mode == "update_confirm":
             ui.modal(sub, self.fonts, self.game_w, self.game_h, f"Update to {self.update_available}?",
                      ["The new version downloads in the background",
@@ -2459,7 +2483,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             badge_art.draw_shiny_banner(sub, self.fonts, banner)
         ui.draw_toasts(sub, self.fonts, self.toasts, self.game_w,
                        bottom=banner is not None or
-                       self.mode in ("panel", "chal_popup", "prompt", "battle_confirm", "evo_wait"))
+                       self.mode in ("panel", "chal_popup", "prompt", "battle_confirm", "evo_wait", "raid_confirm"))
         if self.fast:
             ui.text(sub, self.fonts.body, ">> fast (Space)", (self.game_w - 10, 10), ui.ACCENT, anchor="topright")
         ui.draw_sidebar(self.screen, self.fonts, self, self.game_w, self.screen.get_height())
@@ -2541,20 +2565,21 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
     def step(self):
         """Advance one host frame (network, emulation, publishing)."""
         self.handle_net()
+        self.raid_filter_held()               # never walk onto the raid den
         paused = self.chal_paused()
         if self.ds:
             if paused != getattr(self, "_ds_chal_paused", False):
                 # waiting for the Soul Link partner: no emulation, so stop DeSmuME's sound (it loops otherwise)
                 self._ds_chal_paused = paused
                 self._pause_ds_audio(paused)
-            ticks = 0 if paused else (DS_FAST_TICKS if self.fast and not self.trade else 1)
+            ticks = 0 if paused else (DS_FAST_TICKS if self.fast and not self.trade and not self.raid_fighting() else 1)
             if ticks:
                 self.nds.tick(ticks)      # DeSmuME plays the sound itself (see _sync_ds_audio)
                 self._pt_pc_poll(ticks)
                 self._sinnoh_step()
             self._touch_step(ticks)
         else:
-            ticks = 0 if paused else (4 if self.fast and not self.trade else 1)
+            ticks = 0 if paused else (4 if self.fast and not self.trade and not self.raid_fighting() else 1)
         for i in range(0 if self.ds else ticks):
             self.pyboy.tick(1, i == ticks - 1)
             if ticks == 1:
@@ -2565,6 +2590,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         self.trades_step()
         self.badges_step()
         self.shiny_step()
+        self.raid_step()
         self.reload_step()
         if self.update_dl and self.update_dl.status != "downloading" and not getattr(self.update_dl, "announced", False):
             self.update_dl.announced = True
@@ -2741,6 +2767,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
 
     def shutdown(self):
         try:
+            self.raid_shutdown()                 # closing mid-raid = leaving it (resume = just before the battle)
             if self.battle:
                 self._restore_battle()
             if self.live:

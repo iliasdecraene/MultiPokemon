@@ -157,13 +157,24 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
         app.click_targets.append((wr, lambda: app.toast("Wide view works in Yellow for now.", 3, BAD), "Wide view"))
     y += 32
 
-    text(surf, f.body, "Trainers", (x, y), TEXT)
-    y += 24
+    hint_h = 92
+    btn_h = 52   # Multiplayer / Regions buttons above the key hints
+    raid_card = getattr(app, "raid", None) is not None
+    if raid_card:                                       # the raid card (SPEC.md section 12, raid.py)
+        from . import raid as raid_mod
+        y += raid_mod.draw_card(surf, f, app, x0 + 10, y - 4, SIDEBAR_W - 20) - 2
     roster = app.sorted_roster()
-    if not roster:
+    # with a raid card on a small window (GB 3x) fewer trainer rows - or none - so the chat stays usable
+    rows = 6 if not raid_card else max(0, min(6, (h - hint_h - btn_h - 4 - y - 32 - 110) // 20))
+    if raid_card and rows == 0:
+        roster = []
+    else:
+        text(surf, f.body, "Trainers", (x, y), TEXT)
+        y += 24
+    if not roster and not raid_card:
         text(surf, f.small, "nobody here yet", (x, y), DIM)
         y += 20
-    for e in roster[:6]:
+    for e in roster[:rows]:
         online = e.get("online")
         dot = GOOD if online else (90, 94, 110)
         pygame.draw.circle(surf, dot, (x + 5, y + 8), 4)
@@ -178,10 +189,11 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
             info = "nearby · " + info
         text(surf, f.small, info, (x0 + SIDEBAR_W - 14, y), DIM, anchor="topright")
         y += 20
-    y += 8
+    if len(roster) > rows and roster:
+        text(surf, f.small, f"+{len(roster) - rows} more (Multiplayer)", (x + 16, y), DIM)
+        y += 18
+    y += 8 if not raid_card or roster else 0
 
-    hint_h = 92
-    btn_h = 52   # Multiplayer / Regions buttons above the key hints
     draw_chat(surf, f, app, pygame.Rect(x0 + 10, y, SIDEBAR_W - 20, h - hint_h - btn_h - y - 4))
 
     # big clickable buttons

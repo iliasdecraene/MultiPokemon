@@ -207,14 +207,20 @@ _SOUND_CACHE: dict = {}
 
 def jingle_sound():
     """A pygame Sound of the jingle for the mixer as it is opened (rate, format, channels), or None (no mixer)."""
+    return make_sound(jingle_samples, _SOUND_CACHE)
+
+
+def make_sound(samples_fn, cache: dict):
+    """A pygame Sound from `samples_fn(rate, channels)` (int16 (n, channels)) for the mixer as it is opened, cached
+    per mixer setup in `cache` - or None (no mixer / no sound card). Also used for the raid horn (raid.py)."""
     try:
         init = pygame.mixer.get_init()
         if not init:
             return None
-        if init in _SOUND_CACHE:
-            return _SOUND_CACHE[init]
+        if init in cache:
+            return cache[init]
         rate, fmt, channels = init
-        a = jingle_samples(rate, channels)
+        a = samples_fn(rate, channels)
         if fmt in (-16, 16):
             data = a if fmt == -16 else (a.astype(np.int32) + 32768).astype(np.uint16)
         elif fmt in (-8, 8):
@@ -225,11 +231,11 @@ def jingle_sound():
             log.warning("jingle: mixer format %s not supported", fmt)
             return None
         snd = pygame.mixer.Sound(buffer=np.ascontiguousarray(data).tobytes())
-        _SOUND_CACHE.clear()
-        _SOUND_CACHE[init] = snd
+        cache.clear()
+        cache[init] = snd
         return snd
     except Exception as e:  # noqa: BLE001 - no sound is fine, a crash is not
-        log.warning("jingle unavailable: %s", e)
+        log.warning("sound unavailable: %s", e)
         return None
 
 
@@ -243,7 +249,9 @@ class ShinyMixin:
         self.wild_owned = False          # Yellow: the wild species was already caught when this battle started
 
     def shiny_can_watch(self) -> bool:
-        return bool(self.full and getattr(self, "game", None) is not None and not self.live and not self.battle)
+        # not in a raid battle: the raid notice already said the boss is shiny (SPEC.md section 12)
+        return bool(self.full and getattr(self, "game", None) is not None and not self.live and not self.battle
+                    and not getattr(self, "raid_battle", None))
 
     def shiny_step(self):
         """Called every frame from App.step()."""

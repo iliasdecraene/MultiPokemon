@@ -98,7 +98,7 @@ class TradeMixin:
             return "Not during a Soul Link - it's just you and your partner."
         if not e.get("online"):
             return "They need to be online."
-        if self.trade or self.battle or self.live:
+        if self.trade or self.battle or self.live or getattr(self, "raid_busy", bool)():
             return "Finish what you're doing first."
         if self.pcsync.session_open:
             return "Close your in-game PC first."
@@ -125,7 +125,7 @@ class TradeMixin:
 
     def on_trade_request(self, msg):
         if (self.chal or self.trade or self.battle or self.live or self.prompt or self.pcsync.session_open
-                or not getattr(self, "pc_ready", True)):
+                or not getattr(self, "pc_ready", True) or getattr(self, "raid_busy", bool)()):
             self.net.send({"type": "trade_respond", "trade_id": msg["trade_id"], "accept": False})
             return
         self.prompt = {"kind": "gift" if msg.get("gift") else "trade", "id": msg["trade_id"],
