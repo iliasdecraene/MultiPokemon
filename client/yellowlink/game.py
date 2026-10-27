@@ -472,6 +472,25 @@ class GameMemory:
             return self.read(TRANSFORMED_ENEMY_ORIG_DVS, 2)
         return self.read(ENEMY_MON_DVS, 2)
 
+    def dex_owned(self, dex: int) -> bool:
+        """wPokedexOwned bit of a national dex number (1-151)."""
+        if not 1 <= dex <= 151:
+            return False
+        return bool(self.m[DEX_OWNED + (dex - 1) // 8] & (1 << ((dex - 1) % 8)))
+
+    def enemy_hud_shown(self) -> bool:
+        """The enemy's battle HUD is on screen right now (shiny alerts' caught ball, SPEC.md section 10): wTileMap
+        row 0 holds wEnemyMonNick from column 1, 2 or 3 (pret DrawEnemyHUDAndHPBar + CenterMonName) and tile (1, 3)
+        is the HUD's lower-left corner. False during the intro, under full-screen menus, on the Pokédex page after
+        a catch and while the game has cleared the HUD."""
+        if self.m[IS_IN_BATTLE] not in (1, 2) or self.m[TILEMAP + 3 * 20 + 1] != HUD_CORNER_TILE:
+            return False
+        nick = self.read(ENEMY_MON_NICK, NAME_SIZE).split(bytes([text.TERMINATOR]))[0]
+        if not nick:
+            return False
+        row = self.read(TILEMAP, 20)
+        return any(row[c:c + len(nick)] == nick for c in (1, 2, 3))
+
     def battle_party_slot(self):
         """(party index of the player's active mon, its in-battle HP), or None outside battle / before the
         first mon is sent out / in battles where the player has no mon out (Old Man, Safari, Oak's Pikachu)."""
@@ -1087,6 +1106,9 @@ def install_exp_share(pyboy, enabled):
 ENEMY_MON_DVS = 0xCFF0                # wEnemyMonDVs (2 bytes): LoadEnemyMonData writes random DVs for a wild mon
 TRANSFORMED_ENEMY_ORIG_DVS = 0xCCEB   # wTransformedEnemyMonOriginalDVs: the wild mon's own DVs once it used Transform
 ENEMY_BATTLE_STATUS3 = 0xD068         # wEnemyBattleStatus3: bit 3 TRANSFORMED
+# Shiny alerts (0.7.7, SPEC.md section 10): the caught ball next to the wild mon's name
+ENEMY_MON_NICK = 0xCFD9               # wEnemyMonNick (11 bytes, 0x50 terminated): the name the enemy HUD shows
+HUD_CORNER_TILE = 0x74                # EnemyBattleHUDGraphicsTiles: lower-left corner, placed at tile (1, 3)
 TRANSFORMED_BIT = 3
 
 

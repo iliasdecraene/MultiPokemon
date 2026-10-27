@@ -1,6 +1,7 @@
 """Overlay UI drawing. Pure rendering — all state lives in app.App."""
 from __future__ import annotations
 
+import math
 import time
 
 import pygame
@@ -31,6 +32,26 @@ def text(surf, font, s, pos, color=TEXT, anchor="topleft"):
     r = img.get_rect(**{anchor: pos})
     surf.blit(img, r)
     return r
+
+
+SPARKLE = "\x00sparkle"      # chat segment drawn as a little sparkle (the default font has no ✨ glyph)
+SPARKLE_W = 16
+
+
+def chat_segments(msg: str) -> list:
+    """A chat/system line as segments: a leading ✨ becomes SPARKLE (shiny alerts, SPEC.md section 10)."""
+    if msg.startswith("✨"):
+        return [SPARKLE, msg[1:].lstrip()]
+    return [msg]
+
+
+def _draw_sparkle(surf, x, y, color=(255, 220, 90)):
+    pts = []
+    for i in range(8):
+        a = -math.pi / 2 + i * math.pi / 4
+        rr = 6 if i % 2 == 0 else 1.8
+        pts.append((x + rr * math.cos(a), y + rr * math.sin(a)))
+    pygame.draw.polygon(surf, color, pts)
 
 
 def wrap(font, s, width):
@@ -227,7 +248,13 @@ def draw_chat(surf, f: Fonts, app, r):
                          else [(first, color)])
             lines.extend([[(ln, color)] for ln in wrapped[1:]])
         else:
-            lines.extend([[(ln, color)] for ln in wrap(f.small, msg, width)])
+            segs = chat_segments(msg)
+            if segs[0] is SPARKLE:
+                wrapped = wrap(f.small, segs[1], width - SPARKLE_W) or [""]
+                lines.append([(SPARKLE, color), (wrapped[0], color)])
+                lines.extend([[(ln, color)] for ln in wrapped[1:]])
+            else:
+                lines.extend([[(ln, color)] for ln in wrap(f.small, msg, width)])
     per = max(1, area.h // 18)
     max_scroll = max(0, len(lines) - per)
     app.chat_scroll = max(0, min(app.chat_scroll, max_scroll))
@@ -239,6 +266,10 @@ def draw_chat(surf, f: Fonts, app, r):
     for segs in visible:
         xx = area.x
         for seg, color in segs:
+            if seg is SPARKLE:
+                _draw_sparkle(surf, xx + 6, yy + 8)
+                xx += SPARKLE_W
+                continue
             rr = text(surf, f.small, seg, (xx, yy), color)
             xx = rr.right
         yy += 18

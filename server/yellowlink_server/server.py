@@ -49,8 +49,17 @@ CLOSE_REPLACED = 4002
 CLOSE_BAD_HELLO = 4003
 CLOSE_MOVED = 4005          # this server was merged into another one (Config.moved_to); see SPEC.md section 8
 MOVE_SUPPORTED = (0, 7, 1)  # clients from this version on follow a "moved" message by themselves
-FEATURES = ("badges", "trade_evo")   # optional message groups this server knows (welcome.features; SPEC.md
-                                    # section 9 badges, section 7 trade evolutions in a run)
+FEATURES = ("badges", "trade_evo", "shiny_alert")   # optional message groups this server knows (welcome.features;
+                                    # SPEC.md section 9 badges, section 7 trade evolutions in a run, section 10 shiny
+                                    # alerts)
+SHINY_COOLDOWN = 30.0               # seconds between two accepted `shiny_found` of one player (more: dropped silently)
+SHINY_SPECIES_RE = re.compile(r"^[^\W_][\w .'’♀♂:-]{0,11}$")
+SHINY_AREA_MAX = 40
+
+
+def shiny_clock() -> float:
+    """Clock of the shiny rate limit (patched in tests; time.monotonic itself also drives asyncio)."""
+    return time.monotonic()
 
 
 def _version_tuple(v: str) -> tuple:
@@ -250,6 +259,7 @@ class YellowLinkServer:
         self.challenges = ChallengeHub(self, config.data_dir, debounce=store_debounce)
         self.badges = badgemod.BadgeStore(config.data_dir, debounce=store_debounce)
         self.badges.backfill(self.challenges.records.values())      # runs completed before badges existed
+        self.shiny_last: dict[str, float] = {}     # uid -> shiny_clock() of their last accepted shiny_found
         self._server = None
 
     # ------------------------------------------------------------ lifecycle
@@ -619,6 +629,34 @@ class YellowLinkServer:
         p = self.store.get(uid)
         await self.send(client, {"type": "badges_data", "uid": uid, "name": p["name"] if p else "?",
                                  "badges": self.badges.view(uid) if p else {}})
+
+    # ---------------------------------------------------------------- shiny alerts (SPEC.md section 10)
+    async def on_shiny_found(self, client: Client, msg: dict) -> None:
+        species = msg.get("species")
+        if not isinstance(species, str) or not SHINY_SPECIES_RE.fullmatch(species) or species != species.strip():
+            raise Invalid("species must be a Pokémon name (1-12 letters)")
+        dex = _int(msg, "dex", 1, 493)
+        area = msg.get("area")
+        area = clean_text(area, SHINY_AREA_MAX) if isinstance(area, str) else ""
+        if not area:
+            raise Invalid("area must be a non-empty string")
+        game = msg.get("game")
+        if not isinstance(game, str) or not re.fullmatch(r"[a-z0-9]{1,16}", game):
+            raise Invalid("game must be a short lowercase id")
+        now = shiny_clock()
+        last = self.shiny_last.get(client.uid)
+        if last is not None and now - last < SHINY_COOLDOWN:
+            log.info("shiny_found from %s dropped (rate limit)", client.name)
+            return
+        self.shiny_last[client.uid] = now
+        soullink = self._challenge_kind(client) == "soul_link"
+        species = species.replace("♀", " F").replace("♂", " M").replace("  ", " ")   # no ♀/♂ glyph in the font
+        where = f"on {area}" if area.startswith("Route") else f"in {area}"
+        text = f"✨ {client.name} found a shiny {species} {where}" + (" in their Soul Link" if soullink else "") + "!"
+        log.info("system: %s", text)
+        await self.broadcast({"type": "system", "text": text,
+                              "shiny": {"uid": client.uid, "name": client.name, "species": species, "dex": dex,
+                                        "area": area, "game": game, "soullink": soullink}})
 
     async def award_soullink(self, rec: dict, uid: str, ts: float) -> None:
         """A run's player entered the Hall of Fame (ledger `hof`): their Soul Link badge for that region."""
@@ -1261,6 +1299,7 @@ class YellowLinkServer:
         "library": on_library,
         "badges": on_badges,
         "get_badges": on_get_badges,
+        "shiny_found": on_shiny_found,
         "challenge_request": _chal("on_request"),
         "challenge_respond": _chal("on_respond"),
         "challenge_join": _chal("on_join"),

@@ -34,6 +34,10 @@ Everyone plays their **own** game with their own save and story. On top of that:
   **Shiny hunter** (catch shinies yourself: 1, 10, 25, 50, 100) and the **Soul Link** badge. See yours under each
   region in **Regions**, and a friend's by clicking them in **Multiplayer**. Yellow has no shinies, so a Yellow
   Pokémon that would be shiny in Crystal counts as shiny in YellowLink - a **Shiny!** tag shows in wild battles.
+- **Shiny alerts.** When a shiny shows up in someone's wild battle (any game, also inside a Soul Link), everyone
+  online gets a chat line, a big sparkly banner at the top of the game and a little jingle (it plays even when your
+  game sound is turned down). In Yellow a small Poké Ball next to a wild Pokémon's name means you've caught that
+  species already, like in Crystal.
 - **Chat.** You can also see who's online, and the app shows a notice when an update is available.
 
 > **No ROM is included, and none ever should be.** Each player needs their own copy of

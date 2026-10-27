@@ -92,17 +92,18 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `ping` | `t` | server answers `pong` with same `t` |
 | `badges` | `earned` {region: {`champion`, `dex`, `shinies`}} | main-game badges (0.7.5, section 9); only if `welcome.features` has `badges` |
 | `get_badges` | `uid` | full badge view of one player (section 9) |
+| `shiny_found` | `species` str, `dex` int, `area` str, `game` str | a shiny appeared in the sender's wild battle (0.7.7, section 10); only if `welcome.features` has `shiny_alert` |
 
 ### Server -> Client
 | type | fields |
 |---|---|
-| `welcome` | `you` uid, `players` list[PlayerInfo], `roster` list[RosterEntry], `latest_client` str, `download_url` str, `motd` str, `server_name` str (may be empty; env `YL_SERVER_NAME`), `features` list[str] (0.7.5: `["badges"]`, 0.7.6: + `"trade_evo"` (section 7); missing = older server) |
+| `welcome` | `you` uid, `players` list[PlayerInfo], `roster` list[RosterEntry], `latest_client` str, `download_url` str, `motd` str, `server_name` str (may be empty; env `YL_SERVER_NAME`), `features` list[str] (0.7.5: `["badges"]`, 0.7.6: + `"trade_evo"` (section 7), 0.7.7: + `"shiny_alert"` (section 10); missing = older server) |
 | `player_join` | `player` PlayerInfo |
 | `player_leave` | `uid` |
 | `state` | `uid` + all state fields (relayed to everyone else) |
 | `sprite` | `uid`, `data` (also replayed to newly joined clients for all online players) |
 | `chat` | `uid`, `name`, `text`, `game` (sender's current game id or null; chat goes to everyone, all regions) |
-| `system` | `text` (join/leave/battle results/trade completed) |
+| `system` | `text` (join/leave/battle results/trade completed), `shiny` (optional, 0.7.7: a shiny alert, section 10) |
 | `roster` | `roster` list[RosterEntry] (re-sent whenever any party snapshot changes, someone changes game, or someone joins/leaves). RosterEntry includes `game` (current game if online, else last known; may be null) |
 | `party_data` | `uid`, `name`, `trainer`, `mons` list[Mon] (or `error` if unknown) |
 | `trade_request` | `trade_id`, `from` uid, `name`, `gift` bool |
@@ -777,3 +778,56 @@ toasts it when its own roster entry shows a new or better Soul Link badge (the r
 doesn't mention the badge). A server without the `badges` feature: friends' badges show "Badges need a server
 update" instead of empty sockets. A badge book that isn't valid JSON of the right shape is kept aside as
 `badges.bad-<time>.json` and a fresh one is started (detection fills it again). `merge.py` (section 8) copies badges.json entries like players.
+
+## 10. Shiny alerts — added in 0.7.7
+
+When a shiny shows up in a player's **wild** battle (any of the three games, main game or Soul Link run), every
+online player hears about it: a chat line, a big banner at the top of the game and a short jingle. Plus, in Yellow
+only, a small Poké Ball next to the wild Pokémon's name when its species is already caught (like Crystal's own).
+
+### Detection (client, `client/yellowlink/shiny.py`)
+Every 15 frames the app reads the adapter's `battle_info()` (the same reader the Soul Link referee uses, so the
+addresses are the verified ones of sections 3, 6 and 7; `dev/shiny/verify.py` checks them on the three ROMs).
+`EncounterWatch` settles **once per battle**: the first reading that is identical on two polls in a row (kind, dex,
+shiny, Platinum keys, Crystal DVs) decides; the battle is over after 3 polls without one. Yellow's first battle frame
+can still hold the previous battle's DVs and Platinum's reader can skip a frame - both are covered by this.
+Only `kind == "wild"` counts (Yellow: normal + Safari, not the Old Man / Oak's Pikachu / ghost battles; Crystal: every
+non-special battle type, incl. the contest and the red Gyarados; Platinum: not link/Frontier/Pal Park/tutorial).
+| game | shiny means |
+|---|---|
+| Yellow | the wild mon's DVs would be shiny in Gen 2 (`battle_info()["shiny"]`, section 3 "Badges"; YellowLink counts such mons as shiny) |
+| Crystal | the game's own rule on the wild mon's DVs (`battle_info()["shiny"]`) |
+| Platinum | `(TID ^ SID ^ PID_hi ^ PID_lo) < 8` for ANY wild mon of the battle (`battle_info()["keys"]` = PID+TID+SID; a double battle has two) |
+Never in link/practice battles (they are trainer battles). One alert per battle (the first shiny if a double has two).
+
+### Messages
+| dir | type | fields | notes |
+|---|---|---|---|
+| C→S | `shiny_found` | `species` (display name, 1-12 chars: letters, digits, space, `.'’♀♂:-`), `dex` (1-493), `area` (the area's display name, 1-40 chars after `clean_text`), `game` (short lowercase id) | sent once per battle, only to servers listing `shiny_alert` in `welcome.features` (an older server would answer an unknown type with a red error). A wrong shape is an `error`. **Rate limit:** one accepted per player (uid) per 30 s; more are dropped silently |
+| S→C | `system` | `text`, `shiny` = `{uid, name, species, dex, area, game, soullink}` | to everyone (also the finder). `text` = `✨ <name> found a shiny <Species> on <area>!` for areas whose name starts with `Route` (`on Route 1`, `on Route 202`), else `in <area>` (`in Viridian Forest`, `in Mt. Moon`, `in Eterna City`); `... in their Soul Link!` added when the server sees the finder in a Soul Link session (`soullink` true). ♀/♂ in the species become ` F`/` M` (`Nidoran F`: the clients' font has no such glyphs; the `shiny.species` field too). Older clients ignore the `shiny` field and just show the chat line |
+
+### Client
+- Finder: the banner `A shiny <Species> appeared!` (second line `on Route 1` / `in Mt. Moon`, same on/in rule as
+  the server) and the jingle play right away, also when offline or on an older server (then a local chat line
+  `✨ You found a shiny <Species> on/in <area>!` instead of the server's). The server's echo is not shown as a second
+  banner. Species names are sent with ♀/♂ as ` F`/` M` (`shiny.species_label`).
+- Everyone else (clients 0.7.7+): on a `system` message with `shiny` from another player, the banner
+  `<name> found a shiny <Species>!` (second line `on Route 1` / `in <area>`, `- Soul Link` added in a run) + the
+  jingle.
+- Banner: top of the game area, ~5 s (slides in, fades out), sparkles, drawn by our code; it never takes input
+  (toasts move to the bottom while it shows). Several alerts queue (at most 3 waiting).
+- Jingle: synthesised by our code (numpy: a ~1.4 s bell arpeggio, no game audio), played on its **own** mixer channel
+  (`audio.FX_CHANNEL` = 1; the game streams on channel 0, `set_reserved(2)`) at a **fixed** volume
+  (`shiny.JINGLE_VOLUME`), whatever the volume slider or mute say. Platinum too (DeSmuME plays the game on its own
+  SDL device; our mixer is opened all the same). No sound card: silently nothing.
+- Chat: a line starting with `✨` is drawn with a sparkle (the default font has no ✨ glyph).
+
+### Yellow: caught indicator
+In a catchable wild battle (`kind == "wild"`), if the wild species' wPokedexOwned bit was set when the battle
+settled (not updated by catching it), a small Poké Ball (drawn by our code) sits at tile (1, 1) - under the start
+of the enemy's name, left of its `:L` level, the spot Crystal uses. Rows/cols there are blank in Yellow's enemy HUD
+(pret DrawEnemyHUDAndHPBar: name from (1..3, 0) via CenterMonName, level at (4, 1), HUD frame from row 2). It is only
+drawn while the enemy HUD is on screen: `GameMemory.enemy_hud_shown()` = wTileMap (C3A0) row 0 holds wEnemyMonNick
+(CFD9) at column 1, 2 or 3 and tile (1, 3) is the HUD corner 0x74 (so not during the intro, menus over it, the
+Pokédex page after a catch, or when the HUD is cleared).
+

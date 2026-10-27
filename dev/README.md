@@ -38,6 +38,12 @@ Expected output: see the `print` lines; screenshots go to a temp dir printed at 
 - `pctest.py` — PC database e2e on the real ROM (deposit, commit to server, stand-ins, restart).
 - `crossgame.py` — Yellow and Crystal share one PC database (real PC menus in both games).
 - `crystal_mp.py` — two Crystal players + one Yellow player: seeing each other, Crystal trade with evolution, cross-game refusal.
+- `shiny_alert.py` — shiny alerts (SPEC.md section 10): a Yellow client and a Crystal client (later Platinum) on a local
+  server; shinies planted in all three games -> the other player gets the chat line, banner and (counted) jingle; the
+  Yellow caught ball at 2x/3x/4x; the server's rate limit. Screenshots (GB 3x/4x, DS 1.5x) in the printed temp folder.
+- `../shiny/verify.py [yellow|crystal|platinum]` — the shiny alerts' game side on the real ROMs: the once-per-battle
+  watch on real encounters, planted shinies (Yellow DVs, Crystal DVs, Platinum PID incl. the second mon of a double
+  battle), Yellow's enemy-HUD check / caught ball tile, trainer battles never alert, our mixer next to DeSmuME.
 - `badges_flow.py` — badges (SPEC.md section 9): main-game badges by RAM edits seen by a friend, gold/silver Soul Link badges from runs, the Yellow "Shiny!" tag; screenshots of the Regions/Multiplayer panels (3x, 4x, DS 1.5x layout).
 - `challenge_flow.py` — challenges with two clients: invite, fresh separate save, pause/partner-left pop-up, continue, closing the game, abandon.
 - `soullink_yellow.py` / `soullink_crystal.py` — Soul Link referee in the real games with two clients (catches, links, faints, PC rule, blackout).

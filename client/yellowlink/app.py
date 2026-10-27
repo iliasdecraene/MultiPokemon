@@ -23,6 +23,7 @@ from .challenge import ChallengeMixin
 from .tradeevo import TradeEvoMixin
 from .trades import TradeMixin
 from .badgesync import BadgeMixin
+from .shiny import ShinyMixin
 from . import badge_art
 from .net import NetClient
 
@@ -59,6 +60,9 @@ DS_FAST_TICKS = 4           # DS frames per host frame while fast-forward is on
 # Game Boy pixels: the "Shiny!" tag sits centred under the wild enemy's HUD (its HP bar's frame ends at y 28),
 # above the player's Pokémon (back picture from y 40) and clear of the player's name/level HUD (y 56+)
 SHINY_TAG_X, SHINY_TAG_Y = 48, 30
+# Game Boy pixels: Yellow's "already caught" ball sits in tile (1, 1) - under the start of the enemy's name, left of its
+# level (blank in Yellow's enemy HUD; the spot Crystal uses for its own indicator). SPEC.md section 10
+OWNED_BALL_X, OWNED_BALL_Y = 8, 8
 DS_SAVE_POLL = 180          # frames (~3 s) between battery save checks (Platinum)
 
 
@@ -144,7 +148,7 @@ class GhostBattle:
     result: int | None = None
 
 
-class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
+class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin):
     def __init__(self, cfg: Config, diag: Diagnostics | None = None):
         self.cfg = cfg
         self.diag = diag
@@ -157,6 +161,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         self.init_trades()
         self.init_badges()
         self.init_tradeevo()
+        self.init_shiny()
         # in a challenge: that run's own game + separate save (Config paths follow active_challenge)
         self.game_id = cfg.challenge["game"] if cfg.challenge else (self.lib.current or "yellow")
         self.save_tag = f"challenge-{cfg.challenge['id']}" if cfg.challenge else self.game_id
@@ -727,6 +732,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
 
     def on_system(self, msg):
         self.sys_msg(msg.get("text", ""))
+        self.shiny_on_system(msg)          # a shiny alert of someone else: banner + jingle (SPEC.md section 10)
 
     def on_roster(self, msg):
         self.roster = msg.get("roster", [])
@@ -2130,6 +2136,9 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             # Yellow wild battle: this one would be shiny in Gen 2 (counts as shiny in YellowLink) - next to the enemy
             badge_art.draw_shiny_indicator(sub, self.fonts, int((self.off_x + SHINY_TAG_X) * self.scale),
                                            int((self.off_y + SHINY_TAG_Y) * self.scale), self.scale)
+        if self.wild_owned and not self.ds and self.game_id == "yellow" and self.game.enemy_hud_shown():
+            badge_art.draw_owned_ball(sub, int((self.off_x + OWNED_BALL_X) * self.scale),
+                                      int((self.off_y + OWNED_BALL_Y) * self.scale), self.scale)
         if self.mode == "panel" and self.panel == "multiplayer":
             panels.draw_multiplayer(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
         elif self.mode == "panel" and self.panel == "settings":
@@ -2258,8 +2267,12 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
                     (self.game_w // 2, band.y + 58), ui.DIM, anchor="midtop")
             panels.button(sub, self, self.fonts, pygame.Rect(self.game_w // 2 - 65, band.y + 84, 130, 34),
                           "Go back", lambda: self.leave_to_main("paused"), offset=(0, self.game_y))
+        banner = self.banners.current()
+        if banner is not None:            # shiny alert: over everything, never takes input
+            badge_art.draw_shiny_banner(sub, self.fonts, banner)
         ui.draw_toasts(sub, self.fonts, self.toasts, self.game_w,
-                       bottom=self.mode in ("panel", "chal_popup", "prompt", "battle_confirm", "evo_wait"))
+                       bottom=banner is not None or
+                       self.mode in ("panel", "chal_popup", "prompt", "battle_confirm", "evo_wait"))
         if self.fast:
             ui.text(sub, self.fonts.body, ">> fast (Space)", (self.game_w - 10, 10), ui.ACCENT, anchor="topright")
         ui.draw_sidebar(self.screen, self.fonts, self, self.game_w, self.screen.get_height())
@@ -2291,6 +2304,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         self.chal_step()
         self.trades_step()
         self.badges_step()
+        self.shiny_step()
         if self.update_dl and self.update_dl.status != "downloading" and not getattr(self.update_dl, "announced", False):
             self.update_dl.announced = True
             if self.update_dl.status == "ready":
