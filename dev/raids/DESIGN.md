@@ -456,3 +456,23 @@ python dev/raids/proto/den_draw.py         # screenshots to /tmp/yl-raid-proto (
 python dev/raids/proto/yellow_spots.py     # Kanto spot list (--json out.json)
 python dev/raids/proto/pt_find.py          # how the Platinum addresses were found
 ```
+
+---------------------------------------------------------------------------------------------------
+
+## Ilias's decisions (2026-10-27) — these override the recommendations in section 4
+1. **Who catches:** everyone in the group still in the battle when the group HP runs out gets a catch attempt.
+   **Catch chance = that player's share of the total damage** (did 100 % → guaranteed; did 50 % → 50 %).
+2. **Not guaranteed** — see 1 (one attempt each; on a miss the boss runs away in that player's game).
+3. **Boss level:** mythicals are scaled per player (strongest + 5, 20–70); **legendaries have a fixed, proper level**
+   like their in-game encounters (e.g. Dialga/Palkia-class 60–70, birds/beasts ~50, Latis ~40–50 — pick per species
+   from their canonical encounter levels across the games).
+4. Caught level = the boss's level.
+5. Group HP: 2 bars per player who joins.
+6. Timer: repeats the last move (else strongest); 10 s; fast-forward off in raid battles.
+7. **Every 2 hours, in a random region** (skip when nobody is online).
+8. **Shiny bosses: 1/20** (like Pokémon GO); a shiny raid catch counts for the Shiny hunter badge.
+9. After a blackout you're out of that raid.
+10. **Add Darkrai, Shaymin, Arceus and the Regis (+ Regigigas) to the Sinnoh raid list** too; second-chance raids
+    for one-per-save legendaries in Kanto/Johto: yes.
+11. Caught Pokémon gets its normal moves for its level.
+12. Den: our own drawn stone tower (Hallowed Tower style), same in all games.
