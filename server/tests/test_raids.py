@@ -88,9 +88,18 @@ def test_place_phrase():
 
 def test_share_and_allowance():
     assert R.allowed_total(0) == 1000 and R.allowed_total(10) == 6000
-    parts = {"a": {"dealt": 3000}, "b": {"dealt": 1000}, "c": {"dealt": 0}}
+    f = "fighting"
+    parts = {"a": {"dealt": 3000, "state": f}, "b": {"dealt": 1000, "state": f}, "c": {"dealt": 0, "state": f}}
     assert R.shares(parts) == {"a": 0.75, "b": 0.25, "c": 0.0}
-    assert R.shares({"a": {"dealt": 0}}) == {"a": 0.0}
+    # Ilias's decision: only the players still in the fight count (blacked out / left / fled don't)
+    parts["d"] = {"dealt": 4000, "state": "blackout"}
+    parts["e"] = {"dealt": 2000, "state": "left"}
+    assert R.shares(parts) == {"a": 0.75, "b": 0.25, "c": 0.0}
+    # one fighter left: 100 %, whatever they dealt
+    assert R.shares({"a": {"dealt": 0, "state": f}, "d": {"dealt": 4000, "state": "blackout"}}) == {"a": 1.0}
+    # several fighters who dealt nothing (the others did it all): an even split
+    assert R.shares({"a": {"dealt": 0, "state": f}, "b": {"dealt": 0, "state": f},
+                     "d": {"dealt": 4000, "state": "left"}}) == {"a": 0.5, "b": 0.5}
 
 
 def test_config_from_env(tmp_path):
@@ -252,7 +261,7 @@ async def test_solo_raid_is_a_sure_catch(server, hub, connect_client):
     assert d["chance"] == 1.0 and d["catch"] is True
 
 
-async def test_blackout_is_out_and_counts_for_the_share(server, hub, connect_client):
+async def test_blackout_is_out_and_doesnt_count_for_the_share(server, hub, connect_client):
     a = await raider(connect_client, "Ilias")
     b = await raider(connect_client, "Alex")
     raid = await open_raid(hub, a)
@@ -270,8 +279,29 @@ async def test_blackout_is_out_and_counts_for_the_share(server, hub, connect_cli
     hub.rng = FixedRng(0.0)
     await a.send(type="raid_damage", id=raid["id"], dealt=3000)
     d = await a.expect("raid_down")
-    assert d["chance"] == pytest.approx(0.75)
+    assert d["chance"] == 1.0 and d["catch"] is True          # the only one still fighting: 100 %
     await b.expect_none("raid_down")
+
+
+async def test_share_only_among_fighters(server, hub, connect_client):
+    a = await raider(connect_client, "Ilias")
+    b = await raider(connect_client, "Alex")
+    c = await raider(connect_client, "Max")
+    raid = await open_raid(hub, a)
+    for x in (a, b, c):
+        await x.send(type="raid_join", id=raid["id"], level=30)
+        await x.expect("raid_joined")
+    hub.clock.t += 20
+    await c.send(type="raid_damage", id=raid["id"], dealt=3000)
+    await c.send(type="raid_result", id=raid["id"], outcome="left")
+    await b.send(type="raid_damage", id=raid["id"], dealt=1000)
+    await asyncio.sleep(0.1)
+    hub.rng = FixedRng(0.9)
+    await a.send(type="raid_damage", id=raid["id"], dealt=2000)        # pool 6000 -> 0
+    da, db = await a.expect("raid_down"), await b.expect("raid_down")
+    assert da["chance"] == pytest.approx(2 / 3, abs=1e-3) and db["chance"] == pytest.approx(1 / 3, abs=1e-3)
+    assert da["catch"] is False and db["catch"] is False
+    await c.expect_none("raid_down")
 
 
 async def test_time_over_and_down_grace(server, hub, connect_client):

@@ -623,6 +623,84 @@ def scenario_den(game_id):
     g.stop()
 
 
+def _set_bag(g, entries):
+    """test-only: rewrite the bag list (Yellow) / Ball pocket (Crystal)."""
+    cnt, items, cap, _ball = raid_gb.GIVE_BALL[g.game_id]
+    m = g.m
+    for i, (it, q) in enumerate(entries):
+        m[items + 2 * i], m[items + 2 * i + 1] = it, q
+    m[items + 2 * len(entries)] = 0xFF
+    m[cnt] = len(entries)
+
+
+def scenario_free_ball(game_id):
+    """No ball of any kind: joining gives exactly one Poké Ball (into the bag the game's way, at the safe overworld
+    frame before the battle), it shows in the bag and the catch works with it. Bag full: still refused."""
+    print("== %s: no Poké Ball: YellowLink gives one, the catch uses it; full bag: refused ==" % game_id, flush=True)
+    species = MEW if game_id == "yellow" else CELEBI
+    state = "soullink_route1_grass.state" if game_id == "yellow" else "crystal_sl_route29.state"
+    poke = POKE_BALL_Y if game_id == "yellow" else POKE_BALL_C
+    cnt_a, items_a, cap, _ball = raid_gb.GIVE_BALL[game_id]
+    # bag full, no ball: refused with the usual message, nothing written
+    g = GB(game_id, state)
+    g.tick(30)
+    filler = [(0x14 + i, 1) for i in range(cap)] if game_id == "yellow" else [(0x10 + i, 1) for i in range(cap)]
+    _set_bag(g, filler)
+    rb = raid_gb.RaidBattle(g.pb, boss(game_id, species, 30, [SPLASH]), game=game_id, rom=g.rd, gm=g.gm)
+    ok, why = rb.can_join()
+    CHECK("%s: no ball + full %s: still refused (\"%s\")" % (game_id, "bag" if game_id == "yellow" else "ball pocket",
+                                                            why), not ok and why == "you need a Poké Ball")
+    CHECK("%s: full bag: start() gives nothing and doesn't start" % game_id,
+          not rb.start(1000) and g.m[cnt_a] == cap and not rb.ball_given and rb.phase == "idle")
+    g.stop()
+    # no ball at all, room in the bag
+    g = GB(game_id, state)
+    g.tick(30)
+    if game_id == "yellow":
+        keep = [(i, q) for i, q in g.gm.bag_items() if i not in game.BALL_ITEMS] or [(0x14, 2)]   # (a Potion)
+    else:
+        keep = []
+    _set_bag(g, keep)
+    INFO("bag before: %s" % (g.gm.bag_items() if game_id == "yellow" else g.balls()))
+    CHECK("%s: test bag has no ball" % game_id, not g.gm.has_poke_balls())
+    n0 = len(g.gm.party())
+    rb = g.raid(boss(game_id, species, 30, [SPLASH]), 1)
+    b0 = g.balls()
+    CHECK("%s: joined; exactly one Poké Ball given before the battle (ball_given)" % game_id,
+          b0.get(poke) == 1 and rb.ball_given and sum(1 for _ in b0) == len(keep) + 1
+          and g.m[items_a + 2 * len(keep)] == poke and g.m[items_a + 2 * len(keep) + 2] == 0xFF
+          and {"type": "ball_given"} in rb.events, "bag %s" % b0)
+    st = {"down": False, "threw": False, "shot": None}
+
+    def on_event(ev):
+        if ev["type"] == "started":
+            g.weaken_boss()
+        if ev["type"] == "need_input" and ev["what"] == "menu":
+            if rb.phase == "down" and not st["threw"]:
+                st["threw"] = True
+                g.press_later(40, *g.ball_keys(poke), gap=70)  # the player picks the given ball in the bag
+                st["shot"] = g.frame + 40 + 70 + 65
+            elif rb.phase == "fight":
+                rb.auto_pick()
+
+    g.on_event = on_event
+    for _ in range(30000):
+        g.tick()
+        if st["shot"] is not None and g.frame >= st["shot"]:
+            st["shot"] = None
+            g.shot("%s_free_ball_bag.png" % game_id)
+        if g.pool == 0 and not st["down"] and rb.phase == "fight":
+            st["down"] = True
+            rb.group_down(1.0)
+        if g.ended():
+            break
+    b1 = g.balls()
+    CHECK("%s: the catch works with the given ball (caught, ball used up)" % game_id,
+          g.outcome() == "caught" and len(g.gm.party()) == n0 + 1 and not b1.get(poke)
+          and not g.gm.has_poke_balls(), "outcome %s balls %s -> %s" % (g.outcome(), b0, b1))
+    g.stop()
+
+
 def run(game_id, check, info, sym, states, out):
     global CHECK, INFO, STATES, OUT
     CHECK, INFO, STATES, OUT = check, info, states, out
@@ -632,6 +710,7 @@ def run(game_id, check, info, sym, states, out):
     scenario_fight_catch(game_id)
     scenario_miss(game_id)
     scenario_afk_catch(game_id)
+    scenario_free_ball(game_id)
     scenario_flee(game_id)
     scenario_trapped_flee(game_id)
     scenario_start_cancel(game_id)

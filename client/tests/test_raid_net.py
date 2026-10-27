@@ -686,3 +686,38 @@ def test_chat_stays_visible_with_raid_card(h, update):
     plan = ui.sidebar_plan(h, update, True)
     assert plan["chat"] >= ui.CHAT_MIN
     assert ui.sidebar_plan(h, update, False)["wide"] is True        # nothing changes without a raid
+
+
+
+# ------------------------------------------------------------------------------------------------ round 5
+def test_no_balls_one_is_given_with_a_toast(app, monkeypatch):
+    monkeypatch.setattr(FakeBattle, "has_ball", lambda self: False, raising=False)
+    app.on_raid_open({"raid": raid_obj(), "fresh": True})
+    app.raid_press("a", True)
+    assert app.raid_confirm["ok"] and app.raid_confirm.get("no_ball") is True
+    app.raid_confirm["shown"] = 0
+    app.raid_answer(True)
+    joined(app)
+    monkeypatch.setattr(R.time, "time", lambda: 1000.0)
+    app.raid_step()
+    b = FakeBattle.instances[-1]
+    b.events = [{"type": "ball_given"}, {"type": "started"}]
+    app.raid_step()
+    assert "You had no Poké Balls - here's one for the raid" in app.toasts
+
+
+def test_no_balls_and_a_full_bag_is_refused(app, monkeypatch):
+    monkeypatch.setattr(FakeBattle, "default_ok", (False, "you need a Poké Ball (your bag is full)"))
+    app.on_raid_open({"raid": raid_obj(), "fresh": True})
+    app.raid_press("a", True)
+    assert app.raid_confirm["ok"] is False and "bag is full" in app.raid_confirm["why"]
+
+
+def test_dialog_mentions_the_gift_ball(app, screen):
+    surf = pygame.Surface((480, 432))
+    app.fonts = screen[1]
+    app.click_targets = []
+    app.on_raid_open({"raid": raid_obj(), "fresh": False})
+    app.raid_confirm = {"ok": True, "why": "", "level": 38, "shown": 0, "no_ball": True}
+    R.draw_confirm(surf, screen[1], app, 480, 432, (0, 0))
+    assert any("one Poké Ball" in t for t in app.raid_dialog_lines)

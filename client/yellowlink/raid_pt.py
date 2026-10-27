@@ -43,8 +43,8 @@ import time
 from ctypes import c_char_p
 
 from . import pk4, raid_art, raid_data
-from .platinum import (BATTLE_MON_SIZE, CTX_BATTLE_MONS, FLAG_HAS_PARTNER, FLAG_SAFARI_GAME_ACTIVE,
-                       PlatinumMemory, _ptr)
+from .platinum import (BAG_BALLS, BALL_POCKET_SIZE, BATTLE_MON_SIZE, CTX_BATTLE_MONS, FLAG_HAS_PARTNER,
+                       FLAG_SAFARI_GAME_ACTIVE, PAGE_BAG, PlatinumMemory, _ptr)
 
 log = logging.getLogger("yellowlink.raid")
 
@@ -243,6 +243,29 @@ def shiny_pid(pid: int, tid: int, sid: int) -> int:
     return (((lo ^ tid ^ sid) << 16) | lo) & 0xFFFFFFFF          # shiny, nature changed (never needed so far)
 
 
+# The one Poké Ball YellowLink gives a player who has none (Ilias, 2026-10-27): ITEM_POKE_BALL into the Balls
+# pocket (Bag.pokeballs[15], {u16 item, u16 quantity}) exactly like pokeplatinum src/bag.c Bag_TryAddItem.
+ITEM_POKE_BALL = 4
+BAG_MAX_QUANTITY_ITEM = 999
+
+
+def is_ball(item: int) -> bool:
+    return 1 <= item <= 16                             # ITEM_MASTER_BALL .. ITEM_CHERISH_BALL
+
+
+def pocket_slot_for(slots, item: int, count: int = 1, max_qty: int = BAG_MAX_QUANTITY_ITEM):
+    """pokeplatinum Pocket_FindSlotToAddItem: the index of the slot Bag_TryAddItem would add `count` x `item` to -
+    the item's own slot (None if that would pass `max_qty`), else the first empty one (item 0, quantity 0); None if
+    there's no room. `slots` is every slot of the pocket as (item, quantity)."""
+    empty = None
+    for i, (it, q) in enumerate(slots):
+        if it == item:
+            return i if q + count <= max_qty else None
+        if empty is None and it == 0 and q == 0:
+            empty = i
+    return empty
+
+
 class RaidBattle:
     """One raid battle in the player's own Platinum (see the module docstring and dev/raids/STATUS.md)."""
 
@@ -251,6 +274,7 @@ class RaidBattle:
     def __init__(self, app_or_core=None, boss: dict | None = None, *, pm=None, data=None, rng=None):
         core = getattr(app_or_core, "nds", None) or app_or_core
         self.core = core
+        self._app = app_or_core if hasattr(app_or_core, "nds") else None
         self.pm = pm or getattr(app_or_core, "game", None) or PlatinumMemory(core)
         self.data = data if data is not None else getattr(app_or_core, "plat_data", None)
         self.rng = rng or random.Random()
@@ -271,6 +295,7 @@ class RaidBattle:
         self.meter = raid_data.BarMeter()
         self.max_hp = 0
         self.events = []
+        self.ball_given = False      # give_ball() added the one free Poké Ball this raid
         self.frame = 0
         self.decision = None
         self.auto = False
@@ -321,12 +346,60 @@ class RaidBattle:
             infos = [mon_info(r) for r in party]
             if not any(i and not i["egg"] and i["hp"] > 0 for i in infos):
                 return False, "you need a healthy Pokémon"
-            if not any(1 <= item <= 16 and qty > 0 for item, qty in pm.balls()):
-                return False, "you need a Poké Ball"
+            if not self.has_ball():
+                ok, why = self.can_give_ball()
+                if not ok:
+                    return False, why
         except Exception as e:  # noqa: BLE001
             log.exception("raid can_join")
             return False, "can't check the game right now (%s)" % e
         return True, ""
+
+    # --- the one Poké Ball for a player who has none -------------------------------------------------------------
+    def _ball_pocket(self):
+        """(address, [(item, quantity)] x 15) of the bag's Balls pocket, or (0, []) before the save is loaded."""
+        body = self.pm.save_body()
+        if not body:
+            return 0, []
+        a = body + PAGE_BAG + BAG_BALLS
+        raw = self.core.read(a, 4 * BALL_POCKET_SIZE)
+        return a, [struct.unpack_from("<HH", raw, 4 * i) for i in range(BALL_POCKET_SIZE)]
+
+    def has_ball(self) -> bool:
+        return any(is_ball(item) and qty > 0 for item, qty in self.pm.balls())
+
+    def _in_challenge(self) -> bool:
+        app = getattr(self, "_app", None)
+        cfg = getattr(app, "cfg", None)
+        return bool(getattr(app, "chal", None) or getattr(cfg, "challenge", None))
+
+    def can_give_ball(self):
+        """(ok, why): could give_ball() add a Poké Ball (no Soul Link run, room in the Balls pocket)?"""
+        if self._in_challenge():
+            return False, "you need a Poké Ball"
+        a, slots = self._ball_pocket()
+        if not a or pocket_slot_for(slots, ITEM_POKE_BALL) is None:
+            return False, "you need a Poké Ball"
+        return True, ""
+
+    def give_ball(self):
+        """A player who has no ball at all gets exactly one Poké Ball, added to the Balls pocket the way
+        Bag_TryAddItem does - only while is_safe() (standing in the overworld). (ok, why); ok with nothing done if
+        the player already has a ball."""
+        if self.has_ball():
+            return True, ""
+        ok, why = self.can_give_ball()
+        if not ok:
+            return ok, why
+        if not self.pm.is_safe():
+            return False, "stand still in the overworld first"
+        a, slots = self._ball_pocket()
+        i = pocket_slot_for(slots, ITEM_POKE_BALL)
+        self.core.write(a + 4 * i, struct.pack("<HH", ITEM_POKE_BALL, slots[i][1] + 1))
+        self.ball_given = True
+        self.events.append({"type": "ball_given"})
+        self._note("gave one Poké Ball")
+        return True, "gave"
 
     def start(self, pool_mb: int) -> bool:
         if self.phase != "idle" or not self.pm.is_safe():
@@ -336,6 +409,8 @@ class RaidBattle:
             return False
         fs = d.r32(S_FIELD_SYSTEM)
         if not _ptr(fs):
+            return False
+        if not self.has_ball() and not self.give_ball()[0]:
             return False
         self.pool = int(pool_mb)
         self._install()

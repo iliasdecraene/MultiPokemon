@@ -366,7 +366,9 @@ def draw_confirm(surf, f, app, game_w, game_h, offset):
         head = f"Join the raid against {name}" + (f" (Lv {lv})" if lv else "") + "?"
         left = time_text(raid.get("closes", now) - now)
         dim = (f"You add {raid.get('bars_per_player', 2)} bars to the group's HP. {left} left. Your catch chance = "
-               "your share of all the damage; blacking out = you're out.")
+               "your share of the damage of everyone still fighting; blacking out = you're out.")
+        if c.get("no_ball"):
+            dim += " You have no Poké Balls: you get one Poké Ball for the raid."
         paras = [(head, ui.TEXT), (dim, ui.DIM)]
         labels = ("Join", "Not now")
         hint = "[Y] join    [N] not now"
@@ -416,6 +418,7 @@ def draw_confirm(surf, f, app, game_w, game_h, offset):
         rects.append(br)
     if show_hint:
         ui.text(surf, f.small, hint, (r.x + pad, r.bottom - pad - f.small.get_height() + 2), ui.DIM)
+    app.raid_dialog_lines = [ln for ln, _c in lines]
     app.raid_dialog_rects = {"dialog": r, "buttons": rects,
                              "hint": pygame.Rect(r.x + pad, r.bottom - pad - hint_h + 6, inner, hint_h - 6)
                              if show_hint else None}
@@ -899,6 +902,7 @@ class RaidMixin:
     def raid_open_dialog(self):
         ok, why = self.raid_join_check()
         level = None
+        no_ball = False
         if ok:
             mod = _game_module(self.game_id)
             boss = self._raid_boss()
@@ -908,13 +912,16 @@ class RaidMixin:
                 try:
                     self.raid_pending = mod.RaidBattle(self, boss)
                     ok, why = self.raid_pending.can_join()
+                    has_ball = getattr(self.raid_pending, "has_ball", None)
+                    no_ball = bool(ok and has_ball is not None and not has_ball())
                     self.raid_boss = boss
                     level = boss.get("level")
                 except Exception:  # noqa: BLE001
                     log.exception("raid: can_join failed")
                     ok, why = False, "Something went wrong - press F3 to send a report."
                     self.raid_pending = None
-        self.raid_confirm = {"ok": bool(ok), "why": why, "level": level, "shown": time.time()}
+        self.raid_confirm = {"ok": bool(ok), "why": why, "level": level, "shown": time.time(),
+                             "no_ball": bool(ok and no_ball)}
         self.release_all()
         self.mode = "raid_confirm"
 
@@ -1043,6 +1050,8 @@ class RaidMixin:
                 self.raid_timer.need_input(now)
         elif t == "input_done":
             self.raid_timer.input_done()
+        elif t == "ball_given":                          # no balls: the game module gave exactly one (Ilias)
+            self.toast("You had no Poké Balls - here's one for the raid", 6, ui.GOOD)
         elif t == "blackout":
             self._raid_report("blackout")
             self.toast("You blacked out - you're out of this raid.", 6, ui.BAD)

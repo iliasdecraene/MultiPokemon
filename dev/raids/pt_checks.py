@@ -442,6 +442,70 @@ def scenario_ball_page2(core):
           g.outcome() == "caught" and len(g.party()) == n0 + 1 and used == {POKE_BALL: 1}, "used %s" % used)
 
 
+def _set_ball_pocket(g, entries):
+    """test-only: rewrite the bag's Balls pocket (15 x {u16 item, u16 quantity})."""
+    from yellowlink import platinum as P
+    body = g.pm.save_body()
+    for i in range(P.BALL_POCKET_SIZE):
+        it, q = entries[i] if i < len(entries) else (0, 0)
+        g.d.w32(body + P.PAGE_BAG + P.BAG_BALLS + 4 * i, it | (q << 16))
+
+
+def scenario_free_ball(core):
+    """No ball of any kind: joining gives exactly one Poké Ball (Bag_TryAddItem's way, at the safe overworld frame
+    before the battle), it shows in the Balls pocket and the catch works with it. Pocket full: still refused."""
+    print("== platinum: no Poké Ball: YellowLink gives one, the catch uses it; full pocket: refused ==", flush=True)
+    g = PT(core, "pt_sl_route202.dsst")
+    g.tick(10)
+    _set_ball_pocket(g, [(17 + i, 1) for i in range(15)])          # (not balls: only the full case matters here)
+    rb = raid_pt.RaidBattle(g.d, boss(LATIAS, 12, [SPLASH]), pm=g.pm, data=DATA)
+    ok, why = rb.can_join()
+    CHECK("platinum: no ball + full Balls pocket: still refused (\"%s\")" % why,
+          not ok and why == "you need a Poké Ball")
+    CHECK("platinum: full pocket: start() gives nothing and doesn't start",
+          not rb.start(1000) and not rb.ball_given and rb.phase == "idle" and POKE_BALL not in g.balls())
+    g = PT(core, "pt_sl_route202.dsst")
+    g.tick(10)
+    _set_ball_pocket(g, [])
+    CHECK("platinum: test bag has no ball", not g.balls())
+    n0 = len(g.party())
+    rb = g.raid(boss(LATIAS, 12, [SPLASH]), 1)
+    b0 = g.balls()
+    CHECK("platinum: joined; exactly one Poké Ball given before the battle (ball_given)",
+          b0 == {POKE_BALL: 1} and rb.ball_given and {"type": "ball_given"} in rb.events, "pocket %s" % b0)
+    st = {"down": False, "threw": False, "shot": None, "last": 0, "auto_at": None}
+
+    def on_event(ev):
+        if ev["type"] == "need_input" and ev["what"] == "menu" and rb.phase == "down" and not st["threw"]:
+            st["threw"] = True
+            g.bag_ball(0, delay=40)                    # the player picks the given ball in the Balls pocket
+            st["shot"] = g.frame + 40 + 60 * 2 + 40
+        elif ev["type"] == "need_input" and rb.phase == "fight":
+            st["auto_at"] = g.frame + 40
+
+    g.on_event = on_event
+    for _ in range(20000):
+        g.tick()
+        if st["auto_at"] is not None and g.frame >= st["auto_at"]:
+            st["auto_at"] = None
+            rb.auto_pick()
+        if st["shot"] is not None and g.frame >= st["shot"]:
+            st["shot"] = None
+            g.shot("pt_free_ball_bag.png")
+        if g.pool == 0 and not st["down"] and rb.phase == "fight":
+            st["down"] = True
+            rb.group_down(1.0)
+        if rb.throws and rb.decision is None and not g.script and g.frame - st["last"] > 80 and not g.pm.is_safe():
+            after_catch_input(g)
+            st["last"] = g.frame
+        if g.ended():
+            break
+    b1 = g.balls()
+    CHECK("platinum: the catch works with the given ball (caught, ball used up)",
+          g.outcome() == "caught" and len(g.party()) == n0 + 1 and not b1.get(POKE_BALL),
+          "outcome %s %s -> %s notes %s" % (g.outcome(), b0, b1, [n for _f, n in rb.log][-4:]))
+
+
 def scenario_flee(core):
     print("== platinum: time over -> the boss teleports away ==", flush=True)
     g = PT(core, "pt_sl_route202.dsst")
@@ -580,6 +644,7 @@ def run(check, info, states, out):
         scenario_miss(core)
         scenario_afk_catch(core)
         scenario_ball_page2(core)
+        scenario_free_ball(core)
         scenario_flee(core)
         scenario_trapped_flee(core)
         scenario_start_refused(core)

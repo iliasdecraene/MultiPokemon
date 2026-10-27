@@ -236,6 +236,20 @@ def buff_gb(app):
             app.game.write(a + 34, bytes([0x03, 0xE7] * 7))      # HP, max HP, 5 stats
 
 
+def empty_yellow_bag(app):
+    m = app.pyboy.memory
+    m[game.NUM_BAG_ITEMS], m[game.BAG_ITEMS] = 0, 0xFF
+
+
+def yellow_balls(app):
+    return sum(q for it, q in app.game.bag_items() if it in (1, 2, 3, 4))
+
+
+def empty_pt_balls(app):
+    body = app.game.save_body()
+    app.nds.write(body + P.PAGE_BAG + P.BAG_BALLS, bytes(4 * P.BALL_POCKET_SIZE))
+
+
 def give_yellow_balls(app):
     m = app.pyboy.memory
     m[game.NUM_BAG_ITEMS], m[game.BAG_ITEMS], m[game.BAG_ITEMS + 1], m[game.BAG_ITEMS + 2] = 1, 4, 5, 0xFF
@@ -320,6 +334,7 @@ def scenario_kanto():
     buff_gb(A)
     buff_gb(B)
     buff_gb(C)
+    empty_yellow_bag(B)                                 # Alex has no Poké Balls: he gets one for the raid
     run(5)
     spawn("kanto", 151, spot, "Pallet Town")
     ok = wait(10, lambda: all(a.raid is not None for a in (A, B, C)))
@@ -351,11 +366,14 @@ def scenario_kanto():
     A.raid_confirm["shown"] = 0
     A.raid_answer(True)
     ok_b, cb = join(B, "down")
-    check("Alex joins too", ok_b, str(cb))
+    check("Alex (no Poké Balls) can join; the dialog says he gets one", ok_b and cb.get("no_ball") is True, str(cb))
     A.fast = True
     snap0 = A.cfg.resume_path.stat().st_mtime if A.cfg.resume_path.exists() else 0
     ok = wait(30, lambda: A.raid_fighting() and B.raid_fighting())
     check("both raid battles started", ok, f"{A.raid_phase} {B.raid_phase}")
+    wait(3, lambda: "You had no Poké Balls - here's one for the raid" in [t[0] for t in B.toasts])
+    check("Alex got one Poké Ball + the toast", yellow_balls(B) == 1
+          and "You had no Poké Balls - here's one for the raid" in [t[0] for t in B.toasts], str(B.toasts[-3:]))
     wait(3, lambda: A.raid and A.raid.get("pool_max") == 4000)
     check("pool = 2 bars per player", A.raid and A.raid.get("pool_max") == 4000)
     check("a resume snapshot right before the battle", A.cfg.resume_path.exists()
@@ -386,6 +404,7 @@ def scenario_kanto():
     wait(10, lambda: A.game.is_safe())
     check("Mew is in Ilias's party", 151 in party_dex(A), str(party_dex(A)))
     check("Alex's boss fled (no Mew)", 151 not in party_dex(B))
+    check("Alex's one ball was thrown (the gifted one)", yellow_balls(B) == 0, str(B.game.bag_items()))
     check("chat lines: 'Ilias caught Mew!' + 'Raid over: Ilias caught Mew!'",
           "Ilias caught Mew!" in lines(C) and "Raid over: Ilias caught Mew!" in lines(C), str(lines(C)[-4:]))
     check("snapshots again after the raid battle", A.autosave(force=True) is True)
@@ -456,14 +475,25 @@ def scenario_platinum(dawn):
     D = dawn
     hub.catch_force = {D.cfg["uid"]: success}
     run(30, apps=[D])
+    no_balls = not success and hasattr(raid_pt.RaidBattle, "give_ball")
+    if not success and not no_balls:
+        print("SKIP the Platinum no-balls case (raid_pt has no give_ball() yet)", flush=True)
+    if no_balls:
+        empty_pt_balls(D)                               # plain Platinum run: Dawn has no Poké Balls
+        run(5, apps=[D])
+        check("Dawn's ball pocket is empty", not D.game.balls(), str(D.game.balls()))
     spawn("sinnoh", 151, den_spot(D, 0, -1), "Route 202")
     check("Sinnoh raid reached Dawn (den in her game)", wait(15, lambda: D.raid and D.raid_den is not None))
     run(20, apps=[D])
     shot(D, "7_notice_card_den_platinum_1.5x.png", 1.5)
     ok, c = join(D, "up", shots_at=[("7b_join_dialog_platinum_1.0x.png", 1.0),
                                     ("7c_join_dialog_platinum_1.5x.png", 1.5)])
-    check("Dawn joins at the den", ok, str(c))
+    check("Dawn joins at the den", ok and (c.get("no_ball") is True) == no_balls, str(c))
     check("Platinum raid battle started", wait(60, lambda: D.raid_fighting()), D.raid_phase)
+    if no_balls:
+        wait(5, lambda: "You had no Poké Balls - here's one for the raid" in [t[0] for t in D.toasts], apps=[D])
+        check("Dawn got one Poké Ball + the toast", "You had no Poké Balls - here's one for the raid"
+              in [t[0] for t in D.toasts], str(D.toasts[-3:]))
     pre = party_dex(D)
     for what, who in fight([D], 900, first_turn_ring=D):
         if what == "ring":

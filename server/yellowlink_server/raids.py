@@ -71,9 +71,17 @@ def allowed_total(seconds_since_join: float) -> int:
 
 
 def shares(participants: dict) -> dict:
-    """uid -> share of everyone's damage (the catch chance, decision 1)."""
-    total = sum(max(0, int(p.get("dealt", 0))) for p in participants.values())
-    return {uid: (max(0, int(p.get("dealt", 0))) / total if total else 0.0) for uid, p in participants.items()}
+    """uid -> catch chance for every player still fighting when the group HP hits 0 (Ilias's decision 1, as
+    refined): their share of the damage dealt by the players STILL IN THE FIGHT - players who blacked out, left or
+    fled don't count. One fighter left = 100 %; fighters who all dealt nothing (the others did) split evenly."""
+    fighting = {uid: max(0, int(p.get("dealt", 0))) for uid, p in participants.items()
+                if p.get("state", "fighting") == "fighting"}
+    total = sum(fighting.values())
+    if not fighting:
+        return {}
+    if total == 0:
+        return {uid: 1.0 / len(fighting) for uid in fighting}
+    return {uid: d / total for uid, d in fighting.items()}
 
 
 def names_text(names: list) -> str:
@@ -535,7 +543,7 @@ class RaidHub:
         for uid, p in r["participants"].items():
             if p["state"] != "fighting":
                 continue
-            chance = round(share[uid], 4)
+            chance = round(share.get(uid, 0.0), 4)
             p["chance"] = chance
             p["catch"] = bool(chance >= 1.0 or (chance > 0 and self.rng.random() < chance))
             force = self.catch_force.get(uid) if isinstance(self.catch_force, dict) else self.catch_force

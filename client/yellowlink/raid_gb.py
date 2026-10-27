@@ -225,6 +225,25 @@ class CrystalSpec:
     MAX_BOX = 20
 
 
+# The one Poké Ball YellowLink gives a player who has none (Ilias, 2026-10-27): the bag list it goes into.
+# (count byte, (item, quantity) pairs + $FF, capacity): Yellow wNumBagItems/wBagItems (20 items), Crystal's Ball
+# pocket wNumBalls/wBalls (12) - pret AddItemToInventory / ReceiveItem do exactly this.
+GIVE_BALL = {"yellow": (0xD31C, 0xD31D, 20, 0x04), "crystal": (0xD8D7, 0xD8D8, 12, 0x05)}
+
+
+def add_item(items, capacity, item, qty=1):
+    """A Game Boy bag list after adding `qty` x `item` the way the games' AddItemToInventory does: onto an existing
+    stack (max 99) or as a new entry at the end. None if there's no room."""
+    items = [list(x) for x in items]
+    for it in items:
+        if it[0] == item and it[1] + qty <= 99:
+            it[1] += qty
+            return [tuple(x) for x in items]
+    if len(items) >= capacity:
+        return None
+    return [tuple(x) for x in items] + [(item, qty)]
+
+
 def spec_for(game_id: str):
     return {"yellow": YellowSpec, "crystal": CrystalSpec}[game_id]
 
@@ -245,6 +264,7 @@ class RaidBattle:
                  gm=None, rng=None):
         pyboy = getattr(app_or_core, "pyboy", None) or app_or_core
         self.pyboy = pyboy
+        self._app = app_or_core if hasattr(app_or_core, "pyboy") else None
         self.game_id = game or getattr(app_or_core, "game_id", None) or boss.get("game")
         self.S = spec_for(self.game_id)
         self.rom = rom if rom is not None else getattr(app_or_core, "rom", None)
@@ -274,6 +294,7 @@ class RaidBattle:
         self.meter = raid_data.BarMeter()
         self.max_hp = 0
         self.events = []
+        self.ball_given = False      # give_ball() added the one free Poké Ball this raid
         self.frame = 0
         self.ui = None               # what the game waits for right now (menu, moves, bag, party, next_mon, ...)
         self.decision = None         # open decision {"what", "t"} (timer)
@@ -325,8 +346,10 @@ class RaidBattle:
             party = gm.party()
             if not any(p.hp > 0 for p in party if getattr(p, "species", 0) not in (0, 0xFD)):
                 return False, "you need a healthy Pokémon"
-            if not gm.has_poke_balls():
-                return False, "you need a Poké Ball"
+            if not self.has_ball():
+                ok, why = self.can_give_ball()
+                if not ok:
+                    return False, why
             if self._party_count() >= 6 and self._box_count() >= S.MAX_BOX:
                 return False, "your party and current PC box are full"
         except Exception as e:  # noqa: BLE001
@@ -334,8 +357,58 @@ class RaidBattle:
             return False, "can't check the game right now (%s)" % e
         return True, ""
 
+    # --- the one Poké Ball for a player who has none -------------------------------------------------------------
+    def _bag(self):
+        cnt_a, items_a, cap, _ball = GIVE_BALL[self.game_id]
+        m = self.m
+        n = min(m[cnt_a], cap)
+        return [(m[items_a + 2 * i], m[items_a + 2 * i + 1]) for i in range(n)]
+
+    def has_ball(self) -> bool:
+        return bool(self.gm.has_poke_balls())
+
+    def _in_challenge(self) -> bool:
+        app = getattr(self, "_app", None)
+        cfg = getattr(app, "cfg", None)
+        return bool(getattr(app, "chal", None) or getattr(cfg, "challenge", None))
+
+    def can_give_ball(self):
+        """(ok, why): could give_ball() add a Poké Ball (no Soul Link run, room in the bag)?"""
+        if self._in_challenge():
+            return False, "you need a Poké Ball"
+        cnt_a, _items_a, cap, ball = GIVE_BALL[self.game_id]
+        if add_item(self._bag(), cap, ball) is None:
+            return False, "you need a Poké Ball"
+        return True, ""
+
+    def give_ball(self):
+        """A player who has no ball at all gets exactly one Poké Ball, written into the bag the way the game's own
+        item code does - only while is_safe() (standing in the overworld). (ok, why); ok with nothing done if the
+        player already has a ball."""
+        if self.has_ball():
+            return True, ""
+        ok, why = self.can_give_ball()
+        if not ok:
+            return ok, why
+        if not self.gm.is_safe():
+            return False, "stand still in the overworld first"
+        cnt_a, items_a, cap, ball = GIVE_BALL[self.game_id]
+        new = add_item(self._bag(), cap, ball)
+        m = self.m
+        for i, (it, q) in enumerate(new):
+            m[items_a + 2 * i] = it
+            m[items_a + 2 * i + 1] = q
+        m[items_a + 2 * len(new)] = 0xFF               # list terminator
+        m[cnt_a] = len(new)
+        self.ball_given = True
+        self.events.append({"type": "ball_given"})
+        self._note("gave one Poké Ball")
+        return True, "gave"
+
     def start(self, pool_mb: int) -> bool:
         if self.phase != "idle" or not self.gm.is_safe():
+            return False
+        if not self.has_ball() and not self.give_ball()[0]:
             return False
         S, m = self.S, self.m
         self._install()

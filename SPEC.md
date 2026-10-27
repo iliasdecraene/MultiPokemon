@@ -1038,7 +1038,9 @@ Co-op boss fights, per server (each group of friends has its own). Every 2 hours
 stone tower) stands on a random reachable spot; walking up to it and pressing A asks "Join the raid?". Each player
 fights **their own copy** of the boss in their own game (a normal wild battle); every hit comes off one **group HP
 pool**. When the pool is empty everyone still in the battle gets **one** catch attempt with **catch chance = their
-share of all the damage done**. Blackout = out of that raid. Not inside Soul Link runs (notice only).
+share of the damage done by the players still in the fight** (Ilias, 2026-10-27: players who blacked out, left or
+fled don't count; the only one still fighting gets 100 %; fighters who all dealt nothing split evenly). Blackout = out
+of that raid. Not inside Soul Link runs (notice only).
 
 ### Group HP pool (milli-bars)
 1 bar = 1000 = one full HP bar of the boss **in the attacker's own game** (bosses can have different levels and max
@@ -1092,7 +1094,7 @@ the pool never goes below 0. Damage log per player (claimed, dealt, hits) in the
 | S→C | `raid_update` | `raid` | any change (joins, damage, results), coalesced to at most 2 per second, to everyone |
 | C→S | `raid_join` | `id`, `level` (1-100: the boss's level in the joiner's game, history only) | answered `raid_joined {id, raid}` (the pool already includes the joiner's bars) or `raid_refused {id, reason}` (shown as a toast, not red): over / boss already down / time up / "you're out of this raid" (after a blackout, leaving, or a miss) / in a Soul Link run / the raid is in another region / in a trade or battle. A `fighting` participant joining again (reconnect) gets `raid_joined` without new bars |
 | C→S | `raid_damage` | `id`, `dealt` (int, running total in milli-bars, 0..10^7) | unknown/finished raid or not fighting: ignored silently |
-| S→C | `raid_down` | `id`, `chance` (0..1 = dealt / everyone's dealt), `catch` bool (the server's roll) | to every participant still `fighting` when the pool hits 0 (again after a reconnect until they reported); the game then allows one ball, which catches iff `catch` |
+| S→C | `raid_down` | `id`, `chance` (0..1 = dealt / dealt of everyone still fighting), `catch` bool (the server's roll) | to every participant still `fighting` when the pool hits 0 (again after a reconnect until they reported); the game then allows one ball, which catches iff `catch` |
 | C→S | `raid_result` | `id`, `outcome`: `caught` \| `missed` \| `blackout` \| `left` \| `fled` \| `unstarted` | ends that player's raid; `caught` -> system line `Ilias caught Rayquaza!`. `unstarted` (the raid battle never started in that game, e.g. no quiet moment within 20 s): the player is taken off the raid as if they had never joined (no damage dealt yet: their bars are taken back off the pool, at most down to 1 milli-bar) and can join again. Stale ids / repeats: ignored |
 | S→C | `raid_end` | `id`, `reason`: `down` \| `time`, `caught` [names], `raid` | the raid is over (phase `over`); `time` = the boss fled in every game still fighting. Plus a system line: `Rayquaza fled - the raid is over.` / `Raid over: Ilias and Alex caught Rayquaza!` / `Raid over: Rayquaza got away.` |
 
@@ -1117,6 +1119,9 @@ badges, Platinum badges; regions it doesn't know yet = 0) - a client that sends 
   keeps the raid it belongs to: a new raid's notice during it waits until that battle is over. If the battle
   can't start within 20 s (no quiet moment), the client sends `raid_result unstarted` and says "press A at the
   den to try again".
+- No Poké Balls (Ilias, 2026-10-27): joining isn't refused - right before the battle starts the client gives
+  exactly one Poké Ball (`RaidBattle.give_ball()`, the game module's own bag write) with the toast "You had no Poké
+  Balls - here's one for the raid". Refused only when the ball can't go in (the bag's ball pocket is full).
 - Gating: `App.full`, main game (not a Soul Link run: the notice says "back in your main game"), the raid's game =
   the current game, not in a trade/battle, `RaidBattle.can_join()`.
 - During the raid battle: fast-forward off; no resume snapshot (a forced one right before the battle starts, so

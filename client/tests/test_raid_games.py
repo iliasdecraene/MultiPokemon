@@ -229,3 +229,165 @@ def test_gb_flee_takes_over_and_runs():
         rb._autopilot()
     assert pb.presses[:5] == ["up", "left", "down", "right", "a"]
 
+
+
+# --- the one Poké Ball for a player who has none (Ilias, 2026-10-27) -------------------------------------------------
+def test_add_item_like_the_game():
+    assert raid_gb.add_item([], 20, 4) == [(4, 1)]
+    assert raid_gb.add_item([(0x14, 3), (4, 5)], 20, 4) == [(0x14, 3), (4, 6)]      # onto its own stack
+    assert raid_gb.add_item([(0x14, 3)] * 19, 20, 4) == [(0x14, 3)] * 19 + [(4, 1)]
+    assert raid_gb.add_item([(0x14, 3)] * 20, 20, 4) is None                         # full
+    assert raid_gb.add_item([(4, 99)] * 12, 12, 5) is None
+
+
+class BagGame:
+    """GameMemory stand-in that reads the bag list from the fake RAM, like game.GameMemory / crystal.CrystalMemory."""
+
+    def __init__(self, pyboy, game_id, safe=True):
+        self.mem, self.game_id, self.safe = pyboy.memory, game_id, safe
+
+    def _k(self, a):
+        return (1, a) if self.game_id == "crystal" else a
+
+    def has_poke_balls(self):
+        cnt, items, _cap, _ball = raid_gb.GIVE_BALL[self.game_id]
+        balls = (1, 2, 3, 4, 8) if self.game_id == "yellow" else (1, 2, 4, 5, 0x9D, 0x9F, 0xA0, 0xA1, 0xA4, 0xA5,
+                                                                    0xA6, 0xB1)
+        n = self.mem[self._k(cnt)]
+        return any(self.mem[self._k(items + 2 * i)] in balls and self.mem[self._k(items + 2 * i + 1)]
+                   for i in range(n))
+
+    def is_safe(self):
+        return self.safe
+
+
+def _bag_battle(game_id, bag, app_extra=None, safe=True):
+    pb = FakePyBoy()
+    cnt, items, _cap, _ball = raid_gb.GIVE_BALL[game_id]
+    k = (lambda a: (1, a)) if game_id == "crystal" else (lambda a: a)
+    pb.memory[k(cnt)] = len(bag)
+    for i, (it, q) in enumerate(bag):
+        pb.memory[k(items + 2 * i)], pb.memory[k(items + 2 * i + 1)] = it, q
+    pb.memory[k(items + 2 * len(bag))] = 0xFF
+    src = pb
+    if app_extra is not None:
+        class App:
+            pass
+        src = App()
+        src.pyboy = pb
+        src.__dict__.update(app_extra)
+    rb = raid_gb.RaidBattle(src, raid_data.boss_for(151, 30, "kanto"), game=game_id, rom=FakeRom(),
+                            gm=BagGame(pb, game_id, safe))
+    rb.species = 0x15
+    return rb, pb, k
+
+
+@pytest.mark.parametrize("game_id", ["yellow", "crystal"])
+def test_gb_give_ball(game_id):
+    cnt, items, cap, ball = raid_gb.GIVE_BALL[game_id]
+    rb, pb, k = _bag_battle(game_id, [(0x14, 3), (0x10, 1)])            # potion-ish items, no ball
+    assert not rb.has_ball() and rb.can_give_ball() == (True, "")
+    assert rb.give_ball() == (True, "gave")
+    assert pb.memory[k(cnt)] == 3
+    assert (pb.memory[k(items + 4)], pb.memory[k(items + 5)]) == (ball, 1)
+    assert pb.memory[k(items + 6)] == 0xFF
+    assert pb.memory[k(items)] == 0x14 and pb.memory[k(items + 1)] == 3       # the rest untouched
+    assert rb.has_ball() and rb.ball_given and {"type": "ball_given"} in rb.events
+    assert rb.give_ball() == (True, "")                                         # exactly one
+    assert pb.memory[k(cnt)] == 3 and pb.memory[k(items + 5)] == 1
+
+
+@pytest.mark.parametrize("game_id", ["yellow", "crystal"])
+def test_gb_give_ball_refused(game_id):
+    cnt, items, cap, ball = raid_gb.GIVE_BALL[game_id]
+    full = [(0x14 + i, 1) for i in range(cap)] if game_id == "yellow" else [(0x40 + i, 1) for i in range(cap)]
+    rb, pb, k = _bag_battle(game_id, full)
+    assert rb.can_give_ball() == (False, "you need a Poké Ball")
+    assert rb.give_ball()[0] is False and pb.memory[k(cnt)] == cap and not rb.events
+    rb, pb, k = _bag_battle(game_id, [], app_extra={"chal": {"id": "x", "game": game_id}})   # Soul Link run
+    assert rb.can_give_ball() == (False, "you need a Poké Ball") and not rb.give_ball()[0]
+    assert pb.memory[k(cnt)] == 0
+    rb, pb, k = _bag_battle(game_id, [], app_extra={"chal": None})
+    assert rb.can_give_ball() == (True, "")
+    rb, pb, k = _bag_battle(game_id, [], safe=False)                            # not standing still: no write
+    assert rb.give_ball() == (False, "stand still in the overworld first") and pb.memory[k(cnt)] == 0
+    assert not rb.start(1000)
+
+
+def test_pt_pocket_slot_like_bag_try_add_item():
+    empty = [(0, 0)] * 15
+    assert raid_pt.pocket_slot_for(empty, 4) == 0
+    assert raid_pt.pocket_slot_for([(17, 3), (0, 0)] + empty[2:], 4) == 1
+    assert raid_pt.pocket_slot_for([(17, 3), (0, 0), (4, 0)] + empty[3:], 4) == 2      # its own (empty) stack
+    assert raid_pt.pocket_slot_for([(4, 999)] + empty[1:], 4) is None
+    assert raid_pt.pocket_slot_for([(20 + i, 1) for i in range(15)], 4) is None
+    assert raid_pt.is_ball(4) and raid_pt.is_ball(16) and not raid_pt.is_ball(17) and not raid_pt.is_ball(0)
+
+
+PT_BOSS = raid_data.POOLS["sinnoh"][0][0]
+
+
+class BagCore:
+    class emu:
+        class lib:
+            desmume_memory_read_register = desmume_memory_write_register = staticmethod(lambda *a: 0)
+
+    def __init__(self):
+        self.ram = bytearray(0x2000)
+
+    def read(self, a, n):
+        return bytes(self.ram[a:a + n])
+
+    def write(self, a, data):
+        self.ram[a:a + len(data)] = data
+
+
+class BagPM:
+    def __init__(self, core, safe=True):
+        self.core, self.safe = core, safe
+
+    def save_body(self):
+        return 0x100
+
+    def is_safe(self):
+        return self.safe
+
+    def balls(self):
+        import struct
+        a = 0x100 + raid_pt.PAGE_BAG + raid_pt.BAG_BALLS
+        return [x for x in struct.iter_unpack("<HH", self.core.read(a, 60)) if x[0]]
+
+
+def test_pt_give_ball():
+    import struct
+    core = BagCore()
+    a = 0x100 + raid_pt.PAGE_BAG + raid_pt.BAG_BALLS
+    core.write(a, struct.pack("<HH", 17, 2))                                   # not a ball
+    rb = raid_pt.RaidBattle(core, raid_data.boss_for(PT_BOSS, 40, "sinnoh"), pm=BagPM(core), data=object())
+    assert not rb.has_ball() and rb.can_give_ball() == (True, "")
+    assert rb.give_ball() == (True, "gave")
+    assert struct.unpack_from("<HH", core.read(a + 4, 4)) == (4, 1)
+    assert struct.unpack_from("<HH", core.read(a, 4)) == (17, 2)
+    assert rb.has_ball() and {"type": "ball_given"} in rb.events
+    assert rb.give_ball() == (True, "") and struct.unpack_from("<HH", core.read(a + 4, 4)) == (4, 1)
+    full = BagCore()
+    for i in range(15):
+        full.write(a + 4 * i, struct.pack("<HH", 20 + i, 1))
+    rb = raid_pt.RaidBattle(full, raid_data.boss_for(PT_BOSS, 40, "sinnoh"), pm=BagPM(full), data=object())
+    assert rb.can_give_ball() == (False, "you need a Poké Ball") and not rb.give_ball()[0]
+    unsafe = BagCore()
+    rb = raid_pt.RaidBattle(unsafe, raid_data.boss_for(PT_BOSS, 40, "sinnoh"), pm=BagPM(unsafe, safe=False),
+                            data=object())
+    assert rb.give_ball()[0] is False and unsafe.read(a, 4) == bytes(4)
+
+
+def test_pt_give_ball_never_in_soul_link():
+    core = BagCore()
+
+    class App:
+        nds = core
+        chal = {"id": "s", "game": "platinum"}
+        game = BagPM(core)
+        plat_data = object()
+    rb = raid_pt.RaidBattle(App(), raid_data.boss_for(PT_BOSS, 40, "sinnoh"))
+    assert rb.can_give_ball() == (False, "you need a Poké Ball") and not rb.give_ball()[0]

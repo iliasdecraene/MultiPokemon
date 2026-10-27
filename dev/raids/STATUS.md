@@ -63,6 +63,13 @@
 - Platinum battles also need the player's ROM path for the auto-pick's move powers: the App's `nds.rom_path` is used.
 
 ## raid-net progress
+- 2026-10-27 (round 5, Ilias's decisions): catch chance = share among the players STILL FIGHTING at the down
+  (server `shares()`; one fighter = 100 %). No Poké Balls: agreed with raid-games' `raid_gb` as built - `can_join()`
+  says ok when `can_give_ball()` (refuses only with a full bag / in a Soul Link run), `start()` gives exactly one
+  Poké Ball itself (`give_ball()`) and emits `{"type": "ball_given"}`; raid.py shows the toast "You had no Poké
+  Balls - here's one for the raid" on that event and the join dialog says one will be given (`has_ball()` False).
+  raid-games: please give raid_pt the same names (`has_ball()`, `can_give_ball()`, `give_ball()`, event
+  `ball_given`).
 - 2026-10-27 (round 3, review fixes): A at the den while already in the raid goes to the game; join check refuses
   ("You're already in this raid."); a repeated raid_joined never resets the damage count; a raid battle keeps its
   own raid (a new raid's notice waits until it's over: `raid_next`); no quiet moment within 20 s -> new outcome
@@ -141,3 +148,16 @@ steps), `offset(gm)` ((dx, dy) in squares or None when not on this map/neighbour
 region have (clients can send their badge count; raid-net's call). The server can't import the client package
 (Docker context = server/): vendor a copy of `raid_data.py` + `raid_spots.json` into the server, or I can generate a
 server copy too — tell me which.
+
+## 2026-10-27 raid-games: one free Poké Ball (Ilias)
+- Same API in `raid_gb.RaidBattle` (Yellow/Crystal) and `raid_pt.RaidBattle` (Platinum):
+  `has_ball()` (any ball the game's own checks count), `can_give_ball() -> (ok, why)` (False with the old message
+  "you need a Poké Ball" when the bag / Ball pocket is full or the App is in a challenge run: `app.chal` /
+  `cfg.challenge`), `give_ball() -> (ok, why)` (no-op `(True, "")` if the player has a ball; writes only while
+  `is_safe()`; emits `{"type": "ball_given"}`, sets `rb.ball_given`).
+- `can_join()` no longer refuses a player without balls when `can_give_ball()`; `start()` calls `give_ball()` itself
+  at its safe overworld frame (Platinum: after the overlay/field checks), right before the battle. Nothing for
+  raid.py to call beyond showing the toast on `ball_given`.
+- Writes like the games: Yellow wNumBagItems/wBagItems (AddItemToInventory: own stack or append + $FF, 20 max),
+  Crystal wNumBalls/wBalls (12 max), Platinum Bag.pokeballs[15] (pokeplatinum Bag_TryAddItem /
+  Pocket_FindSlotToAddItem: own slot or first empty, 999 max). Verified on the ROMs (verify.py `free_ball`).
