@@ -44,7 +44,7 @@ class PT:
     def tick(self, n=1):
         for _ in range(n):
             if self._held and self.frame >= self._held[0]:
-                kind, what = self._held[1]
+                kind, what = self._held[1][:2]
                 if kind == "touch":
                     self.d.touch_release()
                 else:
@@ -56,7 +56,7 @@ class PT:
                     self.d.touch(*act[1])
                 else:
                     self.d.button_press(act[1])
-                self._held = (self.frame + 6, act)
+                self._held = (self.frame + (act[2] if len(act) > 2 else 6), act)
             self.d.tick(1)
             self.frame += 1
             while self.inflight and self.inflight[0][0] <= self.frame:
@@ -131,12 +131,22 @@ def boss(species, level, moves, shiny=False):
     return b
 
 
-def drive(g, rb, frames, *, down_chance=None, first_ball=None, throw_slot=1, flee_at_first=False):
+def strong_lead(g):
+    """Test only: the player's battle copy hits hard, so a multi-bar pool takes a few turns, not fifty."""
+    ctx = g.rb._ctx()
+    if ctx:
+        g.d.w16(ctx + raid_pt.CTX_BATTLE_MONS + 2, 400)        # battleMons[0].attack
+        g.d.w16(ctx + raid_pt.CTX_BATTLE_MONS + 8, 400)        # spAttack
+
+
+def drive(g, rb, frames, *, down_chance=None, first_ball=None, throw_slot=1, flee_at_first=False, strong=False):
     """The test player: auto-pick after a short 'timer', a ball in the first turn (blocked), the one throw in the
     catch phase, B through the after-catch screens (B = no nickname)."""
     st = {"auto_at": None, "turn": 0, "down": False, "threw": False, "fled": False}
 
     def on_event(ev):
+        if ev["type"] == "started" and strong:
+            strong_lead(g)
         if ev["type"] == "need_input":
             st["turn"] += 1
             if ev["what"] == "menu" and rb.phase == "down" and not st["threw"]:
@@ -194,7 +204,7 @@ def scenario_catch(core):
           and bi.get("level") == 12, "calls %s info %s" % (rb.caller.log, {k: bi.get(k) for k in ("dex", "level")}))
     CHECK("platinum: shiny boss (the game's own shiny rule on the wild mon)", bi.get("shiny") is True)
     g.shot("pt_raid_start.png")
-    drive(g, rb, 40000, down_chance=1.0, first_ball=0)
+    drive(g, rb, 40000, down_chance=1.0, first_ball=0, strong=True)
     notes = [n for _f, n in rb.log]
     INFO("notes: %s" % [n for n in notes if "clamp" in n or "ball" in n or "shake" in n or "ended" in n][:12])
     dmg = [e for _f, e in g.events if e["type"] == "damage"]
@@ -300,7 +310,7 @@ def scenario_den(core):
     pygame.image.save(pygame.transform.scale(surf, (512, 768)), os.path.join(OUT, "den_platinum.png"))
     CHECK("platinum: den drawn on the top screen (den_platinum.png)", vis)
     CHECK("platinum: two tiles away: 'up' not blocked", not den.blocks(pm, "up"))
-    g.later(0, ("key", "up"))
+    g.later(0, ("key", "up", 14))
     for _ in range(120):
         g.tick()
         if pm.is_safe() and pm.position()["y"] == p["y"] - 1:

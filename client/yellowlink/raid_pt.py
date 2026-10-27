@@ -30,8 +30,8 @@ are checked before each use because overlays share load addresses):
            are put back into the Pokémon the game is about to add to the party/PC (decision 11). A miss wakes the
            boss and it teleports away.
   timer    BattleContext.command == COMMAND_SELECTION_INPUT and curCommandState[0] = 1 menu, 4 moves, 6 target,
-           8 bag, 10 party, 12 run; BtlCmd_WaitYesNoResult (0x02247C04) / BtlCmd_WaitPokemonMenuResult
-           (0x02247C94) run every frame while "Use next Pokémon?" / the party screen wait after a faint. auto_pick
+           8 bag, 10 party, 12 run; BtlCmd_WaitYesNoResult (0x02247C04) / BtlCmd_WaitMonSelection
+           (0x0224200C) run every frame while "Use next Pokémon?" / the party screen wait after a faint. auto_pick
            touches the bottom screen (never B: on the command menu B is the Run shortcut).
 """
 from __future__ import annotations
@@ -85,7 +85,7 @@ HOOKS = {   # name: (address, 12 code bytes there)
     "faint": (0x022418E8, bytes.fromhex("5158002913d16c6736f66cff")),      # BtlCmd_TryFaintMon: ldr r1, [r2, r1]
     "shakes": (0x0224A94E, bytes.fromhex("281c02b0f8bd1c31000038e6")),     # BattleScript_CalcCatchShakes: r0 = r5
     "yesno": (0x02247C04, bytes.fromhex("f8b50d1c061c281c002111f0")),      # BtlCmd_WaitYesNoResult
-    "partymenu": (0x02247C94, bytes.fromhex("38b50c1c201c002111f00aff")),  # BtlCmd_WaitPokemonMenuResult
+    "partymenu": (0x0224200C, bytes.fromhex("f8b584b000900d1cfbf782ff")),  # BtlCmd_WaitMonSelection (party after a faint)
 }
 TYPE_CHART = (0x0226ECD4, bytes.fromhex("0005050008050a0a050a0b05"))      # overlay 16: (atk, def, x10) ... FE ... FF
 # --- touch screen (bottom screen coordinates, read off screenshots) ---------------------------------------------
@@ -94,7 +94,7 @@ TOUCH_MOVE = [(64, 48), (192, 48), (64, 104), (192, 104)]
 TOUCH_BACK = (236, 174)                         # the bottom-right "back" arrow (bag, party, move list)
 TOUCH_YES_NEXT = (128, 68)                      # "Use next Pokémon" (the other button is "Flee")
 TOUCH_PARTY = [(64, 24), (192, 24), (64, 72), (192, 72), (64, 120), (192, 120)]
-TOUCH_SHIFT = (128, 104)
+TOUCH_SHIFT = (128, 110)
 
 
 class _Regs:
@@ -648,10 +648,12 @@ class RaidBattle:
         d = self.core
         bm = self._bmon(ctx)
         if self.phase == "fight":
+            old = _s32(d.r32(bm + BM_CUR_HP))
             hp = self.meter.sync(self.pool, self.max_hp)
             d.w32(bm + BM_CUR_HP, max(1, hp))
             if hp == 0:
                 self.meter.done = True
+            self._note("sync: pool %d -> segment %d (was %d)" % (self.pool, hp, old))
             for i in range(4):
                 if d.r16(bm + BM_MOVES + 2 * i):
                     d.w8(bm + BM_PP + i, max(5, self._pp(d.r16(bm + BM_MOVES + 2 * i))))
