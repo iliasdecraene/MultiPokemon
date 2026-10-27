@@ -800,7 +800,8 @@ without an event Regigigas, and the swarm changes every 2 hours (the same for ev
      its old place (a vanilla snapshot's cached FAT still finds valid data).
   3. `/fielddata/script/scr_seq.narc` - `sinnoh_rom.ENGINE_EDITS` (ours, not the design spec's): 1 byte in each of
      the three Regi ruins' statue scripts (see "Regis" below). In place.
-  The original is only read.
+  The original is only read. Verified on the ROM (dev/sinnoh/verify.py `area`): Turtwig's AREA page is "Area
+  Unknown" in vanilla and shows Valor Lakefront (blinking) in Complete Sinnoh.
 - Checks on every build: the source is the supported vanilla SHA1; every write reads back; the copy is compared byte
   by byte with the original and may differ only in the planned ranges (the wild NARC, the 3 script bytes, FAT entry
   133, header 0x80-0x83 + 0x15E-0x15F, the new area NARC); the result's SHA1 = `sinnoh_rom.EXPECTED[spec_digest]`

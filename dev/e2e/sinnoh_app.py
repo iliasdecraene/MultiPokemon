@@ -5,7 +5,9 @@
   2. a 0.7.6 resume snapshot (vanilla, no .rom tag) resumes in Complete Sinnoh; the loaded wild table is replaced by
      the ROM's at the first safe frame; the next snapshot is tagged with the Complete Sinnoh SHA1
   3. a snapshot from an unknown ROM is put aside (.other-rom) and the battery save is used
-  4. the Mystery Gift events arrive (toast + bag) once the save has the National Dex (TEST SHORTCUT: RAM flag)
+  4. the Mystery Gift events arrive (toast + bag) once the save meets each condition (TEST SHORTCUTS: RAM flags):
+     National Dex -> Member Card, Oak's Letter, Secret Key; + Dialga and Palkia caught -> Azure Flute;
+     the shared 2-hour swarm is written into the save and announced once swarms are on (TEST SHORTCUT: swarmEnabled)
   5. a second start only checks the file; a damaged copy is made again
   6. if it can't be made the app plays plain Platinum and says so; YL_PT_ROM=vanilla runs vanilla (dev)
 
@@ -26,7 +28,7 @@ print("Sinnoh ROM:", ptrom.label())
 import pygame  # noqa: E402
 pygame.quit = lambda: None
 from yellowlink.config import Config, app_dir  # noqa: E402
-from yellowlink import app as appmod, library, sinnoh_events, sinnoh_rom, encdata, ndsrom  # noqa: E402
+from yellowlink import app as appmod, library, sinnoh_events, sinnoh_rom, sinnoh_swarm, encdata, ndsrom  # noqa: E402
 
 PT_ROM = ptrom.VANILLA_ROM
 FAILS = []
@@ -80,7 +82,7 @@ check("the player's own ROM copy is untouched", sha(vanilla_copy) == library.PLA
 check("the app runs the Complete Sinnoh file", a.cfg["rom_path"] == str(SN), a.cfg["rom_path"])
 check("App.full + complete_sinnoh", a.full and a.complete_sinnoh and a.rom_sha1 == WANT)
 check("Soul Link capability sinnoh_v%s" % spec.SPEC_VERSION, a._sinnoh_caps() == ["sinnoh_v%s" % spec.SPEC_VERSION])
-check("event unlocker running", a.sinnoh_events is not None)
+check("event unlocker + swarm rotation running", a.sinnoh_events is not None and a.sinnoh_swarm is not None)
 run(a, 900, lambda: a.game.is_safe())
 check("CONTINUE'd into the battery save (fast continue)", a.game.in_game() and a.game.is_safe())
 a.shutdown()
@@ -98,6 +100,14 @@ check("resumed the vanilla snapshot in Complete Sinnoh", a.game.map_id() == 343 
 run(a, 600, lambda: a._wild_refresh is None)
 check("Route 202's table in RAM = the Complete Sinnoh ROM's%s" % (" (edited)" if member != vanilla_member else ""),
       a._wild_refresh is None and a.game.wild_table() == member)
+with open(SN, "rb") as f:
+    hdr = f.read(0x50)
+    fat_off, fat_size = __import__("struct").unpack_from("<II", hdr, 0x48)
+    f.seek(fat_off)
+    sn_fat = f.read(fat_size)
+fa = a.game.cached_fat_addr(len(sn_fat))
+check("the game's cached FAT = the Complete Sinnoh ROM's (moved Pokédex area file)",
+      fa is not None and a.nds.read(fa, len(sn_fat)) == sn_fat)
 check("the autosave snapshot is tagged", a.autosave(force=True) and tag.read_text() == WANT)
 a.shutdown()
 
@@ -121,12 +131,27 @@ run(a, 200)
 check("no Mystery Gift without the National Dex", gifts() == [])
 body = a.game.save_body()
 a.nds.write(body + sinnoh_events.PAGE_POKEDEX + sinnoh_events.POKEDEX_NATIONAL, b"\x01")   # TEST SHORTCUT
+run(a, 400, lambda: len(gifts()) >= 3)
+check("National Dex: Member Card, Oak's Letter, Secret Key (toast + chat)", len(gifts()) == 3 and
+      any("Mystery Gift" in t[0] for t in a.toasts) and not any("AZURE" in g for g in gifts()), gifts())
+flags = body + sinnoh_events.PAGE_VARS_FLAGS + sinnoh_events.VF_FLAGS
+for n in (sinnoh_events.FLAG_CAUGHT_DIALGA, sinnoh_events.FLAG_CAUGHT_PALKIA):     # TEST SHORTCUT
+    a.nds.write(flags + n // 8, bytes([a.nds.read(flags + n // 8, 1)[0] | 1 << n % 8]))
 run(a, 400, lambda: len(gifts()) >= 4)
-check("four Mystery Gift messages (toast + chat)", len(gifts()) == 4 and any("Mystery Gift" in t[0] for t in a.toasts),
-      gifts())
+check("Dialga + Palkia caught: the Azure Flute", len(gifts()) == 4 and "AZURE" in gifts()[-1], gifts())
 check("the key items + vars are in the save", all(sinnoh_events.given(a.game, e) for e in sinnoh_events.EVENTS))
 run(a, 300)
 check("not given twice", len(gifts()) == 4)
+# swarms: the shared 2-hour pick is in the save; announced once swarms are on
+cur = sinnoh_swarm.current()
+check("swarmDaily = this 2-hour slot's swarm (%d)" % cur["index"], sinnoh_swarm.swarm_index(a.game) == cur["index"])
+check("swarms off in this save: no swarm message", not [m for m in a.chat_log if "Swarm now" in m[1]])
+a.nds.write(body + sinnoh_swarm.PAGE_SPECIAL_ENCOUNTERS + sinnoh_swarm.SE_SWARM_ENABLED, b"\x01")  # TEST SHORTCUT
+run(a, 300, lambda: any("Swarm now" in m[1] for m in a.chat_log))
+msgs = [m[1] for m in a.chat_log if "Swarm now" in m[1]]
+check("swarms on: 'Swarm now: <species> on <place> (until HH:MM)' in chat + toast", len(msgs) == 1 and
+      any("Swarm now" in t[0] for t in a.toasts) and "?" not in msgs[0] and " on " in msgs[0], msgs)
+print("     ", msgs)
 a.shutdown()
 
 # 5 ---------------------------------------------------------------------------------------------------------
@@ -155,7 +180,7 @@ def broken(*x, **k):
 sinnoh_rom.ensure = broken
 a = start()
 check("can't be made: plain Platinum, still full features", a.cfg["rom_path"] == str(vanilla_copy) and a.full
-      and not a.complete_sinnoh and a.sinnoh_events is None)
+      and not a.complete_sinnoh and a.sinnoh_events is None and a.sinnoh_swarm is None)
 check("... and the player is told", any("plain Platinum" in m[1] for m in a.chat_log))
 check("... no sinnoh capability (no Soul Link with Complete Sinnoh players)", a._sinnoh_caps() == [])
 a.shutdown()

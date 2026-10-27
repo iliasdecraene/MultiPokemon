@@ -74,7 +74,8 @@ class Partner:
             self.inbox.append(m)
         if self.net.status == "online" and not self.online:
             self.online = True
-            self.net.send({"type": "library", "games": ["platinum"], "challenge_games": ["platinum"]})
+            self.net.send({"type": "library", "games": ["platinum"], "challenge_games": ["platinum"],
+                           "challenge_rules": ptrom.sinnoh_caps()})
 
     def take(self, mtype, **match):
         for i, m in enumerate(self.inbox):

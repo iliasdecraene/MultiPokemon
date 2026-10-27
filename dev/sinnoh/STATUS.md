@@ -157,3 +157,27 @@ Details (exact flags/vars/items from pret scripts) follow below once researched.
 - Ilias's other decisions that touch you: swarms rotate every 2 hours (shared), Regis/Regigigas loop opened by you,
   event moments as I proposed (Secret Key at first Rotom or NatDex; Oak's Letter + Member Card at NatDex; Azure
   Flute at NatDex + FLAG_CAUGHT_DIALGA + FLAG_CAUGHT_PALKIA).
+
+### sinnoh-engine (2nd engine agent, 2026-10-27) — spec v2 built + Ilias's engine decisions
+- **Built spec v2**: `EXPECTED` digest `82f97708…` -> SHA1 **`8abeae7b6039637d0671fc3859a0952f8997054b`** (v1 line
+  dropped: never released). `spec_digest` now covers AREA_EDITS + our ENGINE_EDITS + `BUILD_FORMAT` (v1-style specs
+  keep their old digest). `python dev/sinnoh/build_rom.py --update` prints every byte range that differs from
+  vanilla (labelled). **sinnoh-design: after any spec change just run it again** (then the unit test is green).
+- **Area NARC**: rebuilt with `encdata.make_narc` (reproduces vanilla byte for byte, checked at every build), +452
+  bytes -> doesn't fit its slot (220 bytes of padding), so it is written after the vanilla data at 0x063C3200,
+  FAT entry 133 updated, header 0x80 (used size) + header CRC updated; vanilla copy left in place. The game caches
+  the FAT in RAM at boot (pointer at 0x021CEC60): a vanilla/older snapshot keeps the old entry -> the app rewrites
+  that entry at the first safe frame after resuming another build (`refresh_cached_fat`).
+- **Regis**: `sinnoh_rom.ENGINE_EDITS` = 1 byte in each Regi statue script (CompareVarToValue VAR_RESULT 0 -> 2
+  after CheckPartyHasFatefulEncounterRegigigas). verify.py `regis` plays the whole chain in one save.
+- **Events**: per-event conditions in `sinnoh_events.Event.requires` (Secret Key: Rotom caught or NatDex; Member
+  Card + Oak's Letter: NatDex; Azure Flute: NatDex + FLAG_CAUGHT_DIALGA/PALKIA).
+- **Swarms**: `client/yellowlink/sinnoh_swarm.py` (2-hour UTC slots, fixed shuffle, written into the save's
+  swarmDaily; no server). SPEC.md 10 has all of it.
+- **Verified (2026-10-27, spec v2, SHA1 8abeae7b…)**: unit tests 628 client + 143 server; dev/sinnoh/verify.py
+  rom+compat+wild+regis 67/0, events 24/0 (four legendaries' battles), swarm 11/0, area 5/0 (Turtwig: "Area Unknown"
+  in vanilla, Valor Lakefront blinks in ours); dev/e2e/sinnoh_app.py 0 failed; the whole Platinum list with
+  YL_PT_ROM=sinnoh AND vanilla: platinum_boot, pt_pctest, pt_trade_e2e, pt_friends, expshare_pt, soullink_platinum,
+  challenge_flow_platinum, soullink_tradeevo, badges_flow, dev/platinum/verify.py (83/0) - all pass. Harness fixes:
+  fake Soul Link partners send `ptrom.sinnoh_caps()`; platinum_boot / challenge_flow_platinum look for the battery
+  file of the ROM the app really runs (platinum-sinnoh.dsv).

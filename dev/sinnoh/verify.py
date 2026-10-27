@@ -565,26 +565,75 @@ def balls(d, pm):
     return struct.unpack("<HH", d.read(pm.save_body() + E.PAGE_BAG + BAG_BALLS, 4))
 
 
-def catch(d, pm, tries=4):
-    """In a wild battle (TEST SHORTCUT: Master Balls in the bag): BAG -> POKé BALLS -> the first ball -> USE (touch
-    screen), then through the messages,
-    the Pokédex page and the nickname question (B = no). True when the battle ended with one ball fewer."""
+FIGHT_RED = (232, 56, 56)          # the big FIGHT button of the battle command menu (touch screen)
+
+
+def command_menu(d) -> bool:
+    """The battle command menu (FIGHT / BAG / RUN / POKéMON) is on the touch screen."""
+    img = d.emu.screenshot().convert("RGB")
+    return img.getpixel((60, 192 + 100)) == FIGHT_RED and img.getpixel((200, 192 + 100)) == FIGHT_RED
+
+
+def catch(d, pm, tries=3):
+    """In a wild battle (TEST SHORTCUT: Master Balls in the bag): wait for the command menu without pressing anything
+    (A there = FIGHT, B = RUN: a Lv1 Regigigas would faint or flee), BAG -> POKé BALLS -> the first ball -> USE
+    (touch screen), then B through the messages, the Pokédex page and the nickname question (B = no) - never while
+    the command menu is up. The bag in the save only changes when the battle ends. True when the battle ended with
+    one ball fewer."""
     before = balls(d, pm)[1]
     for _ in range(tries):
-        d.run(600)                       # the command menu (FIGHT / BAG / RUN / POKéMON)
-        # USE is tapped at its left end (40, 172): the same spot as BAG, never RUN, if the menus are out of step
-        for x, y, wait in ((40, 172, 90), (190, 58, 90), (64, 30, 90), (40, 172, 900)):
+        for _ in range(3000):
+            if command_menu(d) or not pm.in_battle():
+                break
+            d.run(10)
+        if not pm.in_battle():
+            break
+        for x, y, wait in ((40, 172, 90), (190, 58, 90), (64, 30, 90), (100, 172, 600)):
             d.touch(x, y)
             d.run(wait)
-        if balls(d, pm)[1] < before:
-            break
-    for i in range(3000):
+        for i in range(400):
+            if not pm.in_battle() or command_menu(d):
+                break
+            if i % 6 == 0:
+                d.press("b", 4)
+            d.run(10)
+    for i in range(300):
         if not pm.in_battle() and pm.is_safe():
             break
-        if i % 120 == 0:
-            d.press("a" if i % 240 == 0 else "b", 4)
-        d.run(1)
+        if not command_menu(d) and i % 6 == 0:
+            d.press("b", 4)
+        d.run(10)
     return balls(d, pm)[1] == before - 1 and not pm.in_battle()
+
+
+def wild_battle(d, pm, frames=1200):
+    """battle_info once the battle has its opponent - without pressing anything (an A here could pick FIGHT and
+    knock out a Lv1 Regigigas)."""
+    for _ in range(frames):
+        bi = pm.battle_info()
+        if bi and bi.get("dex"):
+            return bi
+        d.run(1)
+    return None
+
+
+def settle_party(d, pm, frames=1800):
+    """After a battle the field keeps re-encrypting party records, so a record reads valid / half re-encrypted on
+    alternate frames (MEMORY_MAP.md) - for a long while here. Step ONE frame at a time until the field is safe and
+    every record is valid; the caller must use this frame (the next dev warp writes the RAM save into the battery
+    right away, so it never saves a half-updated party)."""
+    for _ in range(frames):
+        if pm.is_safe() and pm.party_checked() is not None:
+            return True
+        d.run(1)
+    return False
+
+
+def party_report(pm):
+    from yellowlink import pk4
+    raw = pm.party_raw()
+    return "count %d, %s" % (pm.party_count(), [(pk4.PK4.from_encrypted(r).species, P.record_checksum_ok(r))
+                                                for r in raw])
 
 
 def party_species(pm):
@@ -605,6 +654,7 @@ def check_regis(d, pm):
     ok(all(sp != 486 for sp in party_species(pm)), "the party has no Regigigas (event or not)")
     for name, mid, var_name, dots, species in RUINS:
         var = _flag(var_name)
+        settle_party(d, pm)
         r = w.go(mid, 7, 11, facing=0)
         if not ok(r == "loaded" and pm.map_id() == mid, "%s: CONTINUE'd in (%s)" % (name, r)):
             continue
@@ -626,26 +676,32 @@ def check_regis(d, pm):
             if i % 30 == 0:
                 d.press("a", 4)
             d.run(1)
-        bi = battle_species(d, pm, 600) if pm.in_battle() else None
+        bi = wild_battle(d, pm) if pm.in_battle() else None
         if not ok(bi and bi["dex"] == species and bi["level"] == 30,
                   "%s: the statue (no event Regigigas in the party) starts the battle: %s" % (
                       name, ("species %d Lv%d" % (bi["dex"], bi["level"])) if bi else "no battle")):
             continue
         ok(catch(d, pm), "%s: caught with a Poké Ball" % name)
+        print("     party settled: %s (%s)" % (settle_party(d, pm), party_report(pm)))
         ok(pm.var(var) == RUINS_CAUGHT and species in party_species(pm),
            "%s: the game's script records it (state %d) and it is in the party %s" % (
                name, pm.var(var), party_species(pm)))
     TEMPLE = _map("MAP_HEADER_SNOWPOINT_TEMPLE_B5F")
+    settle_party(d, pm)
     r = w.go(TEMPLE, 11, 14, facing=0)
     ok(r == "loaded" and pm.map_id() == TEMPLE, "Snowpoint Temple B5F (%s)" % r)
+    walker.settle(d, pm, 300)
+    settle_party(d, pm)
+    ok({377, 378, 379} <= set(party_species(pm)), "the three Regis are in the party after the warp (%s)"
+       % party_report(pm))
     tiles = world.tiles(TEMPLE, d.r16(P.MAP_HEADERS + 24 * TEMPLE + 2))
     walker.walk_to(d, pm, tiles, (11, 13))
     walker.face(d, pm, "up")
     d.press("a", 10)
     bi = None
-    for i in range(1500):
+    for i in range(3000):
         if pm.in_battle():
-            bi = battle_species(d, pm, 900)
+            bi = wild_battle(d, pm)
             break
         if i % 30 == 0:
             d.press("a", 4)
@@ -654,7 +710,9 @@ def check_regis(d, pm):
     ok(bi and bi["dex"] == 486 and bi["level"] == 1, "Regigigas's battle: %s" % (
         ("species %d Lv%d" % (bi["dex"], bi["level"])) if bi else "no battle"))
     if bi:
-        ok(catch(d, pm) and pm.flag(_flag("FLAG_CAUGHT_REGIGIGAS")) and 486 in party_species(pm),
+        caught = catch(d, pm)
+        settle_party(d, pm)
+        ok(caught and pm.flag(_flag("FLAG_CAUGHT_REGIGIGAS")) and 486 in party_species(pm),
            "Regigigas caught (FLAG_CAUGHT_REGIGIGAS, in the party %s)" % party_species(pm))
 
 
@@ -735,6 +793,8 @@ def check_swarm(d, pm):
     ok(n_swarm >= trials // 8, "swarm on: %d of %d Route 201 battles are %d (slots 0+1 = 40%%)"
        % (n_swarm, len(got), swarm_sp))
     other = slot_for(next(i for i in range(22) if SW.SWARM_MAPS[i] != ROUTE_201), s201 + 1)
+    d.load(os.path.join(w.tmp, "here.dsst"))     # back on Route 201's grass (out of the last test battle)
+    walker.settle(d, pm, 300)
     rot.clock = lambda: other * SW.SLOT_SECONDS + 60
     news2 = None
     for _ in range(10):
@@ -748,8 +808,9 @@ def check_swarm(d, pm):
 
 
 # ------------------------------------------------------------------------------------------- Pokédex area map
-AREA_SPECIES = 387                 # Turtwig: Sinnoh dex #1, in every test save, vanilla area "unknown" (a starter);
-AREA_BANNER = (96, 84, 224, 108)   # Complete Sinnoh adds Valor Lakefront (morning/day/night). "Area Unknown" box
+# Turtwig: Sinnoh dex #1, in every test save; vanilla area "unknown" (a starter); Complete Sinnoh adds Valor Lakefront
+# (morning/day/night), which blinks at about (192..205, 144..155) on the top screen.
+AREA_BANNER = (96, 84, 224, 108)   # the "Area Unknown" box
 AREA_MAP = (80, 56, 248, 184)      # the area map on the top screen
 
 
@@ -760,13 +821,29 @@ def dex_area_shot(d, pm, path):
     w.boot("pt_title.dsst")
     P.fast_continue(d)
     walker.settle(d, pm, 300)
+    # pt_title is a vanilla savestate: its cached FAT still points at the vanilla area file - exactly what the app
+    # fixes after resuming a snapshot of another build (App._wild_refresh_now); a no-op on vanilla
+    n = pm.refresh_cached_fat(rom_fat(ptrom.ROM))
+    print("     cached FAT entries refreshed:", n)
     d.w8(pm.save_body() + E.PAGE_POKEDEX + 0x31A, 1)
     d.press("x", 60)
     d.press("a", 600)                  # the first start menu entry: POKéDEX (list opens on #001)
     d.press("a", 600)                  # Turtwig's page
     d.touch(68, 21)                    # AREA
     d.run(600)
-    return d.shot(path)
+    img = d.shot(path)
+    return img, blinking(d)
+
+
+def blinking(d, frames=16, step=7):
+    """Pixels of the area map that change over ~2 s: the places where the species lives blink."""
+    shots = []
+    for _ in range(frames):
+        d.run(step)
+        shots.append(d.emu.screenshot().convert("RGB"))
+    x0, y0, x1, y1 = AREA_MAP
+    return sorted({(x, y) for im in shots[1:] for x in range(x0, x1) for y in range(y0, y1)
+                   if im.getpixel((x, y)) != shots[0].getpixel((x, y))})
 
 
 def check_area(d, pm):
@@ -781,7 +858,7 @@ def check_area(d, pm):
     subprocess.run([sys.executable, os.path.abspath(__file__), "_area_shot", van], env=env, check=False,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
     ours = os.path.join(tmp, "sinnoh.png")
-    img = dex_area_shot(d, pm, ours)
+    img, blink = dex_area_shot(d, pm, ours)
     if not ok(os.path.exists(van), "vanilla screenshot made (%s)" % van):
         return
     from PIL import Image
@@ -794,7 +871,18 @@ def check_area(d, pm):
     vb, sb = vimg.crop(AREA_BANNER).tobytes(), img.crop(AREA_BANNER).tobytes()
     vm, sm = vimg.crop(AREA_MAP).tobytes(), img.crop(AREA_MAP).tobytes()
     ok(vb != sb, "the \"Area Unknown\" box of vanilla is gone in Complete Sinnoh")
-    ok(vm != sm, "the area map differs from vanilla (Turtwig at Valor Lakefront)")
+    ok(vm != sm, "the area map differs from vanilla")
+    vblink = []
+    try:
+        import json
+        with open(van + ".json") as f:
+            vblink = json.load(f)
+    except (OSError, ValueError):
+        vblink = None
+    box = (min(blink), max(blink)) if blink else None
+    ok(vblink == [] and blink and all(185 <= x <= 210 and 138 <= y <= 160 for x, y in blink),
+       "a place blinks on the map: %d pixels in %s (Valor Lakefront, south-east; vanilla: %s)"
+       % (len(blink), box, "none" if vblink == [] else vblink))
     if SHOTS:
         os.makedirs(SHOTS, exist_ok=True)
         vimg.save(os.path.join(SHOTS, "area_vanilla.png"))
@@ -841,7 +929,10 @@ def _map(name):
 def main():
     if sys.argv[1:2] == ["_area_shot"]:          # helper for check_area: the same screen on vanilla Platinum
         d = DS()
-        dex_area_shot(d, P.PlatinumMemory(d), sys.argv[2])
+        _img, blink = dex_area_shot(d, P.PlatinumMemory(d), sys.argv[2])
+        import json
+        with open(sys.argv[2] + ".json", "w") as f:
+            json.dump(blink, f)
         return
     which = [a for a in sys.argv[1:]] or ["rom", "compat", "wild", "events", "regis", "swarm", "area"]
     build_rom.ensure_dev_rom("test" if os.environ.get("YL_SINNOH_SPEC") == "test" else "auto")

@@ -158,7 +158,9 @@ check("ROM copied into roms/", (app_dir() / "roms" / "platinum.nds").exists())
 lib.set_current("platinum")
 cfg.update(name="Ilias", server_url=f"ws://127.0.0.1:{PORT}", room_key="pt", seen_help=True, ds_scale=2)
 cfg.save()
-dsv = pathlib.Path(nds_core.battery_file_candidates(str(app_dir() / "roms" / "platinum.nds"))[0])
+# the file the app runs: roms/platinum.nds, or with YL_PT_ROM=sinnoh the Complete Sinnoh copy it makes next to it
+dsv = pathlib.Path(nds_core.battery_file_candidates(str(app_dir() / "roms" / (
+    "platinum-sinnoh.nds" if ptrom.SINNOH else "platinum.nds")))[0])
 
 # 1. boot -------------------------------------------------------------------------------------------------------
 A = start(cfg, os.path.join(STATES, "pt_room.dsst"))

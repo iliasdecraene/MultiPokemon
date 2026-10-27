@@ -48,3 +48,18 @@ Expected output: see the `print` lines; screenshots go to a temp dir printed at 
   move learning + forget prompt, evolution / EXP.ALL + held Exp. Share, hooks off == no hooks (whole WRAM).
 - `expshare_forced.py [--off|--none] <script>` — runs another e2e script with Exp Share All forced on (or off / not
   installed) and checks link battles never get the rule.
+
+## Complete Sinnoh (SPEC.md section 10)
+- Every Platinum harness takes `YL_PT_ROM=vanilla` (default) or `YL_PT_ROM=sinnoh` (the Complete Sinnoh build made
+  from `dev/states/platinum.nds` by `dev/sinnoh/build_rom.py`; `YL_SINNOH_SPEC=test` = the tiny test spec). Run the
+  whole Platinum list above with both. Fake Soul Link partners advertise the same Sinnoh version (`ptrom.sinnoh_caps()`).
+- `dev/sinnoh/build_rom.py [--update]` — build the dev ROM, print every byte range that differs from vanilla;
+  `--update` stores the new SHA1 in `sinnoh_rom.EXPECTED` after a spec change.
+- `dev/sinnoh/verify.py [rom] [compat] [wild] [events] [regis] [swarm] [area]` (default: all, ~1.5 h) — the built
+  ROM's bytes, vanilla snapshots in it (cached FAT refresh), forced wild encounters on edited maps, the four Mystery
+  Gift events played to the legendary's battle, the Regi ruins -> Regigigas chain in one save (real catches), the
+  2-hour swarm switch, the Pokédex area screen (vs. vanilla in a second process). `YL_SINNOH_SHOTS=<dir>` saves a
+  screenshot for every failed check. Uses `~/.config/desmume/platinum-sinnoh.dsv`: never run two of these at once
+  (the app harnesses use their own folders and can run alongside).
+- `dev/e2e/sinnoh_app.py` — the app: builds/reuses/repairs `roms/platinum-sinnoh.nds`, resumes vanilla snapshots,
+  events by condition, swarm toast, plain-Platinum fallback.

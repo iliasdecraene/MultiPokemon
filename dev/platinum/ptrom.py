@@ -46,3 +46,15 @@ def rom_sha1() -> str:
     sys.path.insert(0, os.path.normpath(os.path.join(_HERE, "..", "..", "client")))
     from yellowlink import library
     return library.sha1_file(ROM)
+
+
+def sinnoh_caps() -> list:
+    """What a client running this ROM puts into `library.challenge_rules` for Soul Link pairing (SPEC.md section 10):
+    ["sinnoh_v<spec version>"] on Complete Sinnoh, [] on vanilla. Fake partners in the harnesses send the same, like a
+    friend on the same YellowLink version would."""
+    if not SINNOH:
+        return []
+    sys.path.insert(0, os.path.normpath(os.path.join(_HERE, "..", "..", "client")))
+    from yellowlink import platinum
+    v = platinum.variant_of(rom_sha1())
+    return ["sinnoh_v%s" % v.spec_version] if v and v.spec_version is not None else []
