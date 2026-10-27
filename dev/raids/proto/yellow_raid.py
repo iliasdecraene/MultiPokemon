@@ -388,7 +388,6 @@ def scenario_master_ball_blocked_and_flee():
 def scenario_faint_margin():
     print("== Yellow: frames between enemy HP 0 and the game's faint check (no clamp) ==")
     pb, gm = emu()
-    m = pb.memory
     srv = Server(1)
     rc = RaidClient(pb, MEW, 30, [SPLASH], 40, srv, clamp=False)
     start_raid_battle(rc, gm, MEW, 30)
