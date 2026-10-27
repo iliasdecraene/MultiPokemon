@@ -35,6 +35,10 @@ Run with `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` on a headless machine (th
 
 Expected output: see the `print` lines; screenshots go to a temp dir printed at the end.
 - `pc_actions.py` — scripted Bill's PC button presses (deposit/withdraw/release/change box) from `pokecenter_pc.state`.
+- `reload_save.py` — "Back to my last in-game save" (SPEC.md section 5) on the real Yellow ROM: in-game save, refusal
+  after a deposit / a gift away, manual soft reset (party clone taken out, PC intact), the button's restart from
+  the save (position, party, PC store); screenshots of the button + confirmation at GB 3x and DS 1.5x.
+  `reload_save_pt.py`: Platinum's own soft reset (L+R+Start+Select) is noticed and the PC is lined up after CONTINUE.
 - `pctest.py` — PC database e2e on the real ROM (deposit, commit to server, stand-ins, restart).
 - `crossgame.py` — Yellow and Crystal share one PC database (real PC menus in both games).
 - `crystal_mp.py` — two Crystal players + one Yellow player: seeing each other, Crystal trade with evolution, cross-game refusal.

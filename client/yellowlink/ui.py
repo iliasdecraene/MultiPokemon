@@ -305,17 +305,22 @@ def draw_toasts(surf, f: Fonts, toasts, game_w, bottom=False):
     """Short messages at the top of the game area (at the bottom while a panel/dialog covers the top)."""
     now = time.time()
     live = [t for t in toasts if t[1] >= now][-3:]
-    step = f.body.get_height() + 16
-    y = surf.get_height() - 12 - step * len(live) if bottom else 10
-    for msg, until, color in live:
-        img = f.body.render(msg, True, color)
-        r = img.get_rect(midtop=(game_w // 2, y + 5))
-        bg = r.inflate(20, 10)
+    lh = f.body.get_height() + 2
+    # long messages wrap (small windows: GB 3x, DS 1.5x)
+    blocks = [(wrap(f.body, msg, max(120, game_w - 44)) or [msg], color) for msg, _until, color in live]
+    heights = [len(lines) * lh + 14 for lines, _c in blocks]
+    y = surf.get_height() - 12 - sum(heights) if bottom else 10
+    for (lines, color), h in zip(blocks, heights):
+        imgs = [f.body.render(line, True, color) for line in lines]
+        w = max(i.get_width() for i in imgs)
+        bg = pygame.Rect(0, 0, w + 20, len(imgs) * lh + 10)
+        bg.midtop = (game_w // 2, y)
         s = pygame.Surface(bg.size, pygame.SRCALPHA)
         s.fill((10, 12, 20, 230))
         surf.blit(s, bg)
-        surf.blit(img, r)
-        y += step
+        for k, img in enumerate(imgs):
+            surf.blit(img, img.get_rect(midtop=(game_w // 2, y + 5 + k * lh)))
+        y += h
 
 
 def modal(surf, f: Fonts, game_w, game_h, title, lines, footer, w=None, h=None):
@@ -369,7 +374,7 @@ def draw_help(surf, f, game_w, game_h, ds=False):
             "  Tab: multiplayer     T: chat",
             "  Space: fast-forward     M: mute",
             "  -/+: volume     F5/F6: window size",
-            "  F3: report a problem",
+            "  F3: report a problem     F7: back to last save",
             ("Save in-game as usual (X > Save).", DIM),
         ]
         modal(surf, f, game_w, game_h, "How to play", lines, "[Esc / Enter / F1] close")
@@ -384,7 +389,7 @@ def draw_help(surf, f, game_w, game_h, ds=False):
         "  Tab: link menu - battle (B), trade (R), practice (P)",
         "  T: chat     Space: fast-forward on/off     M: mute",
         "  V: wide view     F5/F6: window size     -/+: volume",
-        "  F3: report a problem     F2: settings",
+        "  F2: settings     F3: report a problem     F7: last save",
         "",
         ("Battles are exhibition matches - nothing is won or lost.", DIM),
         ("F4 leaves a live battle. Practice = their team played by the game AI.", DIM),

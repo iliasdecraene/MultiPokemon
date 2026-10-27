@@ -352,6 +352,51 @@ Entry   = {"id": "<uuid4 hex>", "origin": "yellow"|"crystal", "dex": int, "level
 - First contact of a game (not in `linked`): its existing boxes are imported (appended into free box space), then
   the game is added to `linked`.
 
+### Back to the last in-game save (0.7.7) — `client/yellowlink/reloadsave.py`
+Settings → *Back to my last in-game save* (F7) restarts the current game from its battery save: confirmation
+("Everything since your last in-game save is lost. Your YellowLink PC and trades stay as they are."), then the
+normal restart path (`quit_requested`; `_main` builds a new App, like travel): `shutdown` writes its usual resume
+snapshot, which is then **moved** to `saves/backups/<game>-resume-<time>.state` (last 5 kept), and the flag
+`_reload_boot` makes the next start fast-continue even with *Skip the intro* off. All paths via `cfg.data_dir`
+(per server). Hidden in a Soul Link; refused during a trade, a live/practice battle (or offer), an Exp Share award
+(`exp_share.busy()`), an open PC / pending Platinum party fix-up, when the battery has no in-game save, and while
+the save changed within the last second (the game is writing it).
+The PC store is **never** rolled back (shared with the other games, the server, friends); the game is brought in
+line with it:
+- **In-game save fingerprint** (`reloadsave.fingerprint`, from the battery bytes; YellowLink's own box writes never
+  change it): Yellow SRAM bank 1 A598-B0BF (sGameData before sCurBoxData: player, main data incl. play time,
+  party), Crystal bank 1 A009-AB82 + sChecksum AD0D, Platinum the whole battery. Checked at every SRAM flush and
+  PC open/close; a new value = the player saved in-game.
+- **Since-the-save ledger** per game (`PCSync.ledger`, saved in the store file as `since_save`, committed/rolled
+  back with the store): `out` = [key, nick] deposited from this game, `back` = withdrawn/released here (a
+  withdraw cancels a matching `out` and vice versa: as at the save), `changed` = box-UI edits (Platinum items),
+  `traded` = names traded/gifted away (any game), `touched` = keys moved through this PC. Cleared when the
+  fingerprint changes. **The button refuses while any of out/back/changed/traded is non-empty** ("You put Pidgey
+  in your PC after your last save. Save in-game first (Start > Save), then try again.").
+- **Loads from the save** are detected: the button's restart / any start without resume snapshot; Yellow
+  `MainMenu.pressedA` 01:5C83 and Crystal `Continue` 01:5D65 exec hooks (a GB soft reset keeps WRAM, so
+  `in_game()` can't tell); Platinum: `in_game()` (FieldSystem) goes away and comes back. At the next safe frame (or
+  first thing in the PC open hook) `after_battery_load`:
+  1. `PCSync.rebase(game)`: the last view becomes what the save's boxes hold: a record matching the old view ->
+     that entry (or a tombstone if the entry has left the store); a record in `departed` (records this game
+     showed of mons that left the store before a newer view replaced them) or with a `touched` key the store holds
+     with newer bytes -> tombstone; any other unknown record is left out, so the next PC sync imports it (caught
+     straight into a box, or withdrawn after the save). Store entries the save doesn't show stay (new to it).
+     Committed with the next snapshot (pending), which is taken from the loaded state.
+  2. **Party clones** (the manual soft reset can't be refused): party mons whose key is in `out` were put into the
+     YellowLink PC after the save, so the PC (or a friend) has them: they are taken out of the party, the PC copy
+     stays - like the PC clone protection for traded-away mons. GB `remove_party_slot` (never the last party mon:
+     logged); Platinum through the party fix-up (`_pt_party_fix`). Choice documented here: the PC wins because
+     the confirmation promises it and the mon may already be traded on.
+  3. The ledger restarts (as at the save).
+- **Diff fix (also outside this feature):** a record in a game's box that matches its last view but whose entry
+  has left the store for any reason (not only a trade: e.g. withdrawn in another game while this game's snapshot
+  still showed it) is a tombstone, never a new deposit; withdrawing it takes it out of the party again
+  (`left_returned`). Before 0.7.7 only traded-away entries (`gone`) were protected, so a mon withdrawn in Crystal
+  could come back in Yellow's PC.
+- Known limit: Crystal keeps the current box in SRAM live, so a mon withdrawn after the save is lost by a manual
+  soft reset (as in the real game); the button refuses in that case.
+
 ### Protocol
 | dir | type | fields |
 |---|---|---|
