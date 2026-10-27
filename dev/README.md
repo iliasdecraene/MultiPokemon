@@ -79,3 +79,7 @@ Expected output: see the `print` lines; screenshots go to a temp dir printed at 
   repeated after a restart), plain-Platinum fallback.
 - `dev/e2e/sinnoh_pairing.py` — a real Yellow client and a real Complete Sinnoh client: both advertise the same
   `sinnoh_v<spec>`, a failed build shows as `sinnoh_failed` with the right tip, and a Platinum Soul Link starts.
+
+Raids: the e2e harnesses start their servers with `YL_RAIDS=off` - a scheduled raid (they're on by default and the
+server ships real spot data) would put a den / edge arrow / raid card on screen and break pixel checks such as
+pt_friends' "friend hidden" test. `dev/e2e/raid_flow.py` is the raid test (it runs its own server in-process).

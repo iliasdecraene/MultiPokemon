@@ -27,7 +27,7 @@ PORT = 8792
 ROM = os.path.join(STATES, "crystal.gbc")
 FIX = os.path.join(STATES, "crystal_sl_route29.state")
 srv = subprocess.Popen([sys.executable, "-m", "yellowlink_server", "--port", str(PORT)], cwd=os.path.join(_REPO, "server"),
-                       env=dict(os.environ, YL_KEY="test", YL_DATA_DIR=str(tmp / "data"),
+                       env=dict(os.environ, YL_RAIDS="off", YL_KEY="test", YL_DATA_DIR=str(tmp / "data"),
                                 PYTHONPATH=os.path.join(_REPO, "server")),
                        stdout=open(tmp / "srv.log", "w"), stderr=subprocess.STDOUT)
 atexit.register(srv.terminate)

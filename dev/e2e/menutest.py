@@ -16,7 +16,7 @@ from yellowlink.game import Mon
 
 tmp=pathlib.Path(tempfile.mkdtemp())
 srv=subprocess.Popen([sys.executable,"-m","yellowlink_server","--port","8799"],cwd=_os.path.join(_REPO, "server"),
-    env=dict(os.environ,YL_KEY="test",YL_DATA_DIR=str(tmp/"data"),PYTHONPATH=_os.path.join(_REPO, "server")),
+    env=dict(os.environ, YL_RAIDS="off", YL_KEY="test",YL_DATA_DIR=str(tmp/"data"),PYTHONPATH=_os.path.join(_REPO, "server")),
     stdout=open(tmp/"srv.log","w"),stderr=subprocess.STDOUT)
 time.sleep(1.5)
 

@@ -28,7 +28,7 @@ FAILS = []
 
 
 def start(port, key, name, data):
-    env = dict(os.environ, YL_KEY=key, YL_SERVER_NAME=name, YL_DATA_DIR=str(data),
+    env = dict(os.environ, YL_RAIDS="off", YL_KEY=key, YL_SERVER_NAME=name, YL_DATA_DIR=str(data),
                PYTHONPATH=os.path.join(_REPO, "server"))
     p = subprocess.Popen([sys.executable, "-m", "yellowlink_server", "--port", str(port)],
                          cwd=os.path.join(_REPO, "server"), env=env,

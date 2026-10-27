@@ -36,7 +36,7 @@ def _free_port():
 PORT = _free_port()               # other agents/tests may hold fixed ports
 srv = subprocess.Popen([sys.executable, "-m", "yellowlink_server", "--port", str(PORT)],
                        cwd=os.path.join(_REPO, "server"),
-                       env=dict(os.environ, YL_KEY="pt", YL_SERVER_NAME="Sinnoh test", YL_DATA_DIR=str(tmp / "srv"),
+                       env=dict(os.environ, YL_RAIDS="off", YL_KEY="pt", YL_SERVER_NAME="Sinnoh test", YL_DATA_DIR=str(tmp / "srv"),
                                 PYTHONPATH=os.path.join(_REPO, "server")),
                        stdout=open(tmp / "srv.log", "w"), stderr=subprocess.STDOUT)
 atexit.register(srv.terminate)

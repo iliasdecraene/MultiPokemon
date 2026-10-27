@@ -28,7 +28,7 @@ MAIN_STATE = os.path.join(STATES, "pallet_after_lab.state")
 RUN_STATE = os.path.join(STATES, "soullink_route1_grass.state")
 WILD_STATE = os.path.join(STATES, "soullink_wild_battle.state")
 srv = subprocess.Popen([sys.executable, "-m", "yellowlink_server", "--port", str(PORT)], cwd=os.path.join(_REPO, "server"),
-                       env=dict(os.environ, YL_KEY="test", YL_DATA_DIR=str(tmp / "data"),
+                       env=dict(os.environ, YL_RAIDS="off", YL_KEY="test", YL_DATA_DIR=str(tmp / "data"),
                                 PYTHONPATH=os.path.join(_REPO, "server")),
                        stdout=open(tmp / "srv.log", "w"), stderr=subprocess.STDOUT)
 atexit.register(srv.terminate)

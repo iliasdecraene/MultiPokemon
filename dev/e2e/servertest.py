@@ -22,7 +22,7 @@ srvs = []
 for port, key, name in ((8781, "one", "Group One"), (8782, "two", "Group Two")):
     srvs.append(subprocess.Popen([sys.executable, "-m", "yellowlink_server", "--port", str(port)],
                                  cwd=os.path.join(_REPO, "server"),
-                                 env=dict(os.environ, YL_KEY=key, YL_SERVER_NAME=name, YL_DATA_DIR=str(tmp / f"data{port}"),
+                                 env=dict(os.environ, YL_RAIDS="off", YL_KEY=key, YL_SERVER_NAME=name, YL_DATA_DIR=str(tmp / f"data{port}"),
                                           PYTHONPATH=os.path.join(_REPO, "server")),
                                  stdout=open(tmp / f"srv{port}.log", "w"), stderr=subprocess.STDOUT))
     atexit.register(srvs[-1].terminate)

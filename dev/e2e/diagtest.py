@@ -13,7 +13,7 @@ from yellowlink.config import Config
 from yellowlink import app as appmod, game, diag as diagmod
 tmp=pathlib.Path(tempfile.mkdtemp())
 srv=subprocess.Popen([sys.executable,"-m","yellowlink_server","--port","8798"],cwd=_os.path.join(_REPO, "server"),
-    env=dict(os.environ,YL_KEY="test",YL_DATA_DIR=str(tmp/"data"),PYTHONPATH=_os.path.join(_REPO, "server")),
+    env=dict(os.environ, YL_RAIDS="off", YL_KEY="test",YL_DATA_DIR=str(tmp/"data"),PYTHONPATH=_os.path.join(_REPO, "server")),
     stdout=open(tmp/"srv.log","w"),stderr=subprocess.STDOUT)
 time.sleep(1.5)
 D=diagmod.Diagnostics(tmp/"appdir")
