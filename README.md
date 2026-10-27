@@ -34,6 +34,13 @@ Everyone plays their **own** game with their own save and story. On top of that:
   Pokémon that needed a GBA cartridge have normal spots, and the Pokédex Area map shows the new places. The Mystery
   Gift events are unlocked (Member Card - Darkrai, Oak's Letter - Shaymin, Azure Flute - Arceus, Secret Key - Rotom's
   room), the Regi ruins open without an event Regigigas, and swarms change every 2 hours for everyone.
+- **Raids** (co-op). Every 2 hours a legendary or mythical raid boss appears somewhere in a random region (Kanto,
+  Johto or Sinnoh) for 15 minutes - everyone online gets a notice, the raid den (a stone tower) stands on the map and
+  an arrow points to it. Walk up and press **A** to join. Everyone fights their own copy of the boss in their own game,
+  but the damage adds up to one shared HP pool (2 HP bars per player). Each move has a 10-second timer (it repeats your
+  last move). When the group brings it down, everyone still fighting gets one catch attempt - your chance is your share
+  of the damage (did it alone = guaranteed). Blacking out puts you out of that raid. No Poké Balls? You get one.
+  Legendaries have their proper level, mythicals match your team; 1 in 20 bosses is shiny. Not inside Soul Link runs.
 - **Badges.** Every region has badges you earn in your main game: **Champion** (enter the Hall of Fame),
   **Pokédex** (catch the whole regional dex: Kanto 150 without Mew, Johto 249 without Mew and Celebi, Sinnoh 209
   without Manaphy - Pokémon you get through YellowLink trades or from your other games count, like real trades),
