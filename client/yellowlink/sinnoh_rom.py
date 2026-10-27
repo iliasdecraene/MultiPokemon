@@ -24,6 +24,7 @@ ROM is ever stored in the repo or sent anywhere (CLAUDE.md "Never distribute ROM
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -294,14 +295,19 @@ def plan(src, spec, engine_edits=None) -> Plan:
         rom.close()
 
 
+def _no_space(folder, need: int) -> str:
+    return (f"not enough free disk space for Complete Sinnoh: it needs about {need >> 20} MB free in {folder} "
+            "- free some space and restart YellowLink")
+
+
 def _retry(fn, *args, attempts: int = 6):
     """fn(*args), retried on OSError with a short pause: Windows antivirus / OneDrive briefly lock new files (like
     app.write_atomic). The last error is raised."""
     for i in range(attempts):
         try:
             return fn(*args)
-        except OSError:
-            if i == attempts - 1:
+        except OSError as e:
+            if i == attempts - 1 or e.errno == errno.ENOSPC:      # a full disk doesn't get better by waiting
                 raise
             log.warning("%s failed (attempt %d), retrying", getattr(fn, "__name__", fn), i + 1)
             time.sleep(0.1 * (i + 1))
@@ -334,6 +340,13 @@ def build(src, dest, spec=None, *, expected: str | None = "auto", sha1_of_src: s
                 stale.unlink()
         except OSError:
             pass
+    need = os.path.getsize(src) + (16 << 20)
+    try:
+        free = shutil.disk_usage(dest.parent).free
+    except OSError:
+        free = None
+    if free is not None and free < need:
+        raise BuildError(_no_space(dest.parent, need))
     try:
         _retry(shutil.copyfile, src, part)
         with open(part, "r+b") as f:
@@ -353,11 +366,13 @@ def build(src, dest, spec=None, *, expected: str | None = "auto", sha1_of_src: s
         if expected is not None and got != expected:
             raise BuildError("Making Complete Sinnoh went wrong (the result isn't the expected file).")
         _retry(os.replace, part, dest)
-    except BaseException:
+    except BaseException as e:
         try:
             part.unlink()
         except OSError:
             pass
+        if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+            raise BuildError(_no_space(dest.parent, need)) from e
         raise
     log.info("built %s (spec v%s, %d slot edits, %d area edits, %d script edits) sha1 %s", dest, spec.SPEC_VERSION,
              len(getattr(spec, "EDITS", ())), len(getattr(spec, "AREA_EDITS", ())), len(_engine(engine_edits)), got)

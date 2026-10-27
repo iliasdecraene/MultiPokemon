@@ -494,3 +494,24 @@ def test_ensure_keeps_an_older_verified_build_when_the_new_one_fails(fake_rom, t
     dest.write_bytes(b"something else")                     # nothing verified to fall back to: the error
     with pytest.raises(sinnoh_rom.BuildError):
         sinnoh_rom.ensure(fake_rom, dest, new_spec, engine_edits=())
+
+
+def test_build_says_plainly_when_the_disk_is_full(fake_rom, tmp_path, monkeypatch):
+    """A full disk is the player's problem to fix, not a crash text: checked before copying (the ROM is 128 MB) and
+    an ENOSPC while writing gives the same plain message. Nothing is left behind."""
+    import errno
+    from collections import namedtuple
+    spec = spec_with([land_edit(6)])
+    du = namedtuple("du", "total used free")
+    monkeypatch.setattr(sinnoh_rom.shutil, "disk_usage", lambda p: du(10 ** 9, 10 ** 9, 1000))
+    with pytest.raises(sinnoh_rom.BuildError, match="free disk space"):
+        sinnoh_rom.build(fake_rom, tmp_path / "a.nds", spec, expected=None, engine_edits=())
+    monkeypatch.setattr(sinnoh_rom.shutil, "disk_usage", lambda p: du(10 ** 12, 0, 10 ** 12))
+
+    def full(a, b):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(sinnoh_rom.shutil, "copyfile", full)
+    monkeypatch.setattr(sinnoh_rom.time, "sleep", lambda s: None)
+    with pytest.raises(sinnoh_rom.BuildError, match="free disk space"):
+        sinnoh_rom.build(fake_rom, tmp_path / "b.nds", spec, expected=None, engine_edits=())
+    assert not list(tmp_path.glob("*.part")) and not (tmp_path / "b.nds").exists()

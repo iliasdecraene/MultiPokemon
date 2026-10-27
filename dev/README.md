@@ -63,6 +63,9 @@ Expected output: see the `print` lines; screenshots go to a temp dir printed at 
 - Every Platinum harness takes `YL_PT_ROM=vanilla` (default) or `YL_PT_ROM=sinnoh` (the Complete Sinnoh build made
   from `dev/states/platinum.nds` by `dev/sinnoh/build_rom.py`; `YL_SINNOH_SPEC=test` = the tiny test spec). Run the
   whole Platinum list above with both. Fake Soul Link partners advertise the same Sinnoh version (`ptrom.sinnoh_caps()`).
+  Each run copies the 128 MB ROM into its temporary app folder and builds another 128 MB file there: `ptrom` deletes
+  those `*.nds` / `*.part` copies at exit (screenshots and logs stay; `YL_KEEP_ROM_COPIES=1` keeps them). Without
+  that, a day of runs filled the disk and the build failed with "not enough free disk space".
 - `dev/sinnoh/build_rom.py [--update]` — build the dev ROM, print every byte range that differs from vanilla;
   `--update` stores the new SHA1 in `sinnoh_rom.EXPECTED` after a spec change.
 - `dev/sinnoh/verify.py [rom] [compat] [wild] [events] [regis] [swarm] [area]` (default: all, ~1.5 h) — the built

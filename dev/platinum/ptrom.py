@@ -12,8 +12,10 @@ reads YL_PT_ROM too (no YL_PT_ROM = Complete Sinnoh, the normal player setup), s
 default to vanilla like the ds.py ones.
 YL_PLATINUM_ROM (an explicit ROM path, older scripts/tests) still wins for ds.py.
 """
+import atexit
 import os
 import sys
+import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 STATES = os.environ.get("YL_STATES", os.path.normpath(os.path.join(_HERE, "..", "states")))
@@ -58,3 +60,29 @@ def sinnoh_caps() -> list:
     from yellowlink import platinum
     v = platinum.variant_of(rom_sha1())
     return ["sinnoh_v%s" % v.spec_version] if v and v.spec_version is not None else []
+
+
+def _remove_rom_copies(folder: str):
+    """The app copies the 128 MB ROM into its data folder and builds another 128 MB Complete Sinnoh file next to it:
+    in a harness's temporary app folder those are deleted at exit (screenshots/logs stay), or a day of e2e runs fills
+    the disk. Only *.nds / *.part files below a folder inside the system temp dir; YL_KEEP_ROM_COPIES=1 keeps them."""
+    for root, _dirs, files in os.walk(folder):
+        for n in files:
+            if n.endswith(".nds") or n.endswith(".part"):
+                try:
+                    os.remove(os.path.join(root, n))
+                except OSError:
+                    pass
+
+
+def _register_cleanup():
+    cfg = os.environ.get("XDG_CONFIG_HOME")
+    if not cfg or os.environ.get("YL_KEEP_ROM_COPIES"):
+        return
+    tmp = os.path.realpath(tempfile.gettempdir())
+    real = os.path.realpath(cfg)
+    if real.startswith(tmp + os.sep):          # a harness's own temporary app folder, never the repo or a real one
+        atexit.register(_remove_rom_copies, real)
+
+
+_register_cleanup()
