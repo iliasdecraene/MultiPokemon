@@ -28,6 +28,12 @@ Everyone plays their **own** game with their own save and story. On top of that:
   full experience and the rest of your party gets half, in Yellow, Crystal and Platinum. Levels, new moves and
   evolutions happen the normal way. Turn it off for the original rules. In a Soul Link the run decides: whoever
   starts it picks Exp Share All on or off for both players.
+- **Complete Sinnoh** (Platinum): every Pokémon family can be found in Sinnoh. YellowLink makes its own copy of your
+  Platinum (your file is never changed) where only the wild Pokémon lists are extended - normal story, trainers and
+  difficulty. All 12 starters appear in the wild before the League (5 %), Murkrow/Misdreavus/Glameow/Stunky and the
+  Pokémon that needed a GBA cartridge have normal spots, and the Pokédex Area map shows the new places. The Mystery
+  Gift events are unlocked (Member Card - Darkrai, Oak's Letter - Shaymin, Azure Flute - Arceus, Secret Key - Rotom's
+  room), the Regi ruins open without an event Regigigas, and swarms change every 2 hours for everyone.
 - **Badges.** Every region has badges you earn in your main game: **Champion** (enter the Hall of Fame),
   **Pokédex** (catch the whole regional dex: Kanto 150 without Mew, Johto 249 without Mew and Celebi, Sinnoh 209
   without Manaphy - Pokémon you get through YellowLink trades or from your other games count, like real trades),
