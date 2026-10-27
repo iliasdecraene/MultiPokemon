@@ -173,7 +173,7 @@ Details (exact flags/vars/items from pret scripts) follow below once researched.
 - **Events**: per-event conditions in `sinnoh_events.Event.requires` (Secret Key: Rotom caught or NatDex; Member
   Card + Oak's Letter: NatDex; Azure Flute: NatDex + FLAG_CAUGHT_DIALGA/PALKIA).
 - **Swarms**: `client/yellowlink/sinnoh_swarm.py` (2-hour UTC slots, fixed shuffle, written into the save's
-  swarmDaily; no server). SPEC.md 10 has all of it.
+  swarmDaily; no server). SPEC.md 11 has all of it.
 - **Verified (2026-10-27, spec v2, SHA1 8abeae7b…)**: unit tests 628 client + 143 server; dev/sinnoh/verify.py
   rom+compat+wild+regis 67/0, events 24/0 (four legendaries' battles), swarm 11/0, area 5/0 (Turtwig: "Area Unknown"
   in vanilla, Valor Lakefront blinks in ours); dev/e2e/sinnoh_app.py 0 failed; the whole Platinum list with

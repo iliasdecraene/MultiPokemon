@@ -240,3 +240,100 @@ def mini_sparkle(surf, center, r=5, color=(255, 220, 90)):
     """The small shiny mark next to a Pokémon's name (PC / trade views)."""
     cx, cy = center
     pygame.draw.polygon(surf, color, _star(cx, cy, r, r * 0.3))
+
+
+# --- shiny alerts (SPEC.md section 10) --------------------------------------------------------------------------
+BALL_RED, BALL_WHITE, BALL_INK = (226, 56, 48), (250, 250, 250), (28, 28, 34)
+
+
+def draw_owned_ball(surf, x, y, scale):
+    """Yellow: the 'already caught' Poké Ball in the enemy HUD, drawn into the Game Boy tile whose top-left corner is
+    (x, y) in screen pixels (8x8 Game Boy pixels at `scale`): a 7-pixel ball, red top, white bottom, dark band and
+    button. Returns its rect."""
+    size = max(6, int(round(7 * scale)))
+    key = ("ball", size)
+    img = _cache.get(key)
+    if img is None:
+        big = size * SS
+        s = pygame.Surface((big, big), pygame.SRCALPHA)
+        c, r = big / 2, big / 2 - SS * 0.6
+        ink = max(SS, int(big * 0.07))
+        pygame.draw.circle(s, BALL_INK, (c, c), r)
+        pygame.draw.circle(s, BALL_WHITE, (c, c), r - ink)
+        top = pygame.Surface((big, big), pygame.SRCALPHA)
+        pygame.draw.circle(top, BALL_RED, (c, c), r - ink)
+        s.blit(top, (0, 0), pygame.Rect(0, 0, big, int(c)))
+        pygame.draw.rect(s, BALL_INK, (c - r, c - ink * 0.75, 2 * r, ink * 1.5))
+        pygame.draw.circle(s, BALL_INK, (c, c), r * 0.36)
+        pygame.draw.circle(s, BALL_WHITE, (c, c), r * 0.36 - ink)
+        pygame.draw.circle(s, (255, 190, 180), (c - r * 0.38, c - r * 0.45), max(1, r * 0.13))   # shine
+        img = _cache[key] = pygame.transform.smoothscale(s, (size, size))
+    tile = int(round(8 * scale))
+    r = img.get_rect(center=(int(x + tile / 2), int(y + tile / 2)))
+    surf.blit(img, r)
+    return r
+
+
+def _ease_out(v):
+    v = max(0.0, min(1.0, v))
+    return 1 - (1 - v) ** 3
+
+
+def draw_shiny_banner(surf, f, banner, now=None):
+    """The shiny alert across the top of the game area: slides in, glitters, fades out (shiny.Banner). Purely drawn
+    over the game - it never takes input. Returns the banner's rect."""
+    now = time.time() if now is None else now
+    age = banner.age(now)
+    alpha = banner.alpha(now)
+    w = min(surf.get_width() - 16, 560)
+    gold, ink = (255, 226, 110), (255, 250, 228)
+    title_font = f.title
+    if title_font.size(banner.title)[0] > w - 70:
+        title_font = f.body
+    title = title_font.render(banner.title, True, ink)
+    if title.get_width() > w - 50:                  # very long name on a narrow (DS) window: squeeze a little
+        title = pygame.transform.smoothscale(title, (w - 50, title.get_height()))
+    sub = f.small.render(banner.sub, True, gold) if banner.sub else None
+    h = 18 + title.get_height() + (sub.get_height() + 2 if sub else 0) + 12
+    y = 8 - int((1 - _ease_out(age / 0.35)) * (h + 12))
+    box = pygame.Rect(0, 0, w, h)
+    box.midtop = (surf.get_width() // 2, y)
+    layer = pygame.Surface(box.size, pygame.SRCALPHA)
+    # deep violet card with a soft vertical gradient, gold rim, a highlight sweeping across once
+    for i in range(h):
+        k = i / max(1, h - 1)
+        pygame.draw.line(layer, (int(46 - 18 * k), int(30 - 12 * k), int(92 - 30 * k), 236), (0, i), (w, i))
+    sweep = ((age - 0.3) / 1.4) * (w + 120) - 60
+    if -60 < sweep < w + 60:
+        shine = pygame.Surface(box.size, pygame.SRCALPHA)
+        for dx in range(-28, 29):
+            a = int(46 * (1 - abs(dx) / 28) ** 1.5)
+            pygame.draw.line(shine, (255, 255, 255, a), (sweep + dx, 0), (sweep + dx - h * 0.6, h), 2)
+        layer.blit(shine, (0, 0))
+    mask = pygame.Surface(box.size, pygame.SRCALPHA)
+    pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=12)
+    layer.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+    pygame.draw.rect(layer, gold, layer.get_rect(), 2, border_radius=12)
+    trect = title.get_rect(midtop=(w // 2, 10))
+    srect = sub.get_rect(midtop=(w // 2, 12 + title.get_height())) if sub else pygame.Rect(0, 0, 0, 0)
+    # twinkling four-point sparkles around the text (fixed spots, each with its own phase; never on the words)
+    for i in range(16):
+        px = (0.08 + ((i * 0.618) % 1) * 0.84) * w
+        py = (0.2 if i % 2 else 0.78) * h + math.sin(i * 1.7) * h * 0.08
+        if trect.inflate(10, 6).collidepoint(px, py) or (sub and srect.inflate(12, 6).collidepoint(px, py)):
+            continue
+        tw = 0.5 + 0.5 * math.sin(age * 5.5 + i * 2.1)
+        r = (3 + (i % 3) * 2) * tw
+        if r > 1.2:
+            pygame.draw.polygon(layer, (255, 248, 200, int(120 + 120 * tw)), _star(px, py, r, r * 0.28))
+    # two big sparkles flanking the title
+    tw = 0.8 + 0.2 * math.sin(age * 7)
+    for sx in (22, w - 22):
+        pygame.draw.polygon(layer, gold, _star(sx, h / 2, 11 * tw, 3))
+        pygame.draw.polygon(layer, ink, _star(sx, h / 2, 5 * tw, 1.4, rot=-math.pi / 4))
+    layer.blit(title, trect)
+    if sub:
+        layer.blit(sub, srect)
+    layer.set_alpha(int(255 * alpha))
+    surf.blit(layer, box.topleft)
+    return box

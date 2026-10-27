@@ -69,6 +69,16 @@ def run(n, cond=None):
     return False
 
 
+def wait(cond, secs=10.0):
+    """Step both apps until cond() holds or `secs` of wall time passed (the server's reply can take a moment on a
+    busy machine; a frame count alone races it)."""
+    end = time.time() + secs
+    while time.time() < end:
+        if run(10, cond):
+            return True
+    return bool(cond())
+
+
 def shot(app, name, scale=None):
     if scale:
         app.cfg[app._scale_key()] = scale
@@ -92,7 +102,7 @@ party = A.game.party()
 check("Ilias has a party to make shiny", bool(party))
 m[0xD16A + 27], m[0xD16A + 28] = 0xEA, 0xAA                  # first party mon: Gen-2 shiny DVs (Atk 14, 10/10/10)
 ok = run(badgesync.CHECK_EVERY * 3, lambda: len((A.badges.earned.get("kanto") or {})) >= 2)
-run(300, lambda: any("Ilias has" in line[1] for line in B.chat_log))
+wait(lambda: any("Ilias has" in line[1] for line in B.chat_log))
 check("first report after the update: one summary line, not one per badge",
       any(line[1] == "Ilias has 2 badges" for line in B.chat_log)
       and not any("Kanto Champion badge" in line[1] for line in B.chat_log), str(B.chat_log[-5:]))
@@ -109,7 +119,9 @@ check("told: Champion, Pokédex, Shiny hunter (toasts + chat)",
 book = json.loads(ca.badges_path.read_text())
 check("book saved next to the save (per server folder)", "kanto" in book["earned"]
       and str(ca.badges_path).startswith(str(ca.data_dir)))
-run(300, lambda: (entry(B, ca["uid"]).get("badges") or {}).get("kanto", {}).get("shiny") == 1)
+FULL = {"champion": True, "dex": True, "shiny": 1, "soullink": None}
+wait(lambda: (entry(B, ca["uid"]).get("badges") or {}).get("kanto", {}) == FULL)      # the dex arrives in a later report
+wait(lambda: any("completed the Kanto Pokédex" in line[1] for line in B.chat_log))
 kb = (entry(B, ca["uid"]).get("badges") or {}).get("kanto", {})
 check("Alex's roster has Ilias's Kanto badges", kb == {"champion": True, "dex": True, "shiny": 1, "soullink": None},
       str(kb))
@@ -165,19 +177,26 @@ B.select_player(ca["uid"])
 # 2. Soul Link: gold (Exp Share All off) for Ilias, silver (on) for Alex
 def start_run(exp_share):
     global A, B
+    # Alex's app may have (re)started just now: the server learns which run rules his client plays from its
+    # `library` message (sent right after `welcome`, shown as the roster's `challenge_rules`). A request with Exp
+    # Share All on that gets there first is refused ("Alex needs a newer YellowLink...") - the form only offers the
+    # rule once the roster lists it, so wait for that like a player would.
+    wait(lambda: entry(A, cb["uid"]).get("online") and A.can_exp_share_rule(cb["uid"]))
     A.new_challenge_form(cb["uid"], "Alex")
     A.chal_form["exp_share"] = exp_share
     A.send_challenge()
-    run(300, lambda: B.prompt and B.prompt.get("kind") == "challenge")
+    asked = wait(lambda: B.prompt and B.prompt.get("kind") == "challenge")
+    if not asked:
+        print("  (Alex was never asked:", [line[1] for line in A.chat_log[-3:]], ")")
     time.sleep(0.3)
     B.respond_challenge(True)
-    run(300, lambda: A.enter_challenge and B.enter_challenge)
+    wait(lambda: A.enter_challenge and B.enter_challenge)
     for app, cfg in ((A, ca), (B, cb)):
         app.shutdown()
         cfg["active_challenge"] = app.enter_challenge
     A, B = boot(ca, RUN_STATE), boot(cb, RUN_STATE)
     os.environ.pop("YL_DEV_LOAD_STATE", None)
-    run(600, lambda: A.chal_wait is None and B.chal_wait is None and A.referee and B.referee)
+    wait(lambda: A.chal_wait is None and B.chal_wait is None and A.referee and B.referee, 30)
     check(f"both in the run (exp_share {'on' if exp_share else 'off'})",
           A.chal_wait is None and B.chal_wait is None and bool(A.referee) and
           bool(A.chal_rec["rules"].get("exp_share")) == exp_share)
@@ -190,7 +209,7 @@ def back_home():
         cfg.pop("active_challenge", None)
     A, B = boot(ca, MAIN_STATE), boot(cb, MAIN_STATE)
     os.environ.pop("YL_DEV_LOAD_STATE", None)
-    run(300, lambda: A.badge_feature and B.badge_feature and len(A.roster) == 2)
+    wait(lambda: A.badge_feature and B.badge_feature and len(A.roster) == 2)
 
 
 start_run(False)

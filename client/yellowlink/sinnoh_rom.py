@@ -1,7 +1,7 @@
 """Complete Sinnoh: YellowLink's own version of Pokémon Platinum, made on the player's computer from their own ROM.
 
 The player adds their vanilla Platinum (US rev 0, `VANILLA_SHA1`); YellowLink copies it into its data folder
-(`roms/platinum-sinnoh.nds`) and changes only data files inside the copy (SPEC.md section 10):
+(`roms/platinum-sinnoh.nds`) and changes only data files inside the copy (SPEC.md section 11):
 
   * `/fielddata/encountdata/pl_enc_data.narc` - the wild-encounter tables (183 x 424 bytes, edited in place, same
     size), from the spec `sinnoh_complete.py` (EDITS / RATE_EDITS);

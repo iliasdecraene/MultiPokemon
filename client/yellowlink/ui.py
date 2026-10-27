@@ -1,6 +1,7 @@
 """Overlay UI drawing. Pure rendering — all state lives in app.App."""
 from __future__ import annotations
 
+import math
 import time
 
 import pygame
@@ -31,6 +32,26 @@ def text(surf, font, s, pos, color=TEXT, anchor="topleft"):
     r = img.get_rect(**{anchor: pos})
     surf.blit(img, r)
     return r
+
+
+SPARKLE = "\x00sparkle"      # chat segment drawn as a little sparkle (the default font has no ✨ glyph)
+SPARKLE_W = 16
+
+
+def chat_segments(msg: str) -> list:
+    """A chat/system line as segments: a leading ✨ becomes SPARKLE (shiny alerts, SPEC.md section 10)."""
+    if msg.startswith("✨"):
+        return [SPARKLE, msg[1:].lstrip()]
+    return [msg]
+
+
+def _draw_sparkle(surf, x, y, color=(255, 220, 90)):
+    pts = []
+    for i in range(8):
+        a = -math.pi / 2 + i * math.pi / 4
+        rr = 6 if i % 2 == 0 else 1.8
+        pts.append((x + rr * math.cos(a), y + rr * math.sin(a)))
+    pygame.draw.polygon(surf, color, pts)
 
 
 def wrap(font, s, width):
@@ -227,7 +248,13 @@ def draw_chat(surf, f: Fonts, app, r):
                          else [(first, color)])
             lines.extend([[(ln, color)] for ln in wrapped[1:]])
         else:
-            lines.extend([[(ln, color)] for ln in wrap(f.small, msg, width)])
+            segs = chat_segments(msg)
+            if segs[0] is SPARKLE:
+                wrapped = wrap(f.small, segs[1], width - SPARKLE_W) or [""]
+                lines.append([(SPARKLE, color), (wrapped[0], color)])
+                lines.extend([[(ln, color)] for ln in wrapped[1:]])
+            else:
+                lines.extend([[(ln, color)] for ln in wrap(f.small, msg, width)])
     per = max(1, area.h // 18)
     max_scroll = max(0, len(lines) - per)
     app.chat_scroll = max(0, min(app.chat_scroll, max_scroll))
@@ -239,6 +266,10 @@ def draw_chat(surf, f: Fonts, app, r):
     for segs in visible:
         xx = area.x
         for seg, color in segs:
+            if seg is SPARKLE:
+                _draw_sparkle(surf, xx + 6, yy + 8)
+                xx += SPARKLE_W
+                continue
             rr = text(surf, f.small, seg, (xx, yy), color)
             xx = rr.right
         yy += 18
@@ -274,17 +305,22 @@ def draw_toasts(surf, f: Fonts, toasts, game_w, bottom=False):
     """Short messages at the top of the game area (at the bottom while a panel/dialog covers the top)."""
     now = time.time()
     live = [t for t in toasts if t[1] >= now][-3:]
-    step = f.body.get_height() + 16
-    y = surf.get_height() - 12 - step * len(live) if bottom else 10
-    for msg, until, color in live:
-        img = f.body.render(msg, True, color)
-        r = img.get_rect(midtop=(game_w // 2, y + 5))
-        bg = r.inflate(20, 10)
+    lh = f.body.get_height() + 2
+    # long messages wrap (small windows: GB 3x, DS 1.5x)
+    blocks = [(wrap(f.body, msg, max(120, game_w - 44)) or [msg], color) for msg, _until, color in live]
+    heights = [len(lines) * lh + 14 for lines, _c in blocks]
+    y = surf.get_height() - 12 - sum(heights) if bottom else 10
+    for (lines, color), h in zip(blocks, heights):
+        imgs = [f.body.render(line, True, color) for line in lines]
+        w = max(i.get_width() for i in imgs)
+        bg = pygame.Rect(0, 0, w + 20, len(imgs) * lh + 10)
+        bg.midtop = (game_w // 2, y)
         s = pygame.Surface(bg.size, pygame.SRCALPHA)
         s.fill((10, 12, 20, 230))
         surf.blit(s, bg)
-        surf.blit(img, r)
-        y += step
+        for k, img in enumerate(imgs):
+            surf.blit(img, img.get_rect(midtop=(game_w // 2, y + 5 + k * lh)))
+        y += h
 
 
 def modal(surf, f: Fonts, game_w, game_h, title, lines, footer, w=None, h=None):
@@ -338,7 +374,7 @@ def draw_help(surf, f, game_w, game_h, ds=False):
             "  Tab: multiplayer     T: chat",
             "  Space: fast-forward     M: mute",
             "  -/+: volume     F5/F6: window size",
-            "  F3: report a problem",
+            "  F3: report a problem     F7: back to last save",
             ("Save in-game as usual (X > Save).", DIM),
         ]
         modal(surf, f, game_w, game_h, "How to play", lines, "[Esc / Enter / F1] close")
@@ -353,7 +389,7 @@ def draw_help(surf, f, game_w, game_h, ds=False):
         "  Tab: link menu - battle (B), trade (R), practice (P)",
         "  T: chat     Space: fast-forward on/off     M: mute",
         "  V: wide view     F5/F6: window size     -/+: volume",
-        "  F3: report a problem     F2: settings",
+        "  F2: settings     F3: report a problem     F7: last save",
         "",
         ("Battles are exhibition matches - nothing is won or lost.", DIM),
         ("F4 leaves a live battle. Practice = their team played by the game AI.", DIM),

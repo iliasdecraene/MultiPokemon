@@ -174,7 +174,7 @@ holder 12); Lucky Egg on the bench → 18. EVs: every mon that gets exp gets the
 After a battle the field keeps working on party records for ~2 s: a record reads alternately valid / half
 re-encrypted (flags 0) on every other frame — read the party only when two *valid* reads agree.
 
-## Complete Sinnoh (SPEC.md section 10) — verified 2026-10-26 by dev/sinnoh/verify.py
+## Complete Sinnoh (SPEC.md section 11) — verified 2026-10-26 by dev/sinnoh/verify.py
 
 | what | value | how found / verified |
 |---|---|---|

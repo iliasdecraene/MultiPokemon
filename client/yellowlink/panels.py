@@ -498,11 +498,31 @@ def draw_settings(surf, f, app, game_w, game_h, offset):
     x, y = r.x + 18, r.y + 58
     width = r.w - 36
     small = width < 330
-    note = "Changes apply right away." if small else "Changes apply right away, also in the middle of your adventure."
+    reload_btn = hasattr(app, "reload_available") and app.reload_available()
+    compact = small or (reload_btn and r.h < 450)
+    note = "Changes apply right away." if compact else \
+        "Changes apply right away, also in the middle of your adventure."
     note_lines = wrap(f.small, note, width)
-    bottom = r.bottom - 16 - 18 * len(note_lines)          # rows stop above the note
+    note_top = r.bottom - 16 - 18 * len(note_lines)
+    bottom = note_top                                       # rows stop above the note
+    if reload_btn:                                          # "Back to my last in-game save" sits above the note
+        hint = "Restart from your last Start > Save (also F7)." if compact else \
+            "Restart this game from your last in-game save (Start > Save), like a soft reset. F7 too."
+        hint_lines = wrap(f.small, hint, width)
+        bottom -= 46 + 18 * len(hint_lines)
+        by = bottom + 6
+        label = "Back to my last in-game save"
+        if f.body.size(label)[0] > width - 24:
+            label = "Back to my last save"
+        why = app.reload_blocker(full=False)
+        button(surf, app, f, pygame.Rect(x, by, min(width, f.body.size(label)[0] + 36), 32), label,
+               app.ask_reload, enabled=why is None, offset=offset, tip=why or "")
+        by += 38
+        for line in hint_lines:
+            text(surf, f.small, line, (x, by), DIM)
+            by += 18
     for key, default, label, desc, short in SETTINGS:
-        lines = wrap(f.small, short if small else desc, width - 56) if desc else []
+        lines = wrap(f.small, short if compact else desc, width - 56) if desc else []
         n_desc = len(lines)
         if key == "exp_share_all" and getattr(app, "exp_share", None) is None:
             lines += wrap(f.small, "Not active for this game file." if small else
@@ -530,7 +550,7 @@ def draw_settings(surf, f, app, game_w, game_h, offset):
             text(surf, f.small, line, (x + 56, y), BAD if warn else DIM)
             y += 18
         y += 10
-    yy = bottom + 8
+    yy = note_top + 8
     for line in note_lines:
         text(surf, f.small, line, (x, yy), DIM)
         yy += 18

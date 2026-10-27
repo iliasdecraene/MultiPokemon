@@ -49,7 +49,7 @@ def rom_sha1() -> str:
 
 
 def sinnoh_caps() -> list:
-    """What a client running this ROM puts into `library.challenge_rules` for Soul Link pairing (SPEC.md section 10):
+    """What a client running this ROM puts into `library.challenge_rules` for Soul Link pairing (SPEC.md section 11):
     ["sinnoh_v<spec version>"] on Complete Sinnoh, [] on vanilla. Fake partners in the harnesses send the same, like a
     friend on the same YellowLink version would."""
     if not SINNOH:

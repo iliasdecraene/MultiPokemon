@@ -34,6 +34,10 @@ Everyone plays their **own** game with their own save and story. On top of that:
   **Shiny hunter** (catch shinies yourself: 1, 10, 25, 50, 100) and the **Soul Link** badge. See yours under each
   region in **Regions**, and a friend's by clicking them in **Multiplayer**. Yellow has no shinies, so a Yellow
   Pokémon that would be shiny in Crystal counts as shiny in YellowLink - a **Shiny!** tag shows in wild battles.
+- **Shiny alerts.** When a shiny shows up in someone's wild battle (any game, also inside a Soul Link), everyone
+  online gets a chat line, a big sparkly banner at the top of the game and a little jingle (it plays even when your
+  game sound is turned down). In Yellow a small Poké Ball next to a wild Pokémon's name means you've caught that
+  species already, like in Crystal.
 - **Chat.** You can also see who's online, and the app shows a notice when an update is available.
 
 > **No ROM is included, and none ever should be.** Each player needs their own copy of
@@ -73,12 +77,22 @@ Everyone plays their **own** game with their own save and story. On top of that:
 | F1 | Help |
 | **F3** | Report a problem (shows the log with Copy / Send to host) |
 | F2 | Settings (opens after you close the game) |
+| F7 | Back to your last in-game save (also in **Settings**) |
 
 Gamepads work too.
 
 **Saves.** Your progress is saved when you save in-game (Start → Save), just like on a real Game Boy.
 The save file lives in `%APPDATA%\YellowLink\saves\yellow.sav`. A backup is made every time you start the app,
 in the `backups` folder next to it, and the last 15 are kept. It's a standard 32 KB save, so it also works in other emulators.
+
+**Back to your last in-game save** (going for a shiny or a legendary? save in front of it): **Settings →
+Back to my last in-game save** (or **F7**) restarts the game from your last Start > Save, straight into Continue.
+Everything since that save is lost, but your YellowLink PC and trades stay as they are. If you put a Pokémon in
+the PC, took one out, or traded/gave one away since your last save, it says so and asks you to save in-game first
+(otherwise a Pokémon could exist twice). Not available inside a Soul Link. The game's own soft reset works too:
+**A + B + Start + Select** in Yellow/Crystal (keys X + Z + Enter + Backspace), **L + R + Start + Select** in
+Platinum (Q + W + Enter + Backspace) - a Pokémon you put in the PC after your last save then stays in the PC and
+leaves your party, so it's never doubled. (Where you were before going back is kept in the `backups` folder.)
 
 **More than one group of friends?** Open **Multiplayer → Switch server → Add a server...** and enter the other
 group's address and password. Each server keeps its own saves, PC and challenges (saves of extra servers live in

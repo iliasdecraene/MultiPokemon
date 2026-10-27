@@ -24,6 +24,8 @@ from .challenge import ChallengeMixin
 from .tradeevo import TradeEvoMixin
 from .trades import TradeMixin
 from .badgesync import BadgeMixin
+from .shiny import ShinyMixin
+from .reloadsave import ReloadMixin
 from . import badge_art
 from .net import NetClient
 
@@ -60,6 +62,9 @@ DS_FAST_TICKS = 4           # DS frames per host frame while fast-forward is on
 # Game Boy pixels: the "Shiny!" tag sits centred under the wild enemy's HUD (its HP bar's frame ends at y 28),
 # above the player's Pokémon (back picture from y 40) and clear of the player's name/level HUD (y 56+)
 SHINY_TAG_X, SHINY_TAG_Y = 48, 30
+# Game Boy pixels: Yellow's "already caught" ball sits in tile (1, 1) - under the start of the enemy's name, left of its
+# level (blank in Yellow's enemy HUD; the spot Crystal uses for its own indicator). SPEC.md section 10
+OWNED_BALL_X, OWNED_BALL_Y = 8, 8
 DS_SAVE_POLL = 180          # frames (~3 s) between battery save checks (Platinum)
 
 
@@ -150,7 +155,7 @@ class GhostBattle:
     result: int | None = None
 
 
-class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
+class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, ReloadMixin):
     def __init__(self, cfg: Config, diag: Diagnostics | None = None):
         self.cfg = cfg
         self.diag = diag
@@ -163,11 +168,15 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         self.init_trades()
         self.init_badges()
         self.init_tradeevo()
+        self.init_shiny()
         # in a challenge: that run's own game + separate save (Config paths follow active_challenge)
         self.game_id = cfg.challenge["game"] if cfg.challenge else (self.lib.current or "yellow")
         self.save_tag = f"challenge-{cfg.challenge['id']}" if cfg.challenge else self.game_id
         self.game_info = self.lib.info(self.game_id)
         self.travel_to = None
+        # "Back to my last in-game save" restarted us: straight into CONTINUE (reloadsave.py)
+        self.reload_boot = not cfg.challenge and cfg.get("_reload_boot") == self.game_id
+        self.resumed = False
         # per server (each group of friends has its own) - or shared by servers that share one save (SPEC.md 8)
         self.pcsync = pcdb.PCSync(cfg.pc_path, *cfg.pc_keys)
         self.pc_ready = not cfg.save_owner(cfg.active_server)   # shared save: no trades until synced here
@@ -283,6 +292,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
 
         try:
             self._start_emulator()
+            self.init_reload(self.resumed)
         except BaseException as e:
             # don't leave our sound device (or the shared DS emulator) open behind an App that never ran
             self.audio.close()
@@ -402,7 +412,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
                 self.pyboy.load_state(f)
         elif self._try_resume():
             pass
-        elif self.full and self.had_save and self.cfg.get("skip_intro", True):
+        elif self.full and self.had_save and (self.cfg.get("skip_intro", True) or self.reload_boot):
             self._loading_screen("Loading your adventure...")
             t0 = time.time()
             result = self.G.fast_continue(self.pyboy, on_progress=lambda: self._loading_screen(
@@ -470,7 +480,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             self.last_sram = self._bat_seen = self._read_sram()
         elif self._try_resume():
             pass
-        elif self.full and self.had_save and self.cfg.get("skip_intro", True) and \
+        elif self.full and self.had_save and (self.cfg.get("skip_intro", True) or self.reload_boot) and \
                 getattr(self.G, "fast_continue", None):
             self._loading_screen("Loading your adventure...")
             t0 = time.time()
@@ -540,6 +550,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             self.last_sram = self._read_sram()
             self._bat_seen = self.last_sram
             self.pc_trust = True     # snapshots are always taken together with a PC commit
+            self.resumed = True
             log.info("resumed %s from snapshot (%s)", self.game_id, time.ctime(path.stat().st_mtime))
             return True
         except Exception:  # noqa: BLE001 - corrupt/old snapshot: fall back to the normal save
@@ -619,6 +630,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         if data != self.last_sram and write_atomic(self.cfg.save_path, data):
             self.last_sram = data
             log.info("save file written")
+        self._battery_note(data)
 
     # ------------------------------------------------------------- messages
     def debug_snapshot(self) -> str:
@@ -799,6 +811,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
 
     def on_system(self, msg):
         self.sys_msg(msg.get("text", ""))
+        self.shiny_on_system(msg)          # a shiny alert of someone else: banner + jingle (SPEC.md section 10)
 
     def on_roster(self, msg):
         self.roster = msg.get("roster", [])
@@ -1126,6 +1139,9 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         if self.ds and (not self.pc_codec.initialised() or self.game.pc_open()):
             log.warning("Platinum PC open hook outside the game / under a running box UI: not syncing")
             return
+        self._battery_note()
+        if self._battery_due:            # straight to the PC after loading the save: line the view up first
+            self.after_battery_load()
         boxes = self.pcsync.open_session(self.game_id, self.pc_codec, trust_game=self.pc_trust)
         if boxes is None:                # store too full to link this game: its boxes stay exactly as they are
             n, free = self.pcsync.refused or (0, 0)
@@ -1172,6 +1188,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             return
         if party is None:
             party = self.G.party_records(self.game)
+        self._battery_note()             # Yellow's CHANGE BOX saves the game
         report = self.pcsync.close_session(self.game_id, self.pc_codec, party)
         self.badges_due()        # count a shiny just deposited on the next safe frame (before it can be traded)
         if self.ds:
@@ -1200,6 +1217,9 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             self.toast(f"{names} is part of a trade that's still finishing - it stays in the PC.", 6, ui.ACCENT)
         if report.get("traded_returned"):
             self.toast("A Pokémon you traded away can't be withdrawn - it's with your friend now.", 6, ui.ACCENT)
+        elif report.get("left_returned"):
+            self.toast("That Pokémon isn't in your YellowLink PC any more (it's in another game now) - it can't be "
+                       "withdrawn here.", 7, ui.ACCENT)
         if report["standins_returned"]:
             names = ", ".join(n.title() for n in report["standins_returned"][:3])
             self.toast(f"{names} can't leave the PC here - they live in another region.", 6, ui.ACCENT)
@@ -1898,6 +1918,9 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             if k in (pygame.K_y, pygame.K_RETURN, pygame.K_n, pygame.K_ESCAPE):
                 self._answer_prompt(k in (pygame.K_y, pygame.K_RETURN))
             return
+        if self.mode == "reload_confirm":
+            self.reload_key(k)
+            return
         if self.mode == "update_confirm":
             if k in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 urls = updater.asset_urls(self.download_url, self.update_available)
@@ -1976,6 +1999,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
                 self.toast("Update is downloading...", 2)
             else:
                 self.mode = "update_confirm"
+        elif k == pygame.K_F7:
+            self.ask_reload()
         elif k == pygame.K_F2:
             self.toast("Settings open after you close the game (run with --setup).", 4)
             self.cfg["_open_setup"] = True
@@ -2202,6 +2227,9 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             # Yellow wild battle: this one would be shiny in Gen 2 (counts as shiny in YellowLink) - next to the enemy
             badge_art.draw_shiny_indicator(sub, self.fonts, int((self.off_x + SHINY_TAG_X) * self.scale),
                                            int((self.off_y + SHINY_TAG_Y) * self.scale), self.scale)
+        if self.wild_owned and not self.ds and self.game_id == "yellow" and self.game.enemy_hud_shown():
+            badge_art.draw_owned_ball(sub, int((self.off_x + OWNED_BALL_X) * self.scale),
+                                      int((self.off_y + OWNED_BALL_Y) * self.scale), self.scale)
         if self.mode == "panel" and self.panel == "multiplayer":
             panels.draw_multiplayer(sub, self.fonts, self, self.game_w, self.game_h, (0, self.game_y))
         elif self.mode == "panel" and self.panel == "settings":
@@ -2303,6 +2331,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
                      "[Enter] fight!    [Esc] back")
         elif self.mode == "help":
             ui.draw_help(sub, self.fonts, self.game_w, self.game_h, ds=self.ds)
+        elif self.mode == "reload_confirm":
+            self.draw_reload_confirm(sub)
         elif self.mode == "update_confirm":
             ui.modal(sub, self.fonts, self.game_w, self.game_h, f"Update to {self.update_available}?",
                      ["The new version downloads in the background",
@@ -2330,8 +2360,12 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
                     (self.game_w // 2, band.y + 58), ui.DIM, anchor="midtop")
             panels.button(sub, self, self.fonts, pygame.Rect(self.game_w // 2 - 65, band.y + 84, 130, 34),
                           "Go back", lambda: self.leave_to_main("paused"), offset=(0, self.game_y))
+        banner = self.banners.current()
+        if banner is not None:            # shiny alert: over everything, never takes input
+            badge_art.draw_shiny_banner(sub, self.fonts, banner)
         ui.draw_toasts(sub, self.fonts, self.toasts, self.game_w,
-                       bottom=self.mode in ("panel", "chal_popup", "prompt", "battle_confirm", "evo_wait"))
+                       bottom=banner is not None or
+                       self.mode in ("panel", "chal_popup", "prompt", "battle_confirm", "evo_wait"))
         if self.fast:
             ui.text(sub, self.fonts.body, ">> fast (Space)", (self.game_w - 10, 10), ui.ACCENT, anchor="topright")
         ui.draw_sidebar(self.screen, self.fonts, self, self.game_w, self.screen.get_height())
@@ -2431,6 +2465,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
         self.chal_step()
         self.trades_step()
         self.badges_step()
+        self.shiny_step()
+        self.reload_step()
         if self.update_dl and self.update_dl.status != "downloading" and not getattr(self.update_dl, "announced", False):
             self.update_dl.announced = True
             if self.update_dl.status == "ready":
@@ -2615,6 +2651,8 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin):
             self.autosave(force=True)            # skipped while experience is still being handed out
             self.flush_sram(force=True)
             self._remove_exp_share()                # after the snapshot (removing mid-award changes game RAM)
+            if self.reload_save:                    # "Back to my last in-game save": that snapshot goes to backups
+                self.discard_resume()
             if self.ds:
                 self.nds.close()          # also blanks DeSmuME's shared battery file (see nds_core)
             else:
@@ -2757,6 +2795,8 @@ def _main(argv, cfg, diag):
                 cfg.share_save(*app.pending_share)
             except ValueError:
                 log.exception("could not change which save the server uses")
+        if getattr(app, "reload_save", False):            # same game again, from its in-game save
+            continue
         if app.switch_to:                                 # another server: its own saves, PC and challenges
             cfg.switch_server(app.switch_to)
             lib = library.Library(cfg, app_dir())

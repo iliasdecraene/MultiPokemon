@@ -18,7 +18,7 @@ FINISHED = ("completed", "failed", "abandoned")
 CHALLENGE_GAMES = ("yellow", "crystal", "platinum")     # order of the buttons in the new-challenge form
 CHALLENGE_RULES = ("exp_share",)        # optional run rules this client applies (`library.challenge_rules`)
 CHALLENGE_CAPS = ("trade_evo",)         # ...and what else it can do in a run (same list; SPEC.md section 7)
-SINNOH_CAP = "sinnoh_v"                 # + Complete Sinnoh spec version, also in `challenge_rules` (SPEC.md 10)
+SINNOH_CAP = "sinnoh_v"                 # + Complete Sinnoh spec version, also in `challenge_rules` (SPEC.md 11)
 LEGACY_GAMES = ("yellow", "crystal")    # every challenge client (0.6.0+) plays these; others need `challenge_games`
 # What the referee needs from a game adapter's memory class (crystal.py / platinum.py "Soul Link" sections)
 REFEREE_HELPERS = ("battle_info", "battle_party_slot", "has_poke_balls", "current_box_records", "move_party_to_box",

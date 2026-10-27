@@ -1,4 +1,4 @@
-"""Complete Sinnoh inside YellowLink (the app), end to end on the real ROM (SPEC.md section 10).
+"""Complete Sinnoh inside YellowLink (the app), end to end on the real ROM (SPEC.md section 11).
 
   1. first start: the app makes roms/platinum-sinnoh.nds from the player's vanilla file (original untouched), runs
      it with every feature (App.full) and advertises sinnoh_v<spec> for Soul Link pairing

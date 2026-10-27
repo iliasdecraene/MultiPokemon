@@ -612,7 +612,7 @@ def test_waiting_for_the_partner_keeps_ds_sound_paused():
 
 
 def test_platinum_soul_link_needs_the_same_complete_sinnoh(plat_helpers, monkeypatch):
-    """Complete Sinnoh (SPEC.md section 10): clients advertise `sinnoh_v<spec>` in challenge_rules; Platinum runs
+    """Complete Sinnoh (SPEC.md section 11): clients advertise `sinnoh_v<spec>` in challenge_rules; Platinum runs
     only between players with the same wild Pokémon (same version, or both plain Platinum)."""
     sha = "ab" * 20
     monkeypatch.setitem(platinum.VARIANTS, sha, platinum.Variant("sinnoh", sha, "Complete Sinnoh", 3))
