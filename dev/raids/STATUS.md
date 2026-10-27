@@ -51,6 +51,16 @@
 - Platinum battles also need the player's ROM path for the auto-pick's move powers: the App's `nds.rom_path` is used.
 
 ## raid-net progress
+- 2026-10-27 (round 2): adapted to raid-games' final interface (`set_pool(pool, dealt)`, `taking_over()`,
+  `escaped`/`error` -> reported as `left`, `strongest_level()` from the game module, DS `Den.draw(surf, pm, cam,
+  off=, mask=)` with the app's SinnohView camera); spots vendored (`dev/raids/server_spots.py`: kanto 611 / johto
+  242 / sinnoh 1092 spots); server: per-player forced catch roll for tests (`catch_force` dict). `dev/e2e/
+  raid_flow.py` rewritten: server in-process, real raids in Yellow (2 players + a Crystal player online
+  elsewhere), Crystal, Platinum (Complete Sinnoh: forced catch; `--pt-only` vanilla: forced miss), timer
+  auto-pick fights, AFK catch-phase throws, blackout (out, no rejoin), time over -> flee. Test note: never raise
+  the battle copy's HP in Platinum - it is written back into the party and `party_checked()` then refuses it.
+  Fixed in raid.py: `raid_down` while the battle menu was already waiting cancelled the move timer (no new
+  `need_input` comes), so an AFK player never threw - the timer now restarts for the throw.
 - 2026-10-27: SPEC.md section 12 written; server `raids.py` (+ config, server.py wiring, DEPLOY.md, compose env)
   with 28 tests; client `raid.py` (mixin) + app/ui/panels/trades/challenge/reloadsave/shiny hooks with 28 unit tests;
   `dev/raids/server_spots.py` (vendor spots into the server; run it once `client/yellowlink/raid_spots.json`

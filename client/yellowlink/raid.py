@@ -596,7 +596,11 @@ class RaidMixin:
                 self._raid_report("left")
             return
         self.raid_phase = "catch"
-        self.raid_timer.input_done()
+        if self.raid_timer.running:
+            # the game may already wait at the battle menu (its need_input came before this): the timer starts
+            # over for the throw - an AFK player's auto_pick throws the ball when it runs out
+            self.raid_timer.input_done()
+            self.raid_timer.need_input(time.time())
         self._raid_call("group_down", 1.0 if catch else 0.0)
         name = (self.raid or {}).get("name", "The boss")
         text = f"{name} is down! Throw a Poké Ball - your catch chance: {int(round(chance * 100))}%"
@@ -999,7 +1003,9 @@ class RaidMixin:
             return
         try:
             if self.ds:
-                den.draw(self.game_surf, self.game, off=(0, 0), mask=None)
+                sv = self._sinnoh() if hasattr(self, "_sinnoh") else None
+                cam = sv.display(self.nds.frame_count)[0] if sv is not None else None
+                den.draw(self.game_surf, self.game, cam, off=(0, 0), mask=None)
             else:
                 den.draw(self.game_surf, self.game, off=(self.off_x, self.off_y),
                          mask=getattr(self, "_friend_mask", None),

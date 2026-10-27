@@ -584,3 +584,15 @@ def test_shiny_raid_is_a_shiny_alert(app):
     app.on_raid_open({"raid": raid_obj(shiny=True), "fresh": True})
     assert app.horns == 0 and app.banners.queue[0].title == "A shiny Mew raid!"
     assert app.banners.queue[0].sub == "on Route 1 (Kanto)"
+
+
+def test_down_while_the_menu_waits_restarts_the_timer(app, monkeypatch):
+    b = start_fight(app, monkeypatch, now=1000.0)
+    b.events = [{"type": "need_input", "what": "menu"}]
+    app.raid_step()
+    monkeypatch.setattr(R.time, "time", lambda: 1008.0)
+    app.on_raid_down({"id": "250000-abc", "chance": 1.0, "catch": True})
+    assert app.raid_timer.running and app.raid_timer.left(1008.0) == pytest.approx(10.0)
+    monkeypatch.setattr(R.time, "time", lambda: 1018.5)
+    app.raid_step()
+    assert ("auto_pick",) in b.calls                    # the AFK player's throw

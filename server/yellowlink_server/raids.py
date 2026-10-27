@@ -532,8 +532,9 @@ class RaidHub:
             chance = round(share[uid], 4)
             p["chance"] = chance
             p["catch"] = bool(chance >= 1.0 or (chance > 0 and self.rng.random() < chance))
-            if self.catch_force is not None:                  # testing only (YL_RAID_CATCH)
-                p["catch"] = self.catch_force
+            force = self.catch_force.get(uid) if isinstance(self.catch_force, dict) else self.catch_force
+            if force is not None:                             # testing only (YL_RAID_CATCH; e2e: per player)
+                p["catch"] = bool(force)
             await self.server.send(self.server.clients.get(uid),
                                    {"type": "raid_down", "id": r["id"], "chance": chance, "catch": p["catch"]})
         self._try_save()

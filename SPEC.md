@@ -1117,3 +1117,5 @@ badges, Platinum badges; regions it doesn't know yet = 0) - a client that sends 
   from the raid boss (the raid notice already said it); trade/battle/travel/server switch refused ("busy").
 - A client that finds itself `fighting` in a raid summary without a raid battle running (it crashed or closed)
   sends `raid_result left`.
+  The game module's `escaped` outcome (the boss fainted in that game anyway) and `error` are reported as `left`.
+  A result lost in a disconnect is sent again when the catch-up `raid_open` still lists the player as `fighting`.
