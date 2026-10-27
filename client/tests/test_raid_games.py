@@ -173,3 +173,59 @@ def test_gb_pool_bookkeeping():
     rb2.phase = "fight"
     rb2.group_down(0.0)
     assert rb2.catch_success is False
+
+
+class PressPyBoy(FakePyBoy):
+    def __init__(self):
+        super().__init__()
+        self.presses = []
+
+    def button(self, name, hold=1):
+        self.presses.append(name)
+
+
+def test_gb_autopilot_gives_up_without_progress(caplog):
+    """M3: auto_pick stops driving after NO_PROGRESS frames in which the game didn't move on, and logs why."""
+    pb = PressPyBoy()
+    rb = raid_gb.RaidBattle(pb, raid_data.boss_for(151, 30, "kanto"), game="yellow", rom=FakeRom(), gm=object())
+    pb.memory[raid_gb.YellowSpec.IN_BATTLE] = 1
+    rb.phase = "fight"
+    rb.ui = "menu"
+    rb._open_decision("menu")
+    rb.auto_pick()
+    assert rb.taking_over()
+    with caplog.at_level("WARNING", logger="yellowlink.raid"):
+        for _ in range(raid_gb.NO_PROGRESS + 50):
+            rb.frame += 1
+            rb._autopilot()
+    assert pb.presses                            # it did try
+    assert not rb.auto and not rb.taking_over()
+    assert any("gave up" in r.message for r in caplog.records)
+
+
+def test_gb_taking_over_while_starting_is_bounded():
+    rb = raid_gb.RaidBattle(PressPyBoy(), raid_data.boss_for(151, 30, "kanto"), game="yellow", rom=FakeRom(),
+                            gm=object())
+    rb.phase = "starting"
+    rb._start_frame = rb.frame = 100
+    assert rb.taking_over()
+    rb.frame = 100 + raid_gb.NO_PROGRESS + 1
+    assert not rb.taking_over()
+
+
+def test_gb_flee_takes_over_and_runs():
+    """M1: time over while the player is in the menu: YellowLink presses RUN (bottom right) at once."""
+    pb = PressPyBoy()
+    rb = raid_gb.RaidBattle(pb, raid_data.boss_for(151, 30, "kanto"), game="yellow", rom=FakeRom(), gm=object())
+    pb.memory[raid_gb.YellowSpec.IN_BATTLE] = 1
+    rb.phase = "fight"
+    rb.ui = "menu"
+    rb._open_decision("menu")
+    rb.flee()
+    assert rb.phase == "fleeing" and rb.auto
+    assert pb.memory[raid_gb.YellowSpec.ENEMY_SPEED + 1] == 1          # boss speed 1: the player's RUN works
+    for _ in range(200):
+        rb.frame += 1
+        rb._autopilot()
+    assert pb.presses[:5] == ["up", "left", "down", "right", "a"]
+

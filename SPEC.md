@@ -1057,6 +1057,8 @@ the pool never goes below 0. Damage log per player (claimed, dealt, hits) in the
   inside it (seeded by the server's `salt` + n) such that it closes inside the slot, and stays `YL_RAID_OPEN`
   minutes (default 15). `YL_RAIDS=off` turns raids off (no `raids` feature). If nobody who can raid is online at
   that moment, the server retries every few seconds until the raid could no longer fit into the slot (skipped).
+  Players inside a Soul Link run don't count as "can raid". A raid never opens less than `min(60 min, every / 2)`
+  after the previous one ended (a slot's raid that opened late doesn't make the next one follow 15 minutes later).
 - **Region**: random, weighted by the number of online raid-capable clients (they sent `raid_reach`) whose
   `library.games` has that region's game (kanto = `yellow`, johto = `crystal`, sinnoh = `platinum`); a region without
   spot data never gets a raid.
@@ -1091,7 +1093,7 @@ the pool never goes below 0. Damage log per player (claimed, dealt, hits) in the
 | C→S | `raid_join` | `id`, `level` (1-100: the boss's level in the joiner's game, history only) | answered `raid_joined {id, raid}` (the pool already includes the joiner's bars) or `raid_refused {id, reason}` (shown as a toast, not red): over / boss already down / time up / "you're out of this raid" (after a blackout, leaving, or a miss) / in a Soul Link run / the raid is in another region / in a trade or battle. A `fighting` participant joining again (reconnect) gets `raid_joined` without new bars |
 | C→S | `raid_damage` | `id`, `dealt` (int, running total in milli-bars, 0..10^7) | unknown/finished raid or not fighting: ignored silently |
 | S→C | `raid_down` | `id`, `chance` (0..1 = dealt / everyone's dealt), `catch` bool (the server's roll) | to every participant still `fighting` when the pool hits 0 (again after a reconnect until they reported); the game then allows one ball, which catches iff `catch` |
-| C→S | `raid_result` | `id`, `outcome`: `caught` \| `missed` \| `blackout` \| `left` \| `fled` | ends that player's raid; `caught` -> system line `Ilias caught Rayquaza!`. Stale ids / repeats: ignored |
+| C→S | `raid_result` | `id`, `outcome`: `caught` \| `missed` \| `blackout` \| `left` \| `fled` \| `unstarted` | ends that player's raid; `caught` -> system line `Ilias caught Rayquaza!`. `unstarted` (the raid battle never started in that game, e.g. no quiet moment within 20 s): the player is taken off the raid as if they had never joined (no damage dealt yet: their bars are taken back off the pool, at most down to 1 milli-bar) and can join again. Stale ids / repeats: ignored |
 | S→C | `raid_end` | `id`, `reason`: `down` \| `time`, `caught` [names], `raid` | the raid is over (phase `over`); `time` = the boss fled in every game still fighting. Plus a system line: `Rayquaza fled - the raid is over.` / `Raid over: Ilias and Alex caught Rayquaza!` / `Raid over: Rayquaza got away.` |
 
 Phase `down` ends when every participant who was fighting at that moment reported, or 3 minutes after it began
@@ -1099,7 +1101,7 @@ Phase `down` ends when every participant who was fighting at that moment reporte
 `raid_` messages share the trade/battle rate budget (never dropped behind `state` spam). Players who are
 `fighting` count as **busy**: no trade, battle, challenge or trade-evolution requests to or from them.
 
-`library` gets an optional `raid_reach` = `{region: badge count}` (clients 0.7.9+; Yellow badges, Crystal Johto + Kanto
+`library` gets an optional `raid_reach` = `{region: badge count}` (clients 0.7.9+; Yellow badges, Crystal Johto
 badges, Platinum badges; regions it doesn't know yet = 0) - a client that sends it can raid. Clients only send
 `raid_*` messages to servers listing `raids` in `welcome.features`; older clients just see the chat lines.
 
@@ -1110,6 +1112,11 @@ badges, Platinum badges; regions it doesn't know yet = 0) - a client that sends 
   module; the edge-of-screen arrow with the distance in steps is ours), the join dialog (A at the den ->
   "Join the raid against Rayquaza?" with the warnings: party+box full, Soul Link, wrong region), the battle banner
   (group HP in bars, players, time left, the **10-second move timer ring**: on timeout `auto_pick()`).
+- While the player is already in the raid (joining / starting / fighting) A at the den goes to the game as usual
+  and the join check refuses; a repeated `raid_joined` (reconnect) never resets the damage count. A raid battle
+  keeps the raid it belongs to: a new raid's notice during it waits until that battle is over. If the battle
+  can't start within 20 s (no quiet moment), the client sends `raid_result unstarted` and says "press A at the
+  den to try again".
 - Gating: `App.full`, main game (not a Soul Link run: the notice says "back in your main game"), the raid's game =
   the current game, not in a trade/battle, `RaidBattle.can_join()`.
 - During the raid battle: fast-forward off; no resume snapshot (a forced one right before the battle starts, so

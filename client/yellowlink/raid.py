@@ -247,9 +247,14 @@ def draw_pool_bar(surf, rect, pool, pool_max):
 CARD_H = 92                      # the sidebar raid card's height (incl. the gap below it)
 
 
-def card_height(app) -> int:
+CARD_H_COMPACT = 74              # without the "In: ..." row (small windows: the chat must stay usable)
+
+
+def card_height(app, compact: bool = False) -> int:
     """Height of the sidebar raid card (0 = no card)."""
-    return CARD_H if getattr(app, "raid", None) is not None else 0
+    if getattr(app, "raid", None) is None:
+        return 0
+    return CARD_H_COMPACT if compact else CARD_H
 
 
 def _fit(font, s: str, width: int) -> str:
@@ -261,10 +266,11 @@ def _fit(font, s: str, width: int) -> str:
     return s.rstrip() + "…"
 
 
-def draw_card(surf, f, app, x, y, w) -> int:
-    """The sidebar raid card at (x, y), w wide (compact: GB 3x windows are 480 px tall). Returns its height."""
+def draw_card(surf, f, app, x, y, w, compact: bool = False) -> int:
+    """The sidebar raid card at (x, y), w wide (GB 3x windows are 480 px tall; `compact` leaves out the "In: ..."
+    row and puts the card's button where the bars text goes). Returns its height."""
     raid = app.raid
-    h = card_height(app)
+    h = card_height(app, compact)
     if not h:
         return 0
     now = app.server_time() if hasattr(app, "server_time") else time.time()
@@ -295,17 +301,24 @@ def draw_card(surf, f, app, x, y, w) -> int:
     draw_pool_bar(surf, pygame.Rect(ix, r.y + 42, inner, 8), pool, pool_max)
     # row 4: status (or my damage while fighting) ........ 2.6 / 4 bars
     hp = f"{bars_text(pool)} / {bars_text(pool_max)} bars" if pool_max else ""
-    hp_w = f.small.size(hp)[0] + 8 if hp else 0
+    btn = app.raid_card_button()
+    if compact and btn is not None:
+        hp = ""
     line, color = app.raid_status_line()
     if fighting and app.raid_phase != "catch":
         mine = app.raid_meter.total if app.raid_meter else 0
         total = max(sum(int(p.get("dealt", 0)) for p in raid.get("participants") or []), mine)
         line = f"You: {bars_text(mine)} bars" + (f" ({int(round(100 * mine / total))}%)" if total else "")
+    hp_w = f.small.size(hp)[0] + 8 if hp else 0
     if hp:
         ui.text(surf, f.small, hp, (right_x, r.y + 54), ui.DIM, anchor="topright")
+    if compact:
+        if btn is not None:
+            hp_w = _card_button(surf, f, app, btn, right_x, r.y + 52) + 8
+        ui.text(surf, f.small, _fit(f.small, line, inner - hp_w), (ix, r.y + 54), color)
+        return h
     ui.text(surf, f.small, _fit(f.small, line, inner - hp_w), (ix, r.y + 54), color)
     # row 5: who's in ........ [Go there]
-    btn = app.raid_card_button()
     if phase == "over":
         names = [p.get("name", "?") for p in raid.get("participants") or []]
         who = "Raiders: " + (", ".join(names) if names else "nobody")
@@ -314,16 +327,21 @@ def draw_card(surf, f, app, x, y, w) -> int:
         who = "In: " + (", ".join(names) if names else "nobody yet")
     who_w = inner
     if btn is not None:
-        label, cb = btn
-        bw = f.small.size(label)[0] + 18
-        br = pygame.Rect(right_x - bw, r.y + 68, bw, 18)
-        hover = br.collidepoint(pygame.mouse.get_pos())
-        pygame.draw.rect(surf, CARD_FIGHT if hover else CARD_RIM, br, border_radius=6)
-        ui.text(surf, f.small, label, br.center, (30, 20, 20), anchor="center")
-        app.click_targets.append((br, cb, label))
-        who_w = br.x - ix - 6
+        who_w = inner - _card_button(surf, f, app, btn, right_x, r.y + 68) - 6
     ui.text(surf, f.small, _fit(f.small, who, who_w), (ix, r.y + 70), ui.DIM)
     return h
+
+
+def _card_button(surf, f, app, btn, right_x, y) -> int:
+    """The card's small button ending at right_x; returns its width."""
+    label, cb = btn
+    bw = f.small.size(label)[0] + 18
+    br = pygame.Rect(right_x - bw, y, bw, 18)
+    hover = br.collidepoint(pygame.mouse.get_pos())
+    pygame.draw.rect(surf, CARD_FIGHT if hover else CARD_RIM, br, border_radius=6)
+    ui.text(surf, f.small, label, br.center, (30, 20, 20), anchor="center")
+    app.click_targets.append((br, cb, label))
+    return bw
 
 
 def shiny_color():
@@ -331,37 +349,76 @@ def shiny_color():
 
 
 def draw_confirm(surf, f, app, game_w, game_h, offset):
-    """The join dialog ("Join the raid against Mew?") - buttons Join / Not now."""
+    """The join dialog ("Join the raid against Mew?") - buttons Join / Not now. Fits every window size: GB 2x
+    (320 x 288) and DS 1.0x (256 x 384) up; the text shrinks to the small font when space is short, the buttons
+    share the dialog's width, the key hint only shows where it doesn't touch them. Returns the dialog's rect."""
+    from . import panels
     c = app.raid_confirm
     raid = app.raid or {}
     name = boss_label(raid)
     title = f"Raid: {name[:1].upper()}{name[1:]}"
     now = app.server_time() if hasattr(app, "server_time") else time.time()
-    width = min(game_w - 40, 520) - 36
-    lines = []
+    w = max(160, min(game_w - 16, 520))
+    pad = 12 if w < 360 else 18
+    inner = w - 2 * pad
     if c.get("ok"):
         lv = c.get("level")
-        lines += list(ui.wrap(f.body, f"Join the raid against {name}" + (f" (Lv {lv})" if lv else "") + "?", width))
+        head = f"Join the raid against {name}" + (f" (Lv {lv})" if lv else "") + "?"
         left = time_text(raid.get("closes", now) - now)
         dim = (f"You add {raid.get('bars_per_player', 2)} bars to the group's HP. {left} left. Your catch chance = "
                "your share of all the damage; blacking out = you're out.")
-        lines += [(ln, ui.DIM) for ln in ui.wrap(f.body, dim, width)]      # ui.modal draws lines in f.body
-        lines.append("")
-        footer = "[Y] / [N]" if game_w < 520 else "[Y] join    [N] not now"
+        paras = [(head, ui.TEXT), (dim, ui.DIM)]
+        labels = ("Join", "Not now")
+        hint = "[Y] join    [N] not now"
     else:
-        lines += [(ln, ui.BAD) for ln in ui.wrap(f.body, c.get("why") or "You can't join right now.", width)]
-        lines.append("")
-        footer = "[Esc] close"
-    r = ui.modal(surf, f, game_w, game_h, title, lines, footer)
-    from . import panels
-    if c.get("ok"):
-        panels.button(surf, app, f, pygame.Rect(r.right - 250, r.bottom - 52, 110, 36), "Join",
-                      lambda: app.raid_answer(True), offset=offset, primary=True)
-        panels.button(surf, app, f, pygame.Rect(r.right - 128, r.bottom - 52, 110, 36), "Not now",
-                      lambda: app.raid_answer(False), offset=offset)
-    else:
-        panels.button(surf, app, f, pygame.Rect(r.right - 128, r.bottom - 52, 110, 36), "OK",
-                      lambda: app.raid_answer(False), offset=offset, primary=True)
+        paras = [(c.get("why") or "You can't join right now.", ui.BAD)]
+        labels = ("OK",)
+        hint = "[Esc] close"
+    title_font = f.title if w >= 300 else f.body
+    btn_h = 36 if game_h >= 300 else 30
+    max_h = game_h - 16
+    for font in (f.body, f.small):                     # the body font if it fits, else the small one
+        lines = [(ln, col) for text_, col in paras for ln in ui.wrap(font, text_, inner)]
+        lh = font.get_height() + 3
+        hint_h = f.small.get_height() + 6
+        h = pad + title_font.get_height() + 10 + len(lines) * lh + 12 + btn_h + pad
+        if h + hint_h <= max_h or font is f.small:
+            break
+    show_hint = h + hint_h <= max_h and w >= 300
+    if show_hint:
+        h += hint_h
+    if h > max_h:                                       # still too tall: drop dim lines from the end
+        while h > max_h and len(lines) > 1:
+            lines.pop()
+            h -= lh
+    r = pygame.Rect(0, 0, w, h)
+    r.center = (game_w // 2, game_h // 2)
+    shade = pygame.Surface((game_w, game_h), pygame.SRCALPHA)
+    shade.fill((0, 0, 0, 120))
+    surf.blit(shade, (0, 0))
+    ui.box(surf, r, ui.PANEL, ui.ACCENT, 10)
+    y = r.y + pad
+    ui.text(surf, title_font, _fit(title_font, title, inner), (r.x + pad, y), ui.ACCENT)
+    y += title_font.get_height() + 10
+    for ln, col in lines:
+        ui.text(surf, font, ln, (r.x + pad, y), col)
+        y += lh
+    by = r.bottom - pad - btn_h - (hint_h if show_hint else 0)
+    gap = 10
+    bw = (inner - gap * (len(labels) - 1)) // len(labels) if len(labels) > 1 else min(inner, 120)
+    callbacks = (lambda: app.raid_answer(True), lambda: app.raid_answer(False)) if c.get("ok") \
+        else (lambda: app.raid_answer(False),)
+    bx = r.right - pad - (bw * len(labels) + gap * (len(labels) - 1))
+    rects = []
+    for i, (label, cb) in enumerate(zip(labels, callbacks)):
+        br = pygame.Rect(bx + i * (bw + gap), by, bw, btn_h)
+        panels.button(surf, app, f, br, label, cb, offset=offset, primary=(i == 0))
+        rects.append(br)
+    if show_hint:
+        ui.text(surf, f.small, hint, (r.x + pad, r.bottom - pad - f.small.get_height() + 2), ui.DIM)
+    app.raid_dialog_rects = {"dialog": r, "buttons": rects,
+                             "hint": pygame.Rect(r.x + pad, r.bottom - pad - hint_h + 6, inner, hint_h - 6)
+                             if show_hint else None}
     return r
 
 
@@ -390,6 +447,7 @@ class RaidMixin:
         self.raid_phase = "idle"
         self.raid_battle = None          # RaidBattle once started (no resume snapshot while it exists)
         self.raid_pending = None         # RaidBattle made for the join dialog / waiting to start
+        self.raid_next = None            # a new raid that came while our raid battle (of the old one) still runs
         self.raid_den = None
         self.raid_confirm = None         # join dialog {"ok", "why", "level"}
         self.raid_timer = MoveTimer()
@@ -483,9 +541,26 @@ class RaidMixin:
     def _raid_valid(self, raid) -> bool:
         return isinstance(raid, dict) and isinstance(raid.get("id"), str) and isinstance(raid.get("spot"), dict)
 
+    def _raid_keep_battle(self, raid, fresh=False) -> bool:
+        """A raid battle runs for another raid id: keep it (its events and result belong to its own raid) and
+        hold the new raid until that battle is over. True = held."""
+        if self.raid_battle is None or self.raid is None or raid["id"] == self.raid.get("id"):
+            return False
+        if raid.get("phase") == "over":
+            if self.raid_next is not None and self.raid_next.get("id") == raid["id"]:
+                self.raid_next = None
+            return True
+        if fresh and (self.raid_next or {}).get("id") != raid["id"]:
+            self.toast(notice_text(raid) + " (after this battle)", 7, CARD_FIGHT)
+            self.play_raid_horn()
+        self.raid_next = raid
+        return True
+
     def on_raid_open(self, msg):
         raid = msg.get("raid")
         if not self._raid_valid(raid):
+            return
+        if self._raid_keep_battle(raid, bool(msg.get("fresh"))):
             return
         new = self.raid is None or self.raid.get("id") != raid["id"]
         if new:
@@ -541,6 +616,8 @@ class RaidMixin:
         raid = msg.get("raid")
         if not self._raid_valid(raid):
             return
+        if self._raid_keep_battle(raid):
+            return
         if self.raid is None or self.raid.get("id") != raid["id"]:
             if raid.get("phase") == "over":
                 return
@@ -567,15 +644,16 @@ class RaidMixin:
         self.raid_phase = "starting"
         self.raid_start_by = time.time() + START_WAIT
         self.raid_snapshot_done = False
-        self.raid_meter = DamageMeter()
-        self.raid_sent = 0
+        if self.raid_meter is None:                      # never reset a running count (a repeated raid_joined)
+            self.raid_meter = DamageMeter()
+            self.raid_sent = 0
         log.info("raid %s joined: pool %s/%s", raid["id"], raid.get("pool"), raid.get("pool_max"))
 
     def on_raid_refused(self, msg):
         if self.raid is None or msg.get("id") != self.raid.get("id"):
             return
         reason = str(msg.get("reason") or "You can't join right now.")[:120]
-        self.toast(reason, 5, ui.BAD)
+        self.toast(reason, 5, ui.TEXT)                  # a refusal, not an error (SPEC.md section 12: no red)
         if self.raid_phase == "joining":
             self.raid_phase = "done" if "out of" in reason else "open"
             self.raid_pending = None
@@ -608,6 +686,9 @@ class RaidMixin:
         self.sys_msg(text, ui.ACCENT)
 
     def on_raid_end(self, msg):
+        if self.raid_next is not None and msg.get("id") == self.raid_next.get("id"):
+            self.raid_next = None                        # the held raid ended before our battle did
+            return
         if self.raid is None or msg.get("id") != self.raid.get("id"):
             return
         raid = msg.get("raid")
@@ -727,7 +808,7 @@ class RaidMixin:
         try:
             if b in DIRECTIONS and den.blocks(self.game, b):
                 return True
-            if b == "a" and den.pressed_a(self.game):
+            if b == "a" and not self.raid_busy() and den.pressed_a(self.game):
                 self.raid_open_dialog()
                 return True
         except Exception:  # noqa: BLE001
@@ -804,6 +885,8 @@ class RaidMixin:
             return False, "You need to be connected to the server."
         if self.trade or self.battle or self.live:
             return False, "Finish your trade or battle first."
+        if self.raid_busy():
+            return False, "You're already in this raid."
         me = self._raid_me()
         if me is not None and me.get("state") != "fighting":
             return False, "You're out of this raid."
@@ -873,6 +956,11 @@ class RaidMixin:
         self._raid_reach_step()
         if self.raid_phase == "starting" and self.raid_battle is None:
             self._raid_try_start(now)
+        if self.raid_next is not None and self.raid_battle is None:
+            nxt, self.raid_next = self.raid_next, None     # the battle of the old raid is over: on to the new one
+            self.raid = None
+            self._raid_reset()
+            self.on_raid_open({"raid": nxt, "fresh": False})
         b = self.raid_battle
         if b is None:
             return
@@ -903,7 +991,8 @@ class RaidMixin:
             self._raid_give_up("The raid battle couldn't start.")
             return
         if now > self.raid_start_by:
-            self._raid_give_up("Couldn't find a quiet moment to start the raid battle - you left the raid.")
+            self._raid_give_up("The raid battle couldn't start (stand still in the overworld, no menu open) - "
+                               "press A at the den to try again.")
             return
         try:
             if not self.game.is_safe():
@@ -923,10 +1012,16 @@ class RaidMixin:
             self._raid_give_up("The raid battle couldn't start - press F3 to send a report.")
 
     def _raid_give_up(self, why):
+        """The raid battle never started: not a "left" - the server takes us off the raid as if we had never
+        joined (`unstarted`), so A at the den works again while the raid is open."""
         self.raid_pending = None
-        self._raid_report("left")
-        self.raid_phase = "done"
-        self.toast(why, 6, ui.BAD)
+        self.raid_meter = None
+        self.raid_sent = 0
+        if self.raid_on() and self.raid is not None:
+            self.net.send({"type": "raid_result", "id": self.raid["id"], "outcome": "unstarted"})
+            log.info("raid %s: battle didn't start -> unstarted", self.raid["id"])
+        self.raid_phase = "open" if (self.raid or {}).get("phase") == "open" else "over"
+        self.toast(why, 7, ui.ACCENT)
 
     def _raid_disable_fast(self):
         if getattr(self, "fast", False):

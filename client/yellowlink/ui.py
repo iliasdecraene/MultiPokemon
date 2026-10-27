@@ -90,6 +90,31 @@ def name_tag(surf, font, name, center_x, bottom_y, color=TEXT):
     surf.blit(img, r)
 
 
+HEADER_H, UPDATE_H, VOLUME_H, WIDE_H = 70, 48, 28, 32      # sidebar rows from the top
+HINT_H, BTN_H = 92, 52                                      # key hints + Multiplayer / Regions buttons
+CHAT_MIN = 110                                               # the chat box stays usable (input + a few lines)
+
+
+def sidebar_plan(h: int, update: bool, raid_card: bool) -> dict:
+    """What fits above the chat on a window h pixels tall: with a raid card (+ an update banner) on small windows
+    (GB 2x/3x: 480 px) the wide-view row goes first (V still toggles it), then the card gets compact.
+    {"wide": bool, "compact": bool, "chat": chat height without trainer rows}."""
+    from . import raid as raid_mod
+    top = HEADER_H + (UPDATE_H if update else 0) + VOLUME_H
+    plan = {"wide": True, "compact": False}
+
+    def chat():
+        card = ((raid_mod.CARD_H_COMPACT if plan["compact"] else raid_mod.CARD_H) - 6) if raid_card else 0
+        return h - HINT_H - BTN_H - 4 - (top + (WIDE_H if plan["wide"] else 0) + card)
+
+    if raid_card and chat() < CHAT_MIN:
+        plan["wide"] = False
+    if raid_card and chat() < CHAT_MIN:
+        plan["compact"] = True
+    plan["chat"] = chat()
+    return plan
+
+
 def draw_sidebar(surf, f: Fonts, app, x0, h):
     pygame.draw.rect(surf, BG, (x0, 0, SIDEBAR_W, h))
     x, y = x0 + 14, 12
@@ -142,30 +167,35 @@ def draw_sidebar(surf, f: Fonts, app, x0, h):
     app.volume_bar = bar
     y += 28
 
+    plan = sidebar_plan(h, bool(app.update_available), getattr(app, "raid", None) is not None)
     # wide view toggle
     wr = pygame.Rect(x - 2, y - 2, SIDEBAR_W - 24, 26)
+    if not plan["wide"]:
+        wr = None
     available = app.wv is not None
-    text(surf, f.small, "Wide view", (x, y + 3), TEXT if available else DIM)
-    sw = pygame.Rect(x0 + SIDEBAR_W - 62, y, 46, 22)
-    on = bool(app.wide)
-    pygame.draw.rect(surf, ACCENT if on else PANEL_HI, sw, border_radius=11)
-    pygame.draw.circle(surf, TEXT, (sw.right - 11 if on else sw.x + 11, sw.centery), 8)
-    text(surf, f.small, "see more of the map" if available else "Yellow only", (x + 80, y + 3), DIM)
-    if available:
-        app.click_targets.append((wr, app.toggle_wide, "Wide view"))
-    else:
-        app.click_targets.append((wr, lambda: app.toast("Wide view works in Yellow for now.", 3, BAD), "Wide view"))
-    y += 32
+    if wr is not None:                                  # (no room on a small window with a raid card: V toggles)
+        text(surf, f.small, "Wide view", (x, y + 3), TEXT if available else DIM)
+        sw = pygame.Rect(x0 + SIDEBAR_W - 62, y, 46, 22)
+        on = bool(app.wide)
+        pygame.draw.rect(surf, ACCENT if on else PANEL_HI, sw, border_radius=11)
+        pygame.draw.circle(surf, TEXT, (sw.right - 11 if on else sw.x + 11, sw.centery), 8)
+        text(surf, f.small, "see more of the map" if available else "Yellow only", (x + 80, y + 3), DIM)
+        if available:
+            app.click_targets.append((wr, app.toggle_wide, "Wide view"))
+        else:
+            app.click_targets.append((wr, lambda: app.toast("Wide view works in Yellow for now.", 3, BAD),
+                                      "Wide view"))
+        y += WIDE_H
 
-    hint_h = 92
-    btn_h = 52   # Multiplayer / Regions buttons above the key hints
+    hint_h = HINT_H
+    btn_h = BTN_H
     raid_card = getattr(app, "raid", None) is not None
     if raid_card:                                       # the raid card (SPEC.md section 12, raid.py)
         from . import raid as raid_mod
-        y += raid_mod.draw_card(surf, f, app, x0 + 10, y - 4, SIDEBAR_W - 20) - 2
+        y += raid_mod.draw_card(surf, f, app, x0 + 10, y - 4, SIDEBAR_W - 20, compact=plan["compact"]) - 6
     roster = app.sorted_roster()
     # with a raid card on a small window (GB 3x) fewer trainer rows - or none - so the chat stays usable
-    rows = 6 if not raid_card else max(0, min(6, (h - hint_h - btn_h - 4 - y - 32 - 110) // 20))
+    rows = 6 if not raid_card else max(0, min(6, (h - hint_h - btn_h - 4 - y - 32 - CHAT_MIN) // 20))
     if raid_card and rows == 0:
         roster = []
     else:

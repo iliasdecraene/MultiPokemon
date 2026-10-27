@@ -263,8 +263,9 @@ def spawn(region, species, spot, name, shiny=False):
     return r
 
 
-def join(app, d):
-    """Bump into the den (the step is dropped), then A -> the dialog -> Join."""
+def join(app, d, shots_at=()):
+    """Bump into the den (the step is dropped), then A -> the dialog (photographed at `shots_at` = [(name,
+    scale)]) -> Join."""
     app.press(d, True)
     run(30, apps=[app])
     app.press(d, False)
@@ -273,6 +274,12 @@ def join(app, d):
     app.press("a", False)
     c = app.raid_confirm
     ok = app.mode == "raid_confirm" and bool(c and c["ok"])
+    if ok and shots_at:
+        scale0 = app.cfg.get(app._scale_key())
+        for name, scale in shots_at:
+            shot(app, name, scale)
+        shot(app, "_restore.png", scale0)
+        os.remove(shots / "_restore.png")
     if ok:
         c["shown"] = 0
         app.raid_answer(True)
@@ -338,6 +345,8 @@ def scenario_kanto():
     A.press("a", False)
     check("A after bumping into the den: the join dialog (can join)",
           A.mode == "raid_confirm" and A.raid_confirm and A.raid_confirm["ok"], str(A.raid_confirm))
+    shot(A, "3_join_dialog_yellow_3x.png", 3)
+    shot(A, "3b_join_dialog_yellow_2x.png", 2)
     shot(A, "3_join_dialog_yellow_3x.png", 3)
     A.raid_confirm["shown"] = 0
     A.raid_answer(True)
@@ -451,7 +460,8 @@ def scenario_platinum(dawn):
     check("Sinnoh raid reached Dawn (den in her game)", wait(15, lambda: D.raid and D.raid_den is not None))
     run(20, apps=[D])
     shot(D, "7_notice_card_den_platinum_1.5x.png", 1.5)
-    ok, c = join(D, "up")
+    ok, c = join(D, "up", shots_at=[("7b_join_dialog_platinum_1.0x.png", 1.0),
+                                    ("7c_join_dialog_platinum_1.5x.png", 1.5)])
     check("Dawn joins at the den", ok, str(c))
     check("Platinum raid battle started", wait(60, lambda: D.raid_fighting()), D.raid_phase)
     pre = party_dex(D)

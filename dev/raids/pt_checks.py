@@ -303,6 +303,145 @@ def scenario_afk_catch(core):
               g.outcome(), balls0, b1, [n for _f, n in rb.log][-4:]))
 
 
+def scenario_trapped_flee(core):
+    """M1: Mean Look on the boss + Shadow Tag on the player's lead, then time over: Teleport would fail
+    (Battler_IsTrappedMsg) - the boss holds a Smoke Ball while fleeing and the player runs (boss speed 1)."""
+    print("== platinum: time over while Mean Look + Shadow Tag trap the boss ==", flush=True)
+    g = PT(core, "pt_sl_route202.dsst")
+    rb = g.raid(boss(LATIAS, 12, [SPLASH]), 5000)
+    st = {"n": 0, "auto_at": None}
+
+    def on_event(ev):
+        if ev["type"] == "need_input" and ev["what"] == "menu":
+            st["n"] += 1
+            ctx = rb._ctx()
+            b0 = ctx + raid_pt.CTX_BATTLE_MONS
+            if st["n"] == 1:                       # test only: the lead knows Mean Look and has Shadow Tag
+                g.d.w16(b0 + raid_pt.BM_MOVES, 212)
+                for i in range(1, 4):
+                    g.d.w16(b0 + raid_pt.BM_MOVES + 2 * i, 0)
+                g.d.w8(b0 + raid_pt.BM_PP, 5)
+                g.d.w8(b0 + raid_pt.BM_ABILITY, 23)
+                st["auto_at"] = g.frame + 40
+            elif not rb.flee_asked:
+                rb.flee()
+
+    g.on_event = on_event
+    for _ in range(20000):
+        g.tick()
+        if st["auto_at"] is not None and g.frame >= st["auto_at"]:
+            st["auto_at"] = None
+            rb.auto_pick()
+        if g.ended():
+            break
+    for _ in range(600):
+        if g.pm.is_safe():
+            break
+        g.tick()
+    CHECK("platinum: trapped boss + time over -> fled + ended(fled), back in the overworld",
+          g.outcome() == "fled" and g.pm.is_safe(), "outcome %s result %d notes %s" % (
+              g.outcome(), rb.result, [n for _f, n in rb.log][-4:]))
+
+
+def scenario_start_refused(core):
+    """M2: the field gets a task (a trainer's sight line, a script...) during the 4 injected calls: the start is
+    refused, the FieldBattleDTO is freed again, no battle. The task is simulated (the precheck says "busy" after the
+    second call); then a normal raid starts fine (nothing left behind)."""
+    print("== platinum: the field gets busy while the battle is being started ==", flush=True)
+    g = PT(core, "pt_sl_route202.dsst")
+    g.rb = rb = raid_pt.RaidBattle(g.d, boss(LATIAS, 12, [SPLASH]), pm=g.pm, data=DATA)
+    for _ in range(300):
+        if g.pm.is_safe():
+            break
+        g.tick()
+    assert rb.start(5000)
+    real = rb.caller.precheck
+    rb.caller.precheck = lambda: len([x for x in rb.caller.log if x.startswith("call")]) < 2 and real()
+    for _ in range(300):
+        g.tick()
+        if g.ended():
+            break
+    g.tick(120)
+    calls = rb.caller.log
+    CHECK("platinum: start refused -> ended(error), FieldBattleDTO_Free called, no battle, still safe",
+          g.outcome() == "error" and "refused" in calls and "call %08X" % raid_pt.FieldBattleDTO_Free in calls
+          and not g.pm.in_battle() and g.pm.is_safe() and not rb.hooks.addrs, "outcome %s calls %s" % (
+              g.outcome(), calls))
+    g.events = []
+    rb2 = g.raid(boss(LATIAS, 12, [SPLASH]), 5000)
+    ok = False
+    for _ in range(3000):
+        g.tick()
+        if rb2.max_hp:
+            ok = True
+            break
+    CHECK("platinum: ... then a normal raid battle starts", ok and g.pm.in_battle())
+    rb2.flee()
+    drive(g, rb2, 8000)
+
+
+def scenario_deoxys_form(core):
+    """L7: the server's Deoxys form (here Attack Forme) is the boss's form, with that form's stats."""
+    print("== platinum: Deoxys in its Attack Forme ==", flush=True)
+    g = PT(core, "pt_sl_route202.dsst")
+    b = boss(386, 20, [SPLASH])
+    b["form"] = 1
+    rb = g.raid(b, 5000)
+    for _ in range(3000):
+        g.tick()
+        if rb.max_hp:
+            break
+    ctx = rb._ctx()
+    bm = rb._bmon(ctx)
+    form = g.d.r8(bm + 0x26) & 0x1F
+    atk = g.d.r16(bm + 2)
+    pkm = pk4.PK4(pk4._plain_of(g.d.read(g.d.r32(rb.dto + raid_pt.DTO_PARTIES + 4) + 8, pk4.PARTY_SIZE)))
+    want = pk4.calc_stats(pkm, DATA, 20)
+    CHECK("platinum: Deoxys boss in form 1 with the form's stats (attack %d)" % atk,
+          form == 1 and pkm.form == 1 and atk == want[1] and rb.max_hp == want[0], "form %d want %s" % (form, want))
+    rb.flee()
+    drive(g, rb, 8000)
+    CHECK("platinum: ... and it leaves (fled)", g.outcome() == "fled", str(g.outcome()))
+
+
+def scenario_ball_page2(core):
+    """L10: the cheapest ball is on the pocket's second page (10 kinds of balls): AFK auto-pick still finds it."""
+    print("== platinum: AFK throw with the Poké Ball on the second bag page ==", flush=True)
+    from yellowlink import platinum as P
+    g = PT(core, "pt_sl_route202.dsst")
+    g.tick(10)
+    body = g.pm.save_body()
+    for i, it in enumerate([1, 2, 3, 6, 7, 8, 9, 10, 11, 4]):         # test only: write the ball pocket
+        core.w32(body + P.PAGE_BAG + P.BAG_BALLS + 4 * i, it | (3 << 16))
+    balls0 = g.balls()
+    n0 = len(g.party())
+    rb = g.raid(boss(LATIAS, 12, [SPLASH]), 1)
+    st = {"auto_at": None, "down": False, "last": 0}
+
+    def on_event(ev):
+        if ev["type"] == "need_input":
+            st["auto_at"] = g.frame + 40
+
+    g.on_event = on_event
+    for _ in range(20000):
+        g.tick()
+        if st["auto_at"] is not None and g.frame >= st["auto_at"]:
+            st["auto_at"] = None
+            rb.auto_pick()
+        if g.pool == 0 and not st["down"] and rb.phase == "fight":
+            st["down"] = True
+            rb.group_down(1.0)
+        if rb.throws and rb.decision is None and not g.script and g.frame - st["last"] > 80 and not g.pm.is_safe():
+            after_catch_input(g)
+            st["last"] = g.frame
+        if g.ended():
+            break
+    b1 = g.balls()
+    used = {k: balls0[k] - b1.get(k, 0) for k in balls0 if balls0[k] != b1.get(k, 0)}
+    CHECK("platinum: AFK throw used the Poké Ball from page 2 (nothing else), caught",
+          g.outcome() == "caught" and len(g.party()) == n0 + 1 and used == {POKE_BALL: 1}, "used %s" % used)
+
+
 def scenario_flee(core):
     print("== platinum: time over -> the boss teleports away ==", flush=True)
     g = PT(core, "pt_sl_route202.dsst")
@@ -440,7 +579,11 @@ def run(check, info, states, out):
         scenario_catch(core)
         scenario_miss(core)
         scenario_afk_catch(core)
+        scenario_ball_page2(core)
         scenario_flee(core)
+        scenario_trapped_flee(core)
+        scenario_start_refused(core)
+        scenario_deoxys_form(core)
         scenario_next_mon_blackout(core)
         scenario_perish_dbond(core)
         scenario_den(core)

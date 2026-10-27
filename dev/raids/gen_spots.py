@@ -42,7 +42,8 @@ KANTO_REACH = {
     "ROUTE_3": 1, "ROUTE_4": 1, "CERULEAN_CITY": 1, "ROUTE_24": 1, "ROUTE_25": 1, "ROUTE_5": 1, "ROUTE_6": 1,
     "VERMILION_CITY": 1, "ROUTE_11": 1,
     "ROUTE_9": 2, "ROUTE_10": 2, "LAVENDER_TOWN": 2, "ROUTE_8": 2, "ROUTE_7": 2, "CELADON_CITY": 2, "ROUTE_12": 2,
-    "ROUTE_16": 4, "ROUTE_17": 4, "ROUTE_18": 4, "FUCHSIA_CITY": 4, "ROUTE_13": 4, "ROUTE_14": 4, "ROUTE_15": 4,
+    # (no Route 17: Cycling Road, forced downhill on the bike - no dens)
+    "ROUTE_16": 4, "ROUTE_18": 4, "FUCHSIA_CITY": 4, "ROUTE_13": 4, "ROUTE_14": 4, "ROUTE_15": 4,
     "SAFFRON_CITY": 4,
     "ROUTE_19": 5, "ROUTE_20": 5, "ROUTE_21": 5, "CINNABAR_ISLAND": 5,
     "ROUTE_23": 8, "INDIGO_PLATEAU": 8,
@@ -154,6 +155,12 @@ def edge_seeds(W, H, conns, warps):
 
 
 # --- Kanto (pokeyellow) ----------------------------------------------------------------------------------------
+# Cycling Road (bike only): Route 17 is left out; on Routes 16 and 18 the flood fill doesn't start from the Route 17
+# edge or from the gate doors that lead onto the cycling side (pret data/maps/objects/Route16.asm / Route18.asm), so
+# their bike-only western parts get no dens.
+KANTO_NO_SEEDS = {"ROUTE_16": ({"south"}, {(17, 10), (17, 11)}), "ROUTE_18": ({"north"}, {(33, 8), (33, 9)})}
+
+
 def kanto():
     def read(p):
         with open(os.path.join(PRET_Y, p), encoding="utf-8") as f:
@@ -210,7 +217,9 @@ def kanto():
         warps = [(int(a), int(b)) for a, b in re.findall(r"warp_event\s+(\d+),\s*(\d+)", obj)]
         signs = [(int(a), int(b)) for a, b in re.findall(r"bg_event\s+(\d+),\s*(\d+)", obj)]
         npcs = [(int(a), int(b)) for a, b in re.findall(r"object_event\s+(\d+),\s*(\d+)", obj)]
-        reach = flood(W, H, walk, edge_seeds(W, H, conns, warps))
+        no_conn, no_warps = KANTO_NO_SEEDS.get(const, (set(), set()))
+        reach = flood(W, H, walk, edge_seeds(W, H, [c for c in conns if c not in no_conn],
+                                              [w for w in warps if w not in no_warps]))
         blocked = around(warps + signs + npcs, NEAR)
         spots = thin(good_squares(W, H, ground, reach, blocked))
         if spots:

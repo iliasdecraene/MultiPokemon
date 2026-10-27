@@ -470,3 +470,88 @@ async def test_testing_catch_override(server, hub, connect_client):
     await a.send(type="raid_damage", id=raid["id"], dealt=2000)
     d = await a.expect("raid_down")
     assert d["chance"] == 1.0 and d["catch"] is False
+
+
+# ----------------------------------------------------------------------- review fixes (round 3)
+async def test_unstarted_takes_the_player_off_and_lets_them_rejoin(server, hub, connect_client):
+    a = await raider(connect_client, "Ilias")
+    b = await raider(connect_client, "Alex")
+    raid = await open_raid(hub, a)
+    for c in (a, b):
+        await c.send(type="raid_join", id=raid["id"], level=30)
+        await c.expect("raid_joined")
+    assert hub.current["pool"] == 4000
+    await a.send(type="raid_result", id=raid["id"], outcome="unstarted")
+    await asyncio.sleep(0.1)
+    r = hub.current
+    assert a.uid not in r["participants"] and r["pool"] == 2000 and r["pool_max"] == 2000
+    assert not server.clients[a.uid].busy
+    await a.send(type="raid_join", id=raid["id"], level=30)
+    j = await a.expect("raid_joined")
+    assert j["raid"]["pool_max"] == 4000
+    # with damage dealt already, unstarted counts as leaving (the share stays)
+    hub.clock.t += 10
+    await a.send(type="raid_damage", id=raid["id"], dealt=500)
+    await asyncio.sleep(0.05)
+    await a.send(type="raid_result", id=raid["id"], outcome="unstarted")
+    await asyncio.sleep(0.1)
+    assert r["participants"][a.uid]["state"] == "left"
+
+
+async def test_unstarted_never_empties_the_pool(server, hub, connect_client):
+    a = await raider(connect_client, "Ilias")
+    b = await raider(connect_client, "Alex")
+    raid = await open_raid(hub, a)
+    for c in (a, b):
+        await c.send(type="raid_join", id=raid["id"], level=30)
+        await c.expect("raid_joined")
+    hub.clock.t += 10
+    await b.send(type="raid_damage", id=raid["id"], dealt=3000)
+    await asyncio.sleep(0.05)
+    assert hub.current["pool"] == 1000
+    await a.send(type="raid_result", id=raid["id"], outcome="unstarted")
+    await asyncio.sleep(0.1)
+    r = hub.current
+    assert r["phase"] == "open" and r["pool"] == 1 and a.uid not in r["participants"]
+
+
+async def test_soul_link_players_dont_count_as_raiders(server, hub, connect_client):
+    a = await raider(connect_client, "Ilias")
+    assert hub.capable_online()
+    server.clients[a.uid].challenge_id = "c1"
+    assert hub.capable_online() == []
+
+
+async def test_next_raid_waits_after_a_late_one(server, hub, connect_client):
+    await raider(connect_client, "Ilias", reach={"kanto": 8, "johto": 8, "sinnoh": 8})
+    hub.every = 7200.0
+    hub.slot_start_time = lambda n: n * 7200.0            # every slot's raid would open right at its start
+    slot = 250000
+    hub.clock.t = slot * 7200 + 7200 - 15 * 60 - 60          # the slot's raid opens late (just fits)
+    hub.last_slot = slot - 1
+    await hub.tick()
+    raid = hub.current
+    assert raid and hub.last_slot == slot
+    with open(hub.path) as fh:
+        assert json.load(fh)["last_slot"] == slot           # saved together with the raid
+    hub.clock.t = raid["closes"] + 1
+    await hub.tick()
+    assert hub.current is None
+    # the next slot starts ~1 minute later: its raid must wait until an hour after this one ended
+    hub.clock.t = (slot + 1) * 7200 + 5
+    await hub.tick()
+    assert hub.current is None
+    hub.clock.t = raid["closes"] + 1 + R.MIN_GAP_MAX + 1
+    await hub.tick()
+    assert hub.current is not None
+
+
+async def test_no_raid_possible_is_logged_once(server, hub, connect_client, caplog):
+    await raider(connect_client, "Ilias", reach={"kanto": 8})
+    hub.spots = {}                                          # no spot data at all
+    hub.clock.t = 250010 * 7200 + 7200 - 15 * 60 - 100
+    hub.last_slot = 250009
+    caplog.set_level("INFO", logger="yellowlink.raids")
+    for _ in range(5):
+        await hub.tick()
+    assert sum("no raid possible" in r.message for r in caplog.records) == 1

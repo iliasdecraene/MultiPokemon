@@ -51,6 +51,7 @@ SPLASH, TELEPORT = 150, 100
 SHINY_DVS = (0xEA, 0xAA)                  # Gen-2 shiny DVs (Crystal's ATKDEFDV_SHINY / SPDSPCDV_SHINY)
 SLP = 7                                   # sleep counter bits: 7 turns (re-applied every turn)
 VBLANK = (0x00, 0x0040)                   # interrupt vector: once per frame
+NO_PROGRESS = 600                          # frames (10 s): auto_pick gives up driving without progress
 
 
 def _ok_opcode(m, bank, addr, expect):
@@ -135,6 +136,9 @@ class YellowSpec:
     BOX_COUNT = 0xDA7F
     CUR_MENU_ITEM = 0xCC26                      # wCurrentMenuItem (move menu: slot + 1)
     MOVE_LIST_INDEX = 0xCC2E                    # wPlayerMoveListIndex (last move slot picked)
+    ENEMY_SPEED = 0xCFF9                        # wEnemyMonSpeed
+    GUARD_PATTERN = bytes.fromhex("21E5CF2AB6")   # ld hl, wEnemyMonHP / ld a, [hli] / or [hl]
+    GUARD_BANKS = (0x0F, 0x3D)
     MOVES_ROM = 0x38000                         # Moves (0E:4000): 6 bytes, power +2, type +3
     MOVE_SIZE = 6
     TYPE_CHART = 0x3E5FA                        # TypeEffects (0F:65FA): (atk, def, x10) ... $FF
@@ -165,12 +169,20 @@ class CrystalSpec:
         "guard_pmf": (0x0F, 0x514E, None),      # HandlePlayerMonFaint
         "perish": (0x0F, 0x485C, 0x21),         # HandlePerishSong.kill_enemy (ld hl, wEnemyMonHP)
         "dbond": (0x0D, 0x51D5, 0x28),          # BattleCommand_CheckFaint: jr z, .no_dbond
+        "dvs": (0x0F, 0x69A8, 0x21),            # LoadEnemyMon.UpdateDVs (bc = the new DVs, before the stats)
     }
     DBOND_SIG = (0x0D, 0x51D3, (0xCB, 0x77))    # bit SUBSTATUS_DESTINY_BOND, a
     NOT_TIME = (0x03, 0x77ED)                   # IsntTheTimeMessage
     CATCH_OK = (0x03, 0x699C)                   # PokeBallEffect.catch_without_fail
     CATCH_FAIL = (0x03, 0x699F)                 # PokeBallEffect.fail_to_catch (a = 0 -> wWildMon = 0)
     GUARD_PATTERN = bytes.fromhex("2116D22AB6")   # ld hl, wEnemyMonHP / ld a, [hli] / or [hl]
+    GUARD_BANKS = (0x0F,)
+    ENEMY_SPEED = 0xD21E                        # wEnemyMonSpeed
+    # SUBSTATUS_CANT_RUN (bit 7): Gen 2's Mean Look / Spider Web set it on the USER's own substatus, and the other
+    # side's Teleport / Run test it there (BattleCommand_ArenaTrap, BattleCommand_Teleport) - clear both sides
+    PLAYER_SUBSTATUS5 = 0xC66C                  # wPlayerSubStatus5
+    ENEMY_SUBSTATUS5 = 0xC671                   # wEnemySubStatus5
+    CANT_RUN = 0x80
     BATTLE_TURN = 0xFFE4                        # hBattleTurn
     IN_BATTLE = 0xD22D                          # wBattleMode (bank 1)
     BATTLE_TYPE = 0xD230
@@ -291,6 +303,7 @@ class RaidBattle:
     def ui(self, v):
         if v != getattr(self, "_ui", None) or v == "menu":
             self._ui_since = getattr(self, "frame", 0)
+            self._progress_frame = self._ui_since       # the game moved on: auto_pick is making progress
         self._ui = v
 
     # ------------------------------------------------------------------------------------------------------------
@@ -354,12 +367,28 @@ class RaidBattle:
         if self.phase in ("idle", "over"):
             return self._drain()
         if self.phase == "starting" and self.frame - self._start_frame > 60 * 30:
+            self._cancel_start()
             self._finish("error")                      # the battle never started (should not happen)
             return self._drain()
         if self.auto:
             self._autopilot()
         self._check_end()
         return self._drain()
+
+    def _cancel_start(self):
+        """The battle never came: take our start request back so the game doesn't start it later by itself."""
+        S, m = self.S, self.m
+        try:
+            if m[S.IN_BATTLE]:
+                return
+            if self.game_id == "yellow":
+                if m[S.CUR_OPPONENT] == self.species:
+                    m[S.CUR_OPPONENT] = 0
+            elif m[S.REENTRY_FLAG] and m[S.REENTRY_BANK] == S.WILD_BATTLE_SCRIPT[0]:
+                m[S.REENTRY_FLAG] = 0
+            self._note("start cancelled")
+        except Exception:  # noqa: BLE001
+            log.exception("raid: cancel start")
 
     def set_pool(self, pool_mb: int, dealt_mb: int | None = None):
         """The group pool from the server. dealt_mb = this player's total the server had counted when it sent
@@ -385,17 +414,22 @@ class RaidBattle:
             self.phase = "fleeing"
             return
         self._start_flee()
+        if self.decision is not None:                 # waiting for the player right now: YellowLink runs away
+            self.auto_pick()
 
     def auto_pick(self):
         if self.decision is not None and self.phase in ("fight", "down", "fleeing"):
             self.auto = True
             self._menu_seq = 0
             self._next_press = 0
+            self._progress_frame = self.frame
 
     def taking_over(self) -> bool:
         """True while YellowLink drives the game: the battle is being started, or auto_pick drives the buttons (the
-        app should drop the player's own input then)."""
-        return self.auto or self.phase == "starting"
+        app should drop the player's own input then). Never longer than NO_PROGRESS frames without progress."""
+        if self.phase == "starting":
+            return self.frame - getattr(self, "_start_frame", self.frame) < NO_PROGRESS
+        return self.auto
 
     def busy(self) -> bool:
         return self._busy
@@ -423,7 +457,7 @@ class RaidBattle:
             b, a, sig = S.DBOND_SIG
             if (mem[b, a], mem[b, a + 1]) != sig:
                 raise RuntimeError("raid: unexpected ROM code (Destiny Bond check)")
-            sites = self._guard_sites()
+        sites = self._guard_sites()
         for name, (bank, addr, opcode) in hooks.items():
             if opcode is not None and not _ok_opcode(mem, bank, addr, opcode):
                 raise RuntimeError("raid: unexpected ROM code at %s (%02X:%04X)" % (name, bank, addr))
@@ -444,15 +478,17 @@ class RaidBattle:
             raise
 
     def _guard_sites(self):
-        """Every `ld hl, wEnemyMonHP / ld a, [hli] / or [hl]` (an HP-0 test) in Crystal's battle bank 0F."""
+        """Every `ld hl, wEnemyMonHP / ld a, [hli] / or [hl]` (an HP-0 test) in the battle banks (Yellow 0F + 3D,
+        Crystal 0F): the end-of-turn and after-a-faint tests."""
         mem = self.pyboy.memory
         pat = self.S.GUARD_PATTERN
         out = []
-        data = bytes(mem[0x0F, 0x4000:0x7FFF]) + bytes([mem[0x0F, 0x7FFF]])
-        i = data.find(pat)
-        while i >= 0:
-            out.append((0x0F, 0x4000 + i))
-            i = data.find(pat, i + 1)
+        for bank in self.S.GUARD_BANKS:
+            data = bytes(mem[bank, 0x4000:0x7FFF]) + bytes([mem[bank, 0x7FFF]])
+            i = data.find(pat)
+            while i >= 0:
+                out.append((bank, 0x4000 + i))
+                i = data.find(pat, i + 1)
         return out
 
     def _safe(self, fn):
@@ -479,7 +515,9 @@ class RaidBattle:
         if self.game_id == "crystal":
             self.real_pp = [m[S.WILD_MON_PP + i] for i in range(4)]
         self._set_moves(self.moves)
-        if self.shiny:
+        if self.shiny and self.game_id == "yellow":
+            # Yellow: the DVs only decide the caught mon (rebuilt from them) and YellowLink's shiny rule; Crystal got
+            # them at LoadEnemyMon.UpdateDVs, before its stats and palette
             m[S.ENEMY_DVS], m[S.ENEMY_DVS + 1] = SHINY_DVS
         hp = self.meter.sync(self.pool, self.max_hp)
         m.w16(S.ENEMY_HP, max(1, hp))
@@ -491,6 +529,16 @@ class RaidBattle:
         else:
             self.phase = "fight"
         self._note("override: max hp %d, segment %d" % (self.max_hp, hp))
+
+    def _on_dvs(self):
+        """Crystal LoadEnemyMon.UpdateDVs: a shiny boss gets the shiny DVs in bc before they are stored and the
+        stats are computed from them (like the game's own forced-shiny battle type, without its other effects)."""
+        S, m = self.S, self.m
+        if self.shiny and self.phase in ("starting", "fleeing", "down") and not self.max_hp \
+                and m[S.IN_BATTLE] == 1 and m[S.TEMP_WILD_SPECIES] == self.species:
+            rf = self.pyboy.register_file
+            rf.B, rf.C = SHINY_DVS
+            self._note("shiny DVs")
 
     def _set_moves(self, moves):
         S, m = self.S, self.m
@@ -547,6 +595,10 @@ class RaidBattle:
             return
         m[S.ENEMY_STATUS] = 0                       # awake: a sleeping boss can't teleport
         self._set_moves([TELEPORT])
+        m.w16(S.ENEMY_SPEED, 1)                     # the player's RUN always works (the fallback)
+        if self.game_id == "crystal":               # the player's Mean Look / Spider Web would make Teleport fail
+            for a in (S.PLAYER_SUBSTATUS5, S.ENEMY_SUBSTATUS5):
+                m[a] = m[a] & ~S.CANT_RUN
         if self.game_id == "yellow":
             m[S.CUR_ENEMY_LEVEL] = 100              # enemy Teleport works when its level >= the player's
             m[S.ENEMY_SELECTED_MOVE] = TELEPORT     # this very turn, if its move was already picked
@@ -666,6 +718,8 @@ class RaidBattle:
             return
         self.decision = {"what": what, "t": time.time(), "frame": self.frame}
         self.events.append({"type": "need_input", "what": what})
+        if self.phase == "fleeing":                   # the raid is over for this player: YellowLink runs away
+            self.auto_pick()
 
     def _close_decision(self):
         if self.decision is None:
@@ -731,11 +785,33 @@ class RaidBattle:
         if self.decision is None or not self._in_raid_battle():
             self.auto = False
             return
+        if self.frame - getattr(self, "_progress_frame", self.frame) > NO_PROGRESS:
+            self._give_up()
+            return
         if self.frame < self._next_press or self.frame - self._ui_since < 24:
             return                                  # let the menu settle (presses before it reads input are lost)
         S, m = self.S, self.m
         ui = self.ui
         throw = self.phase == "down" and self.throws == 0 and self.catch_success is not None
+        if self.phase == "fleeing":
+            # time over / missed: the boss teleports on its turn; if it can't, the player runs (the boss's speed is
+            # 1 then, so RUN always works): RUN is the bottom-right of FIGHT/PKMN/ITEM/RUN; back out of lists
+            if ui == "menu":
+                seq = ("up", "left", "down", "right", "a")
+                if self._menu_seq >= len(seq):
+                    self._menu_seq = 0
+                self._press(seq[self._menu_seq], 20)
+                self._menu_seq += 1
+            elif ui in ("moves", "bag", "party"):
+                self._press("b", 20)
+            elif ui == "next_mon":
+                yes = (m[S.CUR_MENU_ITEM] == 0) if self.game_id == "yellow" else (m[S.MENU_CURSOR_Y] == 1)
+                self._press("a" if yes else "up", 30)
+            elif ui == "party_faint":
+                target = self.first_healthy_slot()
+                cur = m[S.CUR_MENU_ITEM] if self.game_id == "yellow" else m[S.MENU_CURSOR_Y] - 1
+                self._press("a" if target is None or cur == target else ("down" if cur < target else "up"), 30)
+            return
         if ui == "menu":
             # cursor to FIGHT (the menu remembers ITEM/PACK/RUN), then A; in the catch phase: ITEM/PACK (below FIGHT)
             seq = ("up", "left", "down", "a") if throw else ("up", "left", "a")
@@ -818,6 +894,21 @@ class RaidBattle:
         else:
             self._use_menu = True
             self._press("a", 30)
+
+    def _give_up(self):
+        """auto_pick made no progress for 10 s: hand the controls back and log the screen (F3 reports)."""
+        self.auto = False
+        try:
+            from . import text
+            tm_addr = 0xC3A0 if self.game_id == "yellow" else 0xC4A0          # wTileMap / wTilemap
+            tm = bytes(self.pyboy.memory[tm_addr + i] for i in range(360))
+            lines = [text.decode(tm[r * 20:(r + 1) * 20] + b"\x50").strip() for r in range(18)]
+            screen = " | ".join(x for x in lines if x.strip("? "))
+        except Exception:  # noqa: BLE001
+            screen = "?"
+        log.warning("raid: auto-pick gave up after %d frames without progress (phase %s, ui %s, decision %s); "
+                    "screen: %s", NO_PROGRESS, self.phase, self.ui, self.decision, screen)
+        self._note("auto-pick gave up (ui %s)" % self.ui)
 
     def choose_slot(self) -> int:
         """Decision 6: the move used last turn if it still has PP (and isn't disabled), else the strongest."""

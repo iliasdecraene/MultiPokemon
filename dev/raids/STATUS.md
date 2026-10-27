@@ -36,6 +36,18 @@
   `raid_spots.json` (raid_data reads it next to the module) - add it to `datas` (e.g.
   `datas.append((os.path.join(CLIENT_DIR, "yellowlink", "raid_spots.json"), "yellowlink"))`) or embed it.
 
+## 2026-10-27 raid-games: review fixes (M1-M4, L3, L6, L7, L10)
+- **raid-net: please rerun `dev/raids/server_spots.py`** - Route 17 (Cycling Road) and the bike-only parts of Routes
+  16/18 are gone from `raid_spots.json` (Kanto now 575 spots on 31 maps).
+- `flee()` / a missed throw: YellowLink now takes over at once and makes the player RUN on the next menu (the boss's
+  speed is 1; Crystal: the Mean Look/Spider Web flags are cleared; Platinum: the boss holds a Smoke Ball, so no trap
+  stops its Teleport). `taking_over()` is True for that, and never longer than 10 s without progress (auto_pick
+  gives up and logs the screen); during "starting" also at most 10 s.
+- Platinum `start()` can now end with `ended(error)` a few frames later if the field got a task during the injected
+  calls (the FieldBattleDTO is freed; nothing else changed) - treat like any start failure.
+- Platinum applies the boss's `form` for Deoxys (1-3 = Attack/Defense/Speed, with that form's stats); other species
+  ignore it.
+
 ## 2026-10-27 raid-games: built + verified on the real ROMs (answers to raid-net's notes above)
 - Done as you call them: `set_pool(pool, my_dealt_on_server)` (in-flight hits are taken off), `taking_over()`,
   `auto_pick()` in the catch phase now THROWS the cheapest ball (Poké > Great > Ultra > others > Master; GB bag/pack,
@@ -51,6 +63,14 @@
 - Platinum battles also need the player's ROM path for the auto-pick's move powers: the App's `nds.rom_path` is used.
 
 ## raid-net progress
+- 2026-10-27 (round 3, review fixes): A at the den while already in the raid goes to the game; join check refuses
+  ("You're already in this raid."); a repeated raid_joined never resets the damage count; a raid battle keeps its
+  own raid (a new raid's notice waits until it's over: `raid_next`); no quiet moment within 20 s -> new outcome
+  `raid_result unstarted` (server takes the player off the raid, bars back, can join again; SPEC 12) instead of
+  "left"; refusals not red; join dialog fits GB 2x / DS 1.0x; sidebar keeps the chat with raid card + update
+  banner (drops the wide-view row, then a compact card). Server: Soul Link players don't count as raiders, "no
+  raid possible" logged once per slot, >= min(60 min, every/2) between a raid's end and the next, last_slot saved
+  with the raid. No balls -> still refused (raid_pt/raid_gb can_join).
 - 2026-10-27 (round 2): adapted to raid-games' final interface (`set_pool(pool, dealt)`, `taking_over()`,
   `escaped`/`error` -> reported as `left`, `strongest_level()` from the game module, DS `Den.draw(surf, pm, cam,
   off=, mask=)` with the app's SinnohView camera); spots vendored (`dev/raids/server_spots.py`: kanto 611 / johto

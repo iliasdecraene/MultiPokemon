@@ -243,7 +243,7 @@ class App(R.RaidMixin):
         self.trade = self.battle = self.live = None
         self.mode = "play"
         self.frame = 1
-        self.toasts, self.msgs = [], []
+        self.toasts, self.msgs, self.toast_colors = [], [], []
         self.kb_held, self.pad_held, self.held = set(), set(), set()
         self.emu = Emu()
         self.snapshots = []
@@ -256,6 +256,7 @@ class App(R.RaidMixin):
 
     def toast(self, s, secs=4.0, color=None):
         self.toasts.append(s)
+        self.toast_colors.append(color)
 
     def sys_msg(self, s, color=None):
         self.msgs.append(s)
@@ -440,21 +441,6 @@ def test_blackout(app, monkeypatch):
     assert "out of this raid" in app.toasts[-1]
 
 
-def test_start_waits_for_a_quiet_moment_then_gives_up(app, monkeypatch):
-    monkeypatch.setattr(R.time, "time", lambda: 1000.0)
-    app.on_raid_open({"raid": raid_obj(), "fresh": True})
-    app.raid_press("a", True)
-    app.raid_confirm["shown"] = 0
-    app.raid_answer(True)
-    joined(app)
-    app.game.safe = False
-    app.raid_step()
-    assert app.raid_phase == "starting" and not app.snapshots
-    monkeypatch.setattr(R.time, "time", lambda: 1000.0 + R.START_WAIT + 1)
-    app.raid_step()
-    assert app.raid_phase == "done" and app.net.of("raid_result")[-1]["outcome"] == "left"
-
-
 def test_fast_forward_goes_off(app, monkeypatch):
     app.fast = True
     start_fight(app, monkeypatch)
@@ -596,3 +582,107 @@ def test_down_while_the_menu_waits_restarts_the_timer(app, monkeypatch):
     monkeypatch.setattr(R.time, "time", lambda: 1018.5)
     app.raid_step()
     assert ("auto_pick",) in b.calls                    # the AFK player's throw
+
+
+
+# ------------------------------------------------------------------------------------------------ review round 3
+def test_busy_player_A_goes_to_the_game_and_join_is_refused(app, monkeypatch):
+    b = start_fight(app, monkeypatch)
+    app.mode = "play"
+    app.raid_battle = None                    # (between frames of the start: still "fight" phase, busy)
+    app.raid_phase = "starting"
+    assert app.raid_press("a", True) is False and app.mode == "play"
+    assert app.raid_join_check() == (False, "You're already in this raid.")
+    app.raid_battle = b
+
+
+def test_a_second_raid_joined_never_resets_the_damage(app, monkeypatch):
+    b = start_fight(app, monkeypatch)
+    b.events = [{"type": "damage", "hp": 20, "of": 100, "mb": 400}]
+    app.raid_step()
+    joined(app)
+    app.raid_phase = "joining"                # even a stray "joining" state: the count stays
+    joined(app)
+    assert app.raid_meter.total == 400
+
+
+def test_a_new_raid_during_the_battle_waits(app, monkeypatch):
+    b = start_fight(app, monkeypatch)
+    new = raid_obj(id="250001-def", species=150, name="Mewtwo")
+    app.on_raid_open({"raid": new, "fresh": True})
+    assert app.raid["id"] == "250000-abc" and app.raid_next["id"] == "250001-def"
+    assert app.horns == 2 and "(after this battle)" in app.toasts[-1]
+    app.on_raid_update({"raid": dict(new, pool=2000, pool_max=2000)})
+    assert app.raid["id"] == "250000-abc" and app.raid_next["pool"] == 2000
+    # the old battle's events still belong to the old raid
+    b.events = [{"type": "damage", "hp": 20, "of": 100, "mb": 300}, {"type": "blackout"},
+                {"type": "ended", "outcome": "blackout"}]
+    monkeypatch.setattr(R.time, "time", lambda: 1005.0)
+    app.raid_step()
+    assert all(m["id"] == "250000-abc" for m in app.net.of("raid_damage") + app.net.of("raid_result"))
+    app.raid_step()
+    assert app.raid["id"] == "250001-def" and app.raid_next is None and app.raid_phase == "open"
+    assert isinstance(app.raid_den, FakeDen) and app.raid_meter is None and app.raid_result is None
+
+
+def test_held_raid_that_ends_first_is_dropped(app, monkeypatch):
+    start_fight(app, monkeypatch)
+    app.on_raid_open({"raid": raid_obj(id="250001-def"), "fresh": False})
+    app.on_raid_end({"id": "250001-def", "reason": "time", "caught": [], "raid": raid_obj(id="250001-def",
+                                                                                           phase="over")})
+    assert app.raid_next is None and app.raid["id"] == "250000-abc" and app.raid_battle is not None
+
+
+def test_no_quiet_moment_is_unstarted_and_can_retry(app, monkeypatch):
+    monkeypatch.setattr(R.time, "time", lambda: 1000.0)
+    app.on_raid_open({"raid": raid_obj(), "fresh": True})
+    app.raid_press("a", True)
+    app.raid_confirm["shown"] = 0
+    app.raid_answer(True)
+    joined(app)
+    app.game.safe = False
+    monkeypatch.setattr(R.time, "time", lambda: 1000.0 + R.START_WAIT + 1)
+    app.raid_step()
+    assert app.net.of("raid_result")[-1]["outcome"] == "unstarted"
+    assert app.raid_phase == "open" and "press A at the den to try again" in app.toasts[-1]
+    assert app.toast_colors[-1] != R.ui.BAD
+    app.game.safe = True
+    app.on_raid_update({"raid": raid_obj(pool=0, pool_max=0)})        # the server took us off
+    assert app.raid_join_check() == (True, "")
+
+
+def test_refusal_is_not_red(app):
+    app.on_raid_open({"raid": raid_obj(), "fresh": True})
+    app.raid_phase = "joining"
+    app.on_raid_refused({"id": "250000-abc", "reason": "Time's up for this raid."})
+    assert app.toast_colors[-1] not in (R.ui.BAD,)
+
+
+@pytest.mark.parametrize("size", [(320, 288), (256, 384), (480, 432), (384, 576)])
+@pytest.mark.parametrize("ok", [True, False])
+def test_join_dialog_fits_small_windows(app, screen, size, ok):
+    surf = pygame.Surface(size)
+    fonts = screen[1]
+    app.fonts = fonts
+    app.click_targets = []
+    app.on_raid_open({"raid": raid_obj(shiny=True, name="Rayquaza"), "fresh": False})
+    app.raid_confirm = {"ok": ok, "why": "Your party and your current PC box are full - make room first.",
+                        "level": 70, "shown": 0}
+    r = R.draw_confirm(surf, fonts, app, size[0], size[1], (0, 0))
+    assert surf.get_rect().contains(r)
+    rects = app.raid_dialog_rects
+    for br in rects["buttons"]:
+        assert r.contains(br)
+        if rects["hint"] is not None:
+            assert not br.colliderect(rects["hint"])
+    if len(rects["buttons"]) == 2:
+        assert not rects["buttons"][0].colliderect(rects["buttons"][1])
+
+
+@pytest.mark.parametrize("h", [480, 576, 720])
+@pytest.mark.parametrize("update", [False, True])
+def test_chat_stays_visible_with_raid_card(h, update):
+    from yellowlink import ui
+    plan = ui.sidebar_plan(h, update, True)
+    assert plan["chat"] >= ui.CHAT_MIN
+    assert ui.sidebar_plan(h, update, False)["wide"] is True        # nothing changes without a raid

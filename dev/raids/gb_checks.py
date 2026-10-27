@@ -184,7 +184,8 @@ def check_addresses(game_id, sym):
                     "next_mon": "AskUseNextPokemon", "party_faint": "ForcePickPartyMonInBattle",
                     "bag": "BattleMenu_Pack", "party": "BattleMenu_PKMN", "enemy_fainted": "HandleEnemyMonFaint",
                     "blackout": "LostBattle", "guard": "HasEnemyFainted", "guard_cmd": "BattleCommand_CheckFaint",
-                    "guard_pmf": "HandlePlayerMonFaint", "perish": "HandlePerishSong.kill_enemy"},
+                    "guard_pmf": "HandlePlayerMonFaint", "perish": "HandlePerishSong.kill_enemy",
+                    "dvs": "LoadEnemyMon.UpdateDVs"},
     }[game_id]
     if not sym:
         INFO("no pret symbol file: address check skipped")
@@ -197,7 +198,8 @@ def check_addresses(game_id, sym):
                       "CUR_MENU_ITEM": "wCurrentMenuItem", "MOVE_LIST_INDEX": "wPlayerMoveListIndex",
                       "BATTLE_MON_MOVES": "wBattleMonMoves", "BATTLE_MON_PP": "wBattleMonPP",
                       "DISABLED_MOVE": "wPlayerDisabledMove", "ENEMY_TYPES": "wEnemyMonType1",
-                      "BATTLE_MON_TYPES": "wBattleMonType1", "BOX_COUNT": "wBoxCount"},
+                      "BATTLE_MON_TYPES": "wBattleMonType1", "BOX_COUNT": "wBoxCount",
+                      "ENEMY_SPEED": "wEnemyMonSpeed"},
            "crystal": {"IN_BATTLE": "wBattleMode", "TEMP_WILD_SPECIES": "wTempWildMonSpecies",
                        "CUR_PARTY_LEVEL": "wCurPartyLevel", "REENTRY_FLAG": "wMapReentryScriptQueueFlag",
                        "ENEMY_HP": "wEnemyMonHP", "ENEMY_MOVES": "wEnemyMonMoves", "ENEMY_PP": "wEnemyMonPP",
@@ -206,7 +208,9 @@ def check_addresses(game_id, sym):
                        "PARTY_MENU_CURSOR": "wPartyMenuCursor", "CUR_MOVE_NUM": "wCurMoveNum",
                        "BATTLE_MON_MOVES": "wBattleMonMoves", "BATTLE_MON_PP": "wBattleMonPP",
                        "DISABLED_MOVE": "wDisabledMove", "ENEMY_TYPES": "wEnemyMonType1",
-                       "BATTLE_MON_TYPES": "wBattleMonType1", "ENEMY_CATCH_RATE": "wEnemyMonCatchRate"}}[game_id]
+                       "BATTLE_MON_TYPES": "wBattleMonType1", "ENEMY_CATCH_RATE": "wEnemyMonCatchRate",
+                       "ENEMY_SPEED": "wEnemyMonSpeed", "PLAYER_SUBSTATUS5": "wPlayerSubStatus5",
+                       "ENEMY_SUBSTATUS5": "wEnemySubStatus5"}}[game_id]
     bad += [n for n, s in ram.items() if sym.get(s, (None, None))[1] != getattr(S, n)]
     targets = {"yellow": {"NOT_TIME": "ItemUseNotTime", "CAPTURED": "ItemUseBall.captured",
                           "SET_ANIM": "ItemUseBall.setAnimData"},
@@ -262,6 +266,9 @@ def scenario_fight_catch(game_id):
           m[S.ENEMY_SPECIES] == rb.species and m[S.ENEMY_LEVEL] == 30 and m[S.ENEMY_MOVES] == SPLASH,
           "species %d level %d moves %s" % (m[S.ENEMY_SPECIES], m[S.ENEMY_LEVEL],
                                             [m[S.ENEMY_MOVES + i] for i in range(4)]))
+    if game_id == "crystal":
+        CHECK("crystal: shiny DVs given at LoadEnemyMon.UpdateDVs (before the boss's stats)",
+              any(n == "shiny DVs" for _f, n in rb.log))
     bi = g.gm.battle_info() or {}
     CHECK("%s: shiny boss (DVs EA AA, the game's own battle_info says shiny)" % game_id,
           (m[S.ENEMY_DVS], m[S.ENEMY_DVS + 1]) == raid_gb.SHINY_DVS and bi.get("shiny"), str(bi))
@@ -394,6 +401,66 @@ def scenario_afk_catch(game_id):
     CHECK("%s: AFK catch: auto-pick threw a Poké Ball (Master Ball kept), caught" % game_id,
           g.outcome() == "caught" and len(g.gm.party()) == n0 + 1 and b1.get(poke, 0) == balls0.get(poke, 0) - 1
           and b1.get(MASTER_BALL) == balls0.get(MASTER_BALL), "outcome %s balls %s -> %s" % (g.outcome(), balls0, b1))
+    g.stop()
+
+
+def scenario_trapped_flee(game_id):
+    """M1: the boss is trapped by the player (Yellow: Wrap - the boss can't act; Crystal: Mean Look - its Teleport
+    would fail) when the raid time runs out: the flee still ends the battle (Crystal: the trap is lifted; both: the
+    player runs - the boss's speed is 1 then)."""
+    move, name = (35, "Wrap") if game_id == "yellow" else (212, "Mean Look")
+    print("== %s: time over while the player's %s traps the boss ==" % (game_id, name), flush=True)
+    species = MEW if game_id == "yellow" else CELEBI
+    g = GB(game_id, "soullink_route1_grass.state" if game_id == "yellow" else "crystal_sl_route29.state")
+    rb = g.raid(boss(game_id, species, 30, [SPLASH]), 5000)
+    st = {"auto_at": None, "n": 0, "trapped": False}
+    moves = 0xD01B if game_id == "yellow" else 0xC62E          # wBattleMonMoves
+    pp = 0xD02C if game_id == "yellow" else 0xC634             # wBattleMonPP
+
+    def on_event(ev):
+        if ev["type"] == "need_input":
+            st["n"] += 1
+            if st["n"] == 1:                       # test only: the lead knows just the trapping move
+                g.m[moves] = move
+                for i in range(1, 4):
+                    g.m[moves + i] = 0
+                g.m[pp] = 10
+            elif not rb.flee_asked:
+                if game_id == "crystal":
+                    st["trapped"] = bool(g.m[0xC66C] & 0x80)      # Gen 2 sets CANT_RUN on the user
+                else:
+                    st["trapped"] = True
+                rb.flee()                          # time over (YellowLink takes over at once)
+            st["auto_at"] = g.frame + 30
+
+    g.on_event = on_event
+    for _ in range(20000):
+        g.tick()
+        if st["auto_at"] is not None and g.frame >= st["auto_at"] and not rb.flee_asked:
+            st["auto_at"] = None
+            rb.auto_pick()
+        if g.ended():
+            break
+    CHECK("%s: trapped boss (%s) + time over -> fled + ended(fled), back in the overworld" % (game_id, name),
+          st["trapped"] and g.outcome() == "fled" and g.run_until(g.gm.is_safe, 900),
+          "trapped %s outcome %s notes %s" % (st["trapped"], g.outcome(), [n for _f, n in rb.log][-4:]))
+    g.stop()
+
+
+def scenario_start_cancel(game_id):
+    """L3: a start that never turns into a battle takes its request back (wCurOpponent / the memory script)."""
+    print("== %s: a start that times out is taken back ==" % game_id, flush=True)
+    species = MEW if game_id == "yellow" else CELEBI
+    g = GB(game_id, "soullink_route1_grass.state" if game_id == "yellow" else "crystal_sl_route29.state")
+    rb = g.raid(boss(game_id, species, 30, [SPLASH]), 5000)
+    rb._start_frame -= 60 * 31                     # pretend 31 s went by without a battle
+    S = g.S
+    ev = rb.step()
+    ok = any(e["type"] == "ended" and e["outcome"] == "error" for e in ev)
+    left = g.m[S.CUR_OPPONENT] if game_id == "yellow" else g.m[S.REENTRY_FLAG]
+    g.tick(400)
+    CHECK("%s: timed-out start -> ended(error), request cleared, no battle afterwards" % game_id,
+          ok and left == 0 and not g.gm.in_battle(), "events %s left %s" % (ev, left))
     g.stop()
 
 
@@ -566,6 +633,8 @@ def run(game_id, check, info, sym, states, out):
     scenario_miss(game_id)
     scenario_afk_catch(game_id)
     scenario_flee(game_id)
+    scenario_trapped_flee(game_id)
+    scenario_start_cancel(game_id)
     scenario_next_mon_blackout(game_id)
     scenario_perish_dbond(game_id)
     scenario_den(game_id)

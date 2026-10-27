@@ -99,6 +99,15 @@ TOUCH_BAG = (40, 168)                           # command menu: BAG
 TOUCH_BAG_BALLS = (192, 56)                     # bag: the Poké Balls pocket
 TOUCH_BAG_SLOTS = [(64, 30), (192, 30), (64, 78), (192, 78), (64, 126), (192, 126)]   # first page of a pocket
 TOUCH_BAG_USE = (100, 174)
+TOUCH_BAG_NEXT = (60, 168)                      # bag pocket: next page (6 items per page)
+TOUCH_RUN = (128, 176)                          # command menu: RUN
+FieldBattleDTO_Free = 0x020520A5
+FREE_CODE = (0x020520A4, bytes.fromhex("f8b5071c00243d1c68680028"))   # push {r3-r7,lr}; ... loops Heap_Free
+FS_TASK = 0x10                                  # FieldSystem.task (non-NULL while a script/menu/event runs)
+BM_SPEED, BM_ABILITY, BM_ITEM = 0x06, 0x27, 0x78
+ITEM_SMOKE_BALL = 228                           # HOLD_EFFECT_FLEE: Battler_IsTrappedMsg is FALSE for its holder
+DEOXYS = 386
+NO_PROGRESS = 600                               # frames (10 s): auto_pick gives up driving without progress
 
 
 class _Regs:
@@ -155,8 +164,11 @@ class FieldCaller:
         self.log = []
         hooks.add(EPILOGUE, self._cb)
 
-    def call(self, fn, args, on_result=None):
-        self.queue.append((fn, list(args), on_result))
+    precheck = None        # () -> bool: may the next queued call run now? (checked calls only)
+    on_abort = None        # () -> None: a checked call was refused (the queue has been cleared)
+
+    def call(self, fn, args, on_result=None, check=True):
+        self.queue.append((fn, list(args), on_result, check))
 
     def busy(self):
         return bool(self.queue) or self.cur is not None
@@ -176,7 +188,13 @@ class FieldCaller:
         if self.cur is None:
             if not self.queue:
                 return
-            fn, args, cb = self.queue.pop(0)
+            if self.queue[0][3] and self.precheck is not None and not self.precheck():
+                self.queue.clear()
+                self.log.append("refused")
+                if self.on_abort:
+                    self.on_abort()
+                return
+            fn, args, cb, _check = self.queue.pop(0)
             args = args + [0] * (4 - len(args))
             self.cur = {"cb": cb, "sp": sp, "frame": (d.r32(sp), d.r32(sp + 4)), "r0": r["r0"]}
             d.w32(sp, args[3])                 # the pop loads r3 from here ...
@@ -324,6 +342,22 @@ class RaidBattle:
         c = self.caller
         st = {}
 
+        def field_free():
+            # each injected call only while the field has no task (a trainer's sight line, a script, the start
+            # menu... appearing during these 4 frames would get a battle started on top of it)
+            return not d.r32(fs + FS_TASK)
+
+        def abort():
+            self._note("start refused: the field started a task (%s)" % c.log[-4:])
+            dto = st.get("dto")
+            if dto and d.read(FREE_CODE[0], len(FREE_CODE[1])) == FREE_CODE[1]:
+                c.call(FieldBattleDTO_Free, [dto], lambda _r: self._set_start_error("field busy"), check=False)
+            else:
+                self._set_start_error("field busy")
+
+        c.precheck = field_free
+        c.on_abort = abort
+
         def got_dto(v):
             if not _ptr(v):
                 self._note("FieldBattleDTO_New failed")
@@ -348,6 +382,10 @@ class RaidBattle:
         self._note("start %d Lv%d pool %d" % (self.species, self.level, self.pool))
         return True
 
+    def _set_start_error(self, why):
+        self._start_error = why
+        self.dto = None
+
     def _prepare_wild_mon(self, dto):
         """Raid moves (the battle copy is written back into this Pokémon on every HP update, so the moves must be
         set here, not only in the battle copy), shiny PID, fateful flag."""
@@ -363,6 +401,14 @@ class RaidBattle:
             pkm.pid = new
         if self.fateful:
             pkm.d[pk4.B + 0x18] |= 1
+        form = int(self.boss.get("form") or 0)
+        if self.species == DEOXYS and 0 < form <= 3 and self.data is not None:
+            # Deoxys' forms (Normal/Attack/Defense/Speed): the form bits + its stats for that form (the battle
+            # takes the stats stored in the party record; Pokemon_CalcStats does the same maths)
+            pkm.form = form
+            st = pk4.calc_stats(pkm, self.data, self.level)
+            pkm.stats = st
+            pkm.hp = st[0]
         self.pid = pkm.pid
         d.write(party + 8, pkm.encrypted())
         self._note("wild mon ready: pid %08X natural moves %s" % (self.pid, self.natural["moves"]))
@@ -380,6 +426,9 @@ class RaidBattle:
     def step(self) -> list:
         self.frame += 1
         if self.phase in ("idle", "over"):
+            return self._drain()
+        if getattr(self, "_start_error", None) and not (self.caller and self.caller.busy()):
+            self._finish("error")
             return self._drain()
         if self.phase == "starting" and self.frame - self._start_frame > 60 * 30 and not self.pm.in_battle():
             self._finish("error")
@@ -414,6 +463,9 @@ class RaidBattle:
             self.phase = "fleeing"
             return
         self.phase = "fleeing"
+        if self.decision is not None:                 # waiting for the player right now: YellowLink runs away
+            self.auto = True
+            self._progress_frame = self.frame
         ctx = self._ctx()
         if ctx:
             self._apply_flee(ctx)
@@ -424,11 +476,14 @@ class RaidBattle:
             self.auto = True
             self._next_touch = 0
             self._party_step = 0
+            self._progress_frame = self.frame
 
     def taking_over(self) -> bool:
         """True while YellowLink drives the game: the battle is being started (the game functions are called over
         the next field frames - a START press then would open a menu in between), or auto_pick is touching."""
-        return self.auto or self.phase == "starting"
+        if self.phase == "starting":
+            return self.frame - getattr(self, "_start_frame", self.frame) < NO_PROGRESS
+        return self.auto
 
     def busy(self) -> bool:
         return self.phase not in ("idle", "over")
@@ -599,14 +654,7 @@ class RaidBattle:
     def _frame(self):
         d = self.core
         ctx = self._ctx()
-        if self.dto and self.pm.in_battle():
-            try:
-                if self.pm.battle_dto() == self.dto:
-                    r = d.r32(self.dto + DTO_RESULT)
-                    if r:
-                        self.result = r
-            except Exception:  # noqa: BLE001
-                pass
+        self._read_result()
         if not ctx or not self._boss_ok(ctx):
             self._check_end()
             return
@@ -662,6 +710,44 @@ class RaidBattle:
         if self.auto:
             self._autopilot(ctx)
 
+    def _read_result(self):
+        """The battle's result (FieldBattleDTO.resultMask), read every frame for as long as the DTO is still ours:
+        the battle writes it as it ends and the encounter task frees the DTO a few frames after the battle app -
+        a frame-exact window, so we keep watching the same memory (same parties pointer) after the battle too.
+        Also: did the player's side still have a healthy Pokémon at the end (for a blackout whose result we missed)?"""
+        d = self.core
+        dto = self.dto
+        if not dto:
+            return
+        try:
+            if getattr(self, "_dto_party1", None) is None:
+                p1 = d.r32(dto + DTO_PARTIES + 4)
+                if _ptr(p1):
+                    self._dto_party1 = p1
+            if d.r32(dto + DTO_PARTIES + 4) == self._dto_party1 and d.r32(dto) == BATTLE_TYPE_WILD_MON:
+                r = d.r32(dto + DTO_RESULT)
+                if r in (RESULT_WIN, RESULT_LOSE, RESULT_CAPTURED, RESULT_PLAYER_FLED, RESULT_ENEMY_FLED, 3):
+                    self.result = r
+            app = self.pm._battle_app()
+            if app:
+                bs = d.r32(app + 0x1C)
+                party = d.r32(bs + BS_PARTIES) if _ptr(bs) else 0
+                if _ptr(party):
+                    n = min(d.r32(party + 4), 6)
+                    alive, clean = 0, True
+                    for i in range(n):
+                        raw = d.read(party + 8 + i * pk4.PARTY_SIZE, pk4.PARTY_SIZE)
+                        p = pk4.PK4(pk4._plain_of(raw))
+                        if not p.checksum_ok():
+                            clean = False                 # being worked on this frame: read again next frame
+                            break
+                        if p.species and not p.is_egg and p.hp > 0:
+                            alive += 1
+                    if n and clean:
+                        self._player_alive = alive
+        except Exception:  # noqa: BLE001
+            pass
+
     def _turn_start(self, ctx):
         d = self.core
         bm = self._bmon(ctx)
@@ -702,6 +788,10 @@ class RaidBattle:
         d = self.core
         bm = self._bmon(ctx)
         d.w32(bm + BM_STATUS, 0)                      # awake: a sleeping boss can't teleport
+        # never trapped (Shadow Tag, Arena Trap, Magnet Pull, Mean Look/Block/Spider Web, Ingrain...): a Smoke Ball
+        # in the battle copy makes Battler_IsTrappedMsg FALSE for the boss; speed 1: the player's RUN always works
+        d.w16(bm + BM_ITEM, ITEM_SMOKE_BALL)
+        d.w16(bm + BM_SPEED, 1)
         for i in range(4):
             d.w16(bm + BM_MOVES + 2 * i, TELEPORT if i == 0 else 0)
             d.w8(bm + BM_PP + i, 30 if i == 0 else 0)
@@ -715,6 +805,8 @@ class RaidBattle:
 
     # --- decisions / timer
     def _set_ui(self, ui):
+        if ui != self.ui:
+            self._progress_frame = self.frame          # the game moved on: auto_pick is making progress
         self.ui = ui
         self._ui_since = self.frame
 
@@ -723,6 +815,9 @@ class RaidBattle:
             return
         self.decision = {"what": what, "t": time.time(), "frame": self.frame}
         self.events.append({"type": "need_input", "what": what})
+        if self.phase == "fleeing":                   # the raid is over for this player: YellowLink runs away
+            self.auto = True
+            self._progress_frame = self.frame
 
     def _close_decision(self):
         if self.decision is None:
@@ -757,24 +852,34 @@ class RaidBattle:
     def _autopilot(self, ctx):
         if self._touch_until is not None and self.frame >= self._touch_until:
             self._release_touch()
+        if self.frame - getattr(self, "_progress_frame", self.frame) > NO_PROGRESS:
+            self._give_up(ctx)
+            return
         if self.frame < self._next_touch or self.frame - self._ui_since < 20 or self._touch_until is not None:
             return
         ui = self.ui
         throw = self.phase == "down" and self.throws == 0 and self.catch_success is not None
-        if ui == "menu" and throw:
-            self._bag_step = 0
+        if self.phase == "fleeing" and ui in ("menu", "moves", "bag", "party", "target"):
+            # time over / missed: the boss teleports on its turn; if it can't (or the player's turn comes first) the
+            # player runs (the boss's speed is 1 then, so it always works)
+            self._touch(TOUCH_RUN if ui == "menu" else TOUCH_BACK, 60)
+        elif ui == "menu" and throw:
+            self._bag_plan = None
             self._touch(TOUCH_BAG, 60)
         elif ui == "bag" and throw:
-            # bag: balls pocket -> the cheapest ball -> USE (the raid decides the result: never waste a Master Ball)
-            step = getattr(self, "_bag_step", 0) % 3
-            if step == 0:
-                self._touch(TOUCH_BAG_BALLS, 60)
-            elif step == 1:
+            # bag: balls pocket -> page -> the cheapest ball -> USE (the raid decides the result: never waste a
+            # Master Ball); if the bag is still open after that, back out and start again from the menu
+            plan = getattr(self, "_bag_plan", None)
+            if plan is None:
                 idx = self.ball_choice([item for item, _q in self.pm.balls()])
-                self._touch(TOUCH_BAG_SLOTS[idx if idx is not None and idx < len(TOUCH_BAG_SLOTS) else 0], 60)
+                idx = 0 if idx is None else idx
+                plan = self._bag_plan = [TOUCH_BAG_BALLS] + [TOUCH_BAG_NEXT] * (idx // 6) + \
+                    [TOUCH_BAG_SLOTS[idx % 6], TOUCH_BAG_USE, TOUCH_BACK, TOUCH_BACK]
+            if plan:
+                self._touch(plan.pop(0), 60)
             else:
-                self._touch(TOUCH_BAG_USE, 60)
-            self._bag_step = getattr(self, "_bag_step", 0) + 1
+                self._bag_plan = None
+                self._touch(TOUCH_BACK, 60)
         elif ui == "menu":
             self._touch(TOUCH_FIGHT)
         elif ui == "moves":
@@ -792,6 +897,20 @@ class RaidBattle:
             self._party_step += 1
         elif ui in ("bag", "party", "run", "target"):
             self._touch(TOUCH_BACK, 50)
+
+    def _give_up(self, ctx):
+        """auto_pick made no progress for 10 s: hand the controls back, and log what the game showed (F3 reports)."""
+        self.auto = False
+        self._release_touch()
+        d = self.core
+        try:
+            state = "command %d state %s" % (d.r32(ctx + CTX_COMMAND), list(d.read(ctx + CTX_CUR_CMD_STATE, 4)))
+        except Exception:  # noqa: BLE001
+            state = "?"
+        log.warning("raid: auto-pick gave up after %d frames without progress (phase %s, ui %s, decision %s, %s, "
+                    "yes/no %d party %d frames ago)", NO_PROGRESS, self.phase, self.ui, self.decision, state,
+                    self.frame - self._yesno_frame, self.frame - self._party_frame)
+        self._note("auto-pick gave up (ui %s, %s)" % (self.ui, state))
 
     BALL_ORDER = (4, 3, 2, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1)   # Poké, Great, Ultra, the rest, Master last
 
@@ -897,6 +1016,8 @@ class RaidBattle:
             if self._end_wait < 60 * 120 and self.result != RESULT_LOSE:
                 return
         r = self.result
+        if r == 0 and getattr(self, "_player_alive", 1) == 0 and not self.missed:
+            r = RESULT_LOSE                           # no result seen, but nobody on the player's side could fight
         if r == RESULT_LOSE:
             self._finish("blackout")
         elif r == RESULT_CAPTURED or (self.phase == "down" and self.catch_success and self.throws):

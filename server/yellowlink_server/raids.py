@@ -28,6 +28,7 @@ HISTORY_MAX = 100
 DEALT_MAX = 10_000_000
 SHINY_ODDS = 20                  # 1 in 20 (decision 8)
 TICK = 5.0                       # scheduler interval (seconds)
+MIN_GAP_MAX = 3600.0             # a raid opens at least min(this, every / 2) after the previous one ended
 RETRY_MARGIN = 30.0              # the slot's raid must open at least this long before the slot's end - open time
 
 REGIONS = ("kanto", "johto", "sinnoh")
@@ -49,7 +50,7 @@ SPECIES_NAMES = {
     486: "Regigigas", 489: "Phione", 490: "Manaphy", 491: "Darkrai", 492: "Shaymin", 493: "Arceus",
 }
 DEOXYS = 386
-OUTCOMES = ("caught", "missed", "blackout", "left", "fled")
+OUTCOMES = ("caught", "missed", "blackout", "left", "fled", "unstarted")
 SPOTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "raid_spots.json")
 RAID_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
@@ -188,6 +189,7 @@ class RaidHub:
         self.last: dict = {}
         self.history: list = []
         self._first_at = None
+        self._quiet_slot = None
         self._save_task = None
         self._loop_task = None
         self._update_task = None
@@ -306,7 +308,7 @@ class RaidHub:
         out = []
         for c in self.server.clients.values():
             reach = getattr(c, "raid_reach", None)
-            if reach is not None:
+            if reach is not None and not c.challenge_id:     # inside a Soul Link run nobody can raid
                 out.append({"games": list(c.games or []), "reach": reach})
         return out
 
@@ -332,20 +334,20 @@ class RaidHub:
         if now < self.slot_start_time(slot):
             return
         if now > (slot + 1) * self.every - self.open_secs:
-            log.info("raid slot %d skipped (nobody who can raid was online)", slot)
+            log.info("raid slot %d skipped (no raid could open in time)", slot)
             self.last_slot = slot
             self.schedule_save()
             return
+        last_end = self.history[-1].get("ended") if self.history else None
+        if isinstance(last_end, (int, float)) and now < last_end + min(MIN_GAP_MAX, self.every / 2):
+            return                                            # the previous raid (a late one) ended too recently
         if not self.capable_online():
             return                                            # try again at the next tick
-        raid = await self.spawn(slot=slot)
-        if raid is None:
-            return
-        self.last_slot = slot
-        self.schedule_save()
+        await self.spawn(slot=slot, scheduled=True)
 
-    async def spawn(self, region=None, species=None, shiny=None, slot=None):
-        """Open a raid now (scheduler, YL_RAID_FIRST, tests). Returns the live record or None."""
+    async def spawn(self, region=None, species=None, shiny=None, slot=None, scheduled=False):
+        """Open a raid now (scheduler, YL_RAID_FIRST, tests). Returns the live record or None. `scheduled`: the
+        slot's raid (last_slot is set and saved together with it)."""
         now = self.clock()
         slot = int(now // self.every) if slot is None else slot
         force = self.force or (None, None, None)
@@ -357,7 +359,9 @@ class RaidHub:
         n = len(self.history) + 1
         choice = pick(f"{self.salt}:{slot}:{n}", online, self.spots, self.last, force)
         if choice is None:
-            log.info("no raid possible right now (regions online: none with spot data)")
+            if self._quiet_slot != slot:                  # the scheduler retries every few seconds: say it once
+                self._quiet_slot = slot
+                log.info("no raid possible right now (regions online: none with spot data)")
             return None
         rid = f"{slot}-{secrets.token_hex(3)}"
         name = SPECIES_NAMES.get(choice["species"], f"#{choice['species']}")
@@ -367,6 +371,8 @@ class RaidHub:
             "spot": choice["spot"], "opens": now, "closes": now + self.open_secs, "pool": 0, "pool_max": 0,
             "bars_per_player": BARS_PER_PLAYER, "phase": "open", "participants": {}}
         self.last[r["region"]] = {"species": r["species"], "map": r["spot"]["map"]}
+        if scheduled:
+            self.last_slot = max(self.last_slot, slot)
         log.info("raid %s: %s%s in %s at %s", rid, "shiny " if r["shiny"] else "", name, r["region"], r["spot"])
         self._try_save()
         minutes = max(1, int(round(self.open_secs / 60)))
@@ -552,6 +558,20 @@ class RaidHub:
             return
         if outcome in ("caught", "missed") and r["phase"] != "down":
             outcome = "left"                        # no catch before the pool is empty
+        if outcome == "unstarted":
+            if p["dealt"] > 0 or p["claimed"] > 0 or r["phase"] != "open":
+                outcome = "left"                    # it did fight: its share stays, it's out
+            else:
+                # the battle never started in that game: as if they had never joined (can join again)
+                del r["participants"][client.uid]
+                bars = r["bars_per_player"] * BAR
+                r["pool"] -= min(bars, max(0, r["pool"] - 1))
+                r["pool_max"] = max(r["pool"], r["pool_max"] - bars)
+                client.raiding = False
+                log.info("raid %s: %s -> unstarted (taken off, pool %d/%d)", r["id"], client.name, r["pool"],
+                         r["pool_max"])
+                self._changed()
+                return
         p["state"] = outcome
         p["at"] = self.clock()
         client.raiding = False
