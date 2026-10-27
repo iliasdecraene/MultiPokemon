@@ -2,7 +2,6 @@
 the ROM dev/platinum/ptrom.py picks (YL_PT_ROM=vanilla | sinnoh; run both)."""
 import os
 import shutil
-import struct
 import tempfile
 
 # DeSmuME's battery file goes into $XDG_CONFIG_HOME/desmume: a temp folder of ours (removed at the end)
@@ -139,6 +138,18 @@ def strong_lead(g):
         g.d.w16(ctx + raid_pt.CTX_BATTLE_MONS + 8, 400)        # spAttack
 
 
+def after_catch_input(g):
+    """The test player after a throw: the 'Give a nickname?' Yes/No buttons are up -> touch No (the blue button);
+    anything else (Pokédex page, texts) -> A."""
+    raw = g.d.screen_rgb()
+    x, y = 30, 192 + 140
+    r, gg, b = raw[3 * (y * 256 + x):3 * (y * 256 + x) + 3]
+    if b > 150 and r < 120:
+        g.later(0, ("touch", (128, 140)))
+    else:
+        g.later(0, ("key", "a"))
+
+
 def drive(g, rb, frames, *, down_chance=None, first_ball=None, throw_slot=1, flee_at_first=False, strong=False):
     """The test player: auto-pick after a short 'timer', a ball in the first turn (blocked), the one throw in the
     catch phase, B through the after-catch screens (B = no nickname)."""
@@ -171,16 +182,16 @@ def drive(g, rb, frames, *, down_chance=None, first_ball=None, throw_slot=1, fle
         if down_chance is not None and g.pool == 0 and not st["down"] and rb.phase == "fight":
             st["down"] = True
             rb.group_down(down_chance)
-        if rb.throws and rb.decision is None and not g.script and g.frame - last_b > 70 and not g.pm.is_safe():
-            g.later(0, ("key", "b"))              # after the throw: Pokédex page, "nickname?" -> no
+        if rb.throws and rb.decision is None and not g.script and g.frame - last_b > 80 and not g.pm.is_safe():
+            after_catch_input(g)                  # after the throw: Pokédex page (A), "nickname?" -> No
             last_b = g.frame
         if g.ended():
             break
     for _ in range(600):
         if g.pm.is_safe():
             break
-        if not g.script and g.frame - last_b > 70:
-            g.later(0, ("key", "b"))
+        if not g.script and g.frame - last_b > 80:
+            after_catch_input(g)
             last_b = g.frame
         g.tick()
 
@@ -259,6 +270,39 @@ def scenario_miss(core):
     CHECK("platinum: back in the overworld", g.pm.is_safe())
 
 
+def scenario_afk_catch(core):
+    print("== platinum: AFK player: auto-pick fights and throws the ball in the catch phase ==", flush=True)
+    g = PT(core, "pt_sl_route202.dsst")
+    balls0 = g.balls()
+    n0 = len(g.party())
+    rb = g.raid(boss(LATIAS, 12, [SPLASH]), 1)
+    st = {"auto_at": None, "down": False, "last": 0}
+
+    def on_event(ev):
+        if ev["type"] == "need_input":
+            st["auto_at"] = g.frame + 40
+
+    g.on_event = on_event
+    for _ in range(20000):
+        g.tick()
+        if st["auto_at"] is not None and g.frame >= st["auto_at"]:
+            st["auto_at"] = None
+            rb.auto_pick()
+        if g.pool == 0 and not st["down"] and rb.phase == "fight":
+            st["down"] = True
+            rb.group_down(1.0)
+        if rb.throws and rb.decision is None and not g.script and g.frame - st["last"] > 80 and not g.pm.is_safe():
+            after_catch_input(g)
+            st["last"] = g.frame
+        if g.ended():
+            break
+    b1 = g.balls()
+    CHECK("platinum: AFK catch: auto-pick threw a Poké Ball (Master Ball kept), caught",
+          g.outcome() == "caught" and len(g.party()) == n0 + 1 and b1.get(POKE_BALL, 0) == balls0.get(POKE_BALL, 0) - 1
+          and b1.get(MASTER_BALL) == balls0.get(MASTER_BALL), "outcome %s %s -> %s notes %s" % (
+              g.outcome(), balls0, b1, [n for _f, n in rb.log][-4:]))
+
+
 def scenario_flee(core):
     print("== platinum: time over -> the boss teleports away ==", flush=True)
     g = PT(core, "pt_sl_route202.dsst")
@@ -292,6 +336,43 @@ def scenario_next_mon_blackout(core):
           and all(p["hp"] > 0 for p in party), str([(p["dex"], p["hp"]) for p in party]))
 
 
+def scenario_perish_dbond(core):
+    """The player's Perish Song / Destiny Bond never take the boss down (they go through the HP update: clamped)."""
+    for move, name in ((195, "Perish Song"), (194, "Destiny Bond")):
+        print("== platinum: the player's %s against the boss ==" % name, flush=True)
+        g = PT(core, "pt_sl_route202.dsst")
+        rb = g.raid(boss(LATIAS, 30 if move == 194 else 12, [SPLASH] if move == 195 else [PSYCHIC_M]), 5000)
+        st = {"set": False, "auto_at": None}
+
+        def on_event(ev, g=g, rb=rb, st=st, move=move):
+            if ev["type"] == "need_input" and not st["set"]:
+                st["set"] = True                       # test only: the lead knows just this move; the boss is slow
+                ctx = rb._ctx()
+                b0 = ctx + raid_pt.CTX_BATTLE_MONS
+                g.d.w16(b0 + raid_pt.BM_MOVES, move)
+                for i in range(1, 4):
+                    g.d.w16(b0 + raid_pt.BM_MOVES + 2 * i, 0)
+                g.d.w8(b0 + raid_pt.BM_PP, 5)
+                g.d.w16(ctx + raid_pt.CTX_BATTLE_MONS + raid_pt.BATTLE_MON_SIZE + 6, 1)     # boss speed
+            if ev["type"] == "need_input":
+                st["auto_at"] = g.frame + 40
+
+        g.on_event = on_event
+        for _ in range(30000):
+            if st["auto_at"] is not None and g.frame >= st["auto_at"]:
+                st["auto_at"] = None
+                rb.auto_pick()
+            g.tick()
+            if g.ended():
+                break
+        notes = [n for _f, n in rb.log]
+        INFO("notes: %s" % [n for n in notes if "clamp" in n or "guard" in n or "ended" in n])
+        bars = [e["mb"] for _f, e in g.events if e["type"] == "damage"]
+        CHECK("platinum: %s took the boss's current bar (clamped at 1 HP, no win), the raid went on" % name,
+              any("clamp" in n or "guard" in n for n in notes) and g.outcome() in ("blackout",) and rb.result != 1
+              and bars and bars[-1] >= 900, "outcome %s result %d hits %s" % (g.outcome(), rb.result, bars))
+
+
 def scenario_den(core):
     print("== platinum: den drawn on the top screen, collision, A to join ==", flush=True)
     import pygame
@@ -322,6 +403,28 @@ def scenario_den(core):
     surf2 = pygame.Surface((256, 384))
     CHECK("platinum: off screen -> edge arrow, offset in tiles", not far.draw(surf2, pm, cam)
           and far.offset(pm)[0] == 40)
+    # a real spot from client/yellowlink/raid_spots.json (Twinleaf Town, next to the fixture's player)
+    g = PT(core, "pt_town.dsst")
+    g.tick(20)
+    p = pm_pos = g.pm.position()
+    near = sorted((s for s in raid_data.spots("sinnoh") if s["map"] == g.pm.map_id()),
+                  key=lambda s: abs(s["x"] - p["x"]) + abs(s["y"] - p["y"]))
+    den = raid_pt.Den(near[0])
+    cam = sinnoh_view.read_camera(core, g.pm.field_system())
+    g.tick(sinnoh_view.DISPLAY_LAG)
+    surf = pygame.image.frombuffer(core.screen_rgb(), (256, 384), "RGB").copy()
+    vis = den.draw(surf, g.pm, cam, t=0.3)
+    pygame.image.save(pygame.transform.scale(surf, (512, 768)), os.path.join(OUT, "den_platinum_spot.png"))
+    INFO("real spot %s at (%d, %d), player at (%d, %d): %s" % (near[0]["name"], near[0]["x"], near[0]["y"],
+                                                              pm_pos["x"], pm_pos["y"], "on screen" if vis else "arrow"))
+    CHECK("platinum: den on a real Twinleaf Town spot (den_platinum_spot.png)", vis)
+    den2 = raid_pt.Den(near[0])
+    seen = False
+    for _ in range(8):                             # no camera given: the den keeps its own (lagged) history
+        g.tick()
+        surf3 = pygame.Surface((256, 384))
+        seen = den2.draw(surf3, g.pm, off=(0, 0), mask=None) or seen
+    CHECK("platinum: den.draw(surface, pm, off=, mask=) without a camera (own camera history)", seen)
 
 
 def run(check, info, states, out):
@@ -336,8 +439,10 @@ def run(check, info, states, out):
     try:
         scenario_catch(core)
         scenario_miss(core)
+        scenario_afk_catch(core)
         scenario_flee(core)
         scenario_next_mon_blackout(core)
+        scenario_perish_dbond(core)
         scenario_den(core)
     finally:
         core.close()

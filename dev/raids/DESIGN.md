@@ -389,6 +389,13 @@ are full - check at join; Gen 4: next box with room). The PC database then picks
 - Platinum: the HP bar's own copy of the HP isn't redrawn when we write the segment at turn start (it
   catches up at the next hit) - our banner shows the true value.
 
+**Status (raid-games, 2026-10-27): closed** - all of the above is built and checked on the real ROMs by
+`dev/raids/verify.py`: Crystal Perish Song / Destiny Bond (guards on the faint tests; they take the boss's current
+bar, like a one-hit KO - Platinum's HP-update clamp does the same; Yellow has neither move), the party menu / "Use
+next Pokémon?" after a faint in all three games (Platinum: BtlCmd_WaitYesNoResult 0x02247C04 /
+BtlCmd_WaitMonSelection 0x0224200C, touch), den collision + A + drawing (`raid_gb.Den`, `raid_pt.Den`), the
+Johto + Sinnoh spot generators with a reach table (`dev/raids/gen_spots.py`). The HP bar note still stands.
+
 ## A.7 Server
 
 Per server instance (each friend group has its own raids). New module `raids.py`:

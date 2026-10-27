@@ -73,23 +73,27 @@ def gb_den(t: float = 0.0) -> pygame.Surface:
 
 
 def ds_den(t: float = 0.0, w: int = 32, h: int = 48) -> pygame.Surface:
-    """A smoother version for the DS top screen (drawn at 32 x 48, the caller scales it to the billboard)."""
+    """A smoother version for the DS top screen (drawn at 32 x 48, the caller scales it to the billboard): four
+    rough stones stacked like a cairn, a dark outline, a glowing orb on top."""
     s = pygame.Surface((w, h), pygame.SRCALPHA)
-    pygame.draw.ellipse(s, (0, 0, 0, 80), (2, h - 7, w - 4, 7))
-    # stones from the bottom up: (x, y, width, height)
-    stones = [(2, h - 14, w - 4, 10), (5, h - 23, w - 10, 10), (7, h - 31, w - 14, 9), (10, h - 38, w - 20, 8)]
-    for i, (x, y, ww, hh) in enumerate(stones):
-        base = STONE[1] if i % 2 == 0 else STONE[2]
-        pygame.draw.ellipse(s, base, (x, y, ww, hh))
-        pygame.draw.ellipse(s, OUTLINE, (x, y, ww, hh), 1)
-        pygame.draw.arc(s, STONE[0], (x + 2, y + 1, ww - 4, hh - 2), math.pi * 0.15, math.pi * 0.85, 1)
+    pygame.draw.ellipse(s, (0, 0, 0, 90), (1, h - 7, w - 2, 7))
+    # stones from the bottom up: (x, y, width, height, shade)
+    stones = [(1, h - 15, w - 2, 12, 2), (4, h - 25, w - 8, 12, 1), (6, h - 34, w - 12, 11, 2),
+              (9, h - 41, w - 18, 9, 1)]
+    for x, y, ww, hh, shade in stones:
+        pygame.draw.ellipse(s, OUTLINE, (x - 1, y - 1, ww + 2, hh + 2))
+        pygame.draw.ellipse(s, STONE[shade + 1], (x, y, ww, hh))
+        pygame.draw.ellipse(s, STONE[shade], (x + 1, y, ww - 3, hh - 3))
+        pygame.draw.arc(s, STONE[0], (x + 3, y + 1, ww - 8, hh - 4), math.pi * 0.25, math.pi * 0.8, 1)
     p = _pulse(t)
-    r = 5 + int(2 * p)
+    r = 4 + int(2 * p)
+    cy = h - 44
     halo = pygame.Surface((w, h), pygame.SRCALPHA)
-    pygame.draw.circle(halo, GLOW + (int(70 + 60 * p),), (w // 2, h - 42), r + 3)
+    pygame.draw.circle(halo, GLOW + (int(60 + 70 * p),), (w // 2, cy), r + 3)
     s.blit(halo, (0, 0))
-    pygame.draw.circle(s, GLOW, (w // 2, h - 42), r)
-    pygame.draw.circle(s, GLOW_CORE, (w // 2, h - 42), max(1, r // 2))
+    pygame.draw.circle(s, OUTLINE, (w // 2, cy), r + 1)
+    pygame.draw.circle(s, GLOW, (w // 2, cy), r)
+    pygame.draw.circle(s, GLOW_CORE, (w // 2 - 1, cy - 1), max(1, r // 2))
     return s
 
 

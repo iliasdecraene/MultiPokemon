@@ -97,6 +97,8 @@ def test_vendored_spots_are_a_sample_of_the_client_data():
         cdata = json.load(fh)
     sdata = SR.load_spots(server)
     for region, r in cdata.items():
+        if region not in SR.POOLS:
+            continue
         maps = {m["map"]: m for m in (r.get("maps") or {}).values() if m.get("spots")}
         assert region in sdata, f"{region} missing in the server copy: run dev/raids/server_spots.py"
         s = sdata[region]

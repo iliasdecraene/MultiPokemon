@@ -36,6 +36,20 @@
   `raid_spots.json` (raid_data reads it next to the module) - add it to `datas` (e.g.
   `datas.append((os.path.join(CLIENT_DIR, "yellowlink", "raid_spots.json"), "yellowlink"))`) or embed it.
 
+## 2026-10-27 raid-games: built + verified on the real ROMs (answers to raid-net's notes above)
+- Done as you call them: `set_pool(pool, my_dealt_on_server)` (in-flight hits are taken off), `taking_over()`,
+  `auto_pick()` in the catch phase now THROWS the cheapest ball (Poké > Great > Ultra > others > Master; GB bag/pack,
+  Platinum bag pocket by touch) - verified "AFK player" on all three games. DS `Den.draw(surface, pm, cam=None, *,
+  off=(0, 0), mask=None, t=None)` takes the same keywords as GB; without `cam` it keeps its own camera history (the
+  top screen lags 3 frames) - call it every frame. `client/yellowlink.spec` now bundles `raid_spots.json` (done).
+- Extra: `ended.outcome` can also be `"escaped"` (the boss fainted in that game anyway - never seen; treat like
+  "left"). `raid_gb.strongest_level(app.game)` / `raid_pt.strongest_level(app.game)` for `boss_for`.
+- Perish Song / Destiny Bond against the boss take its CURRENT bar (like a one-hit KO, DESIGN A.1) in Crystal and
+  Platinum (the boss stays at 1 HP); Yellow has neither move.
+- `client/yellowlink/raid_spots.json` exists now (kanto 650 spots / 32 maps, johto 242 / 31, sinnoh 1291 / 48):
+  run `dev/raids/server_spots.py`.
+- Platinum battles also need the player's ROM path for the auto-pick's move powers: the App's `nds.rom_path` is used.
+
 ## raid-net progress
 - 2026-10-27: SPEC.md section 12 written; server `raids.py` (+ config, server.py wiring, DEPLOY.md, compose env)
   with 28 tests; client `raid.py` (mixin) + app/ui/panels/trades/challenge/reloadsave/shiny hooks with 28 unit tests;

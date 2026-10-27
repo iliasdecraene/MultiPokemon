@@ -78,6 +78,9 @@ ASSETS_DIR = os.path.join(CLIENT_DIR, "assets")
 if os.path.isdir(ASSETS_DIR):
     datas.append((ASSETS_DIR, "assets"))
 
+# Raid den spots (our own generated coordinates, dev/raids/gen_spots.py): raid_data.py reads it next to the module
+datas.append((os.path.join(CLIENT_DIR, "yellowlink", "raid_spots.json"), "yellowlink"))
+
 # Optional icon
 ICON = None
 for _candidate in ("assets/icon.ico", "icon.ico"):

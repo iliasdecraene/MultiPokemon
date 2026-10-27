@@ -131,7 +131,7 @@ class GB:
 
     # test-only: make a Lv5 starter able to hurt the boss (written once the battle is up, not by raid_gb)
     def weaken_boss(self):
-        m, S = self.m, self.S
+        m = self.m
         if self.game_id == "yellow":
             for a in (0xCFF7, 0xCFFB):                 # wEnemyMonDefense, wEnemyMonSpecial
                 m.w16(a, 5)
@@ -360,6 +360,43 @@ def scenario_miss(game_id):
     g.stop()
 
 
+def scenario_afk_catch(game_id):
+    """A player who never presses anything: the timer's auto_pick fights and, in the catch phase, throws the
+    cheapest ball (a Poké Ball, not the Master Ball)."""
+    print("== %s: AFK player: auto-pick fights and throws the ball in the catch phase ==" % game_id, flush=True)
+    species = MEW if game_id == "yellow" else CELEBI
+    state = "soullink_route1_grass.state" if game_id == "yellow" else "crystal_sl_route29.state"
+    g = GB(game_id, state)
+    poke = POKE_BALL_Y if game_id == "yellow" else POKE_BALL_C
+    balls0 = g.balls()
+    n0 = len(g.gm.party())
+    rb = g.raid(boss(game_id, species, 30, [SPLASH]), 1)
+    st = {"down": False, "auto_at": None}
+
+    def on_event(ev):
+        if ev["type"] == "started":
+            g.weaken_boss()
+        if ev["type"] == "need_input":
+            st["auto_at"] = g.frame + 30
+
+    g.on_event = on_event
+    for _ in range(20000):
+        g.tick()
+        if st["auto_at"] is not None and g.frame >= st["auto_at"]:
+            st["auto_at"] = None
+            rb.auto_pick()
+        if g.pool == 0 and not st["down"] and rb.phase == "fight":
+            st["down"] = True
+            rb.group_down(1.0)
+        if g.ended():
+            break
+    b1 = g.balls()
+    CHECK("%s: AFK catch: auto-pick threw a Poké Ball (Master Ball kept), caught" % game_id,
+          g.outcome() == "caught" and len(g.gm.party()) == n0 + 1 and b1.get(poke, 0) == balls0.get(poke, 0) - 1
+          and b1.get(MASTER_BALL) == balls0.get(MASTER_BALL), "outcome %s balls %s -> %s" % (g.outcome(), balls0, b1))
+    g.stop()
+
+
 def scenario_flee(game_id):
     print("== %s: raid time over -> the boss teleports away ==" % game_id, flush=True)
     species = MEW if game_id == "yellow" else CELEBI
@@ -465,9 +502,11 @@ def scenario_perish_dbond(game_id):
                 break
         notes = [n for _f, n in rb.log]
         INFO("notes: %s" % [n for n in notes if "perish" in n or "destiny" in n or "escaped" in n or "ended" in n])
-        CHECK("crystal: %s used, the boss stayed (no faint), the raid went on to its end" % name,
+        bars = [e["mb"] for _f, e in g.events if e["type"] == "damage"]
+        CHECK("crystal: %s took the boss's current bar (like a one-hit KO), the boss stayed, the raid went on" % name,
               any(name.lower() in n for n in notes) and not any("escaped" in n for n in notes)
-              and g.outcome() in ("fled", "blackout"), "outcome %s" % g.outcome())
+              and bars and bars[-1] >= 900 and g.outcome() in ("fled", "blackout"),
+              "outcome %s hits %s" % (g.outcome(), bars))
         g.stop()
 
 
@@ -497,6 +536,23 @@ def scenario_den(game_id):
     far = raid_gb.Den(dict(spot, x=p["x"] + 30, y=p["y"] - 2), game_id)
     CHECK("%s: off screen -> edge arrow, offset in squares" % game_id,
           not far.draw(surf2, g.gm) and far.offset(g.gm)[0] == 30)
+    pygame.image.save(pygame.transform.scale(surf2, (480, 432)), os.path.join(OUT, "den_%s_arrow.png" % game_id))
+    g.stop()
+    # a real spot from client/yellowlink/raid_spots.json, next to a fixture's player
+    state = "pallet_after_lab.state" if game_id == "yellow" else "crystal_sl_route29.state"
+    g = GB(game_id, state)
+    g.tick(30)
+    p = g.gm.position()
+    region = raid_data.GAME_REGION[game_id]
+    near = sorted((s for s in raid_data.spots(region) if s["map"] == g.gm.map_id()),
+                  key=lambda s: abs(s["x"] - p["x"]) + abs(s["y"] - p["y"]))
+    den = raid_gb.Den(near[0], game_id)
+    img = g.pb.screen.image.convert("RGB")
+    surf = pygame.image.frombuffer(img.tobytes(), img.size, "RGB").copy()
+    vis = den.draw(surf, g.gm, t=0.3)
+    pygame.image.save(pygame.transform.scale(surf, (480, 432)), os.path.join(OUT, "den_%s_spot.png" % game_id))
+    INFO("real spot %s at (%d, %d), player at (%d, %d): %s" % (near[0]["name"], near[0]["x"], near[0]["y"], p["x"],
+                                                              p["y"], "den on screen" if vis else "arrow"))
     g.stop()
 
 
@@ -508,6 +564,7 @@ def run(game_id, check, info, sym, states, out):
     check_addresses(game_id, sym)
     scenario_fight_catch(game_id)
     scenario_miss(game_id)
+    scenario_afk_catch(game_id)
     scenario_flee(game_id)
     scenario_next_mon_blackout(game_id)
     scenario_perish_dbond(game_id)

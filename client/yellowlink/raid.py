@@ -764,6 +764,13 @@ class RaidMixin:
         return boss
 
     def _raid_strongest(self) -> int:
+        mod = _game_module(self.game_id)
+        fn = getattr(mod, "strongest_level", None) if mod is not None else None
+        if fn is not None:
+            try:
+                return int(fn(self.game)) or 5
+            except Exception:  # noqa: BLE001
+                log.exception("raid: strongest_level failed")
         try:
             if self.ds:
                 party = self.game.party_checked() or []
@@ -953,6 +960,7 @@ class RaidMixin:
             self._raid_report("fled")
         elif t == "ended":
             outcome = ev.get("outcome")
+            # "escaped" (the boss fainted in this game anyway) and "error" count as leaving the raid
             self._raid_report(outcome if outcome in RESULTS else "left")
             self.raid_battle = None
             self.raid_timer.input_done()

@@ -43,7 +43,7 @@ import time
 from ctypes import c_char_p
 
 from . import pk4, raid_art, raid_data
-from .platinum import (BATTLE_MON_SIZE, CTX_BATTLE_MONS, FLAG_HAS_PARTNER, FLAG_SAFARI_GAME_ACTIVE, OVERLAY_BATTLE,
+from .platinum import (BATTLE_MON_SIZE, CTX_BATTLE_MONS, FLAG_HAS_PARTNER, FLAG_SAFARI_GAME_ACTIVE,
                        PlatinumMemory, _ptr)
 
 log = logging.getLogger("yellowlink.raid")
@@ -95,6 +95,10 @@ TOUCH_BACK = (236, 174)                         # the bottom-right "back" arrow 
 TOUCH_YES_NEXT = (128, 68)                      # "Use next Pokémon" (the other button is "Flee")
 TOUCH_PARTY = [(64, 24), (192, 24), (64, 72), (192, 72), (64, 120), (192, 120)]
 TOUCH_SHIFT = (128, 110)
+TOUCH_BAG = (40, 168)                           # command menu: BAG
+TOUCH_BAG_BALLS = (192, 56)                     # bag: the Poké Balls pocket
+TOUCH_BAG_SLOTS = [(64, 30), (192, 30), (64, 78), (192, 78), (64, 126), (192, 126)]   # first page of a pocket
+TOUCH_BAG_USE = (100, 174)
 
 
 class _Regs:
@@ -195,6 +199,16 @@ class FieldCaller:
         self.cur = None
         if cur["cb"]:
             cur["cb"](result)
+
+
+def strongest_level(pm) -> int:
+    """The player's strongest party level (decision 3: a mythical boss is this + 5); eggs don't count."""
+    try:
+        from .platinum import mon_info
+        infos = [mon_info(r) for r in (pm.party_checked() or [])]
+        return raid_data.strongest_level(i["level"] for i in infos if i and not i["egg"])
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def shiny_pid(pid: int, tid: int, sid: int) -> int:
@@ -412,7 +426,9 @@ class RaidBattle:
             self._party_step = 0
 
     def taking_over(self) -> bool:
-        return self.auto
+        """True while YellowLink drives the game: the battle is being started (the game functions are called over
+        the next field frames - a START press then would open a menu in between), or auto_pick is touching."""
+        return self.auto or self.phase == "starting"
 
     def busy(self) -> bool:
         return self.phase not in ("idle", "over")
@@ -607,6 +623,8 @@ class RaidBattle:
                 self.phase = "fight"
             elif self.phase == "fleeing":
                 self._apply_flee(ctx)
+            elif self.phase == "down":              # the group took it down while this battle was starting
+                self._apply_down(ctx)
             self._note("battle up: max hp %d, segment %d" % (mx, hp))
         cmd = d.r32(ctx + CTX_COMMAND)
         state = d.r8(ctx + CTX_CUR_CMD_STATE)
@@ -742,7 +760,22 @@ class RaidBattle:
         if self.frame < self._next_touch or self.frame - self._ui_since < 20 or self._touch_until is not None:
             return
         ui = self.ui
-        if ui == "menu":
+        throw = self.phase == "down" and self.throws == 0 and self.catch_success is not None
+        if ui == "menu" and throw:
+            self._bag_step = 0
+            self._touch(TOUCH_BAG, 60)
+        elif ui == "bag" and throw:
+            # bag: balls pocket -> the cheapest ball -> USE (the raid decides the result: never waste a Master Ball)
+            step = getattr(self, "_bag_step", 0) % 3
+            if step == 0:
+                self._touch(TOUCH_BAG_BALLS, 60)
+            elif step == 1:
+                idx = self.ball_choice([item for item, _q in self.pm.balls()])
+                self._touch(TOUCH_BAG_SLOTS[idx if idx is not None and idx < len(TOUCH_BAG_SLOTS) else 0], 60)
+            else:
+                self._touch(TOUCH_BAG_USE, 60)
+            self._bag_step = getattr(self, "_bag_step", 0) + 1
+        elif ui == "menu":
             self._touch(TOUCH_FIGHT)
         elif ui == "moves":
             slot = self.choose_slot(ctx)
@@ -759,6 +792,15 @@ class RaidBattle:
             self._party_step += 1
         elif ui in ("bag", "party", "run", "target"):
             self._touch(TOUCH_BACK, 50)
+
+    BALL_ORDER = (4, 3, 2, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1)   # Poké, Great, Ultra, the rest, Master last
+
+    def ball_choice(self, items):
+        best = None
+        for i, it in enumerate(items):
+            if it in self.BALL_ORDER and (best is None or self.BALL_ORDER.index(it) < self.BALL_ORDER.index(items[best])):
+                best = i
+        return best
 
     def choose_slot(self, ctx) -> int:
         usable = self.usable_slots(ctx)
@@ -980,20 +1022,47 @@ class Den:
         b = self._bump
         return bool(b and time.time() - b[0] < 3 and (p["x"] + b[1][0], p["y"] + b[1][1]) == (self.x, self.y))
 
-    def draw(self, surface, pm, cam=None, *, t=None, height=None):
-        """Draw the den on the top screen part (256 x 192 at (0, 0)) of `surface` with the camera the top screen
-        shows (SinnohView.display), or an edge arrow when it's off screen. Returns True if the den is visible."""
+    def _camera(self, pm):
+        """The camera the top screen shows now (it lags DISPLAY_LAG emulated frames behind RAM), from a small history
+        of our own - for callers that don't pass the app's SinnohView camera."""
+        from . import sinnoh_view
+        cams = self.__dict__.setdefault("_cams", [])
+        fs = pm.field_system() if pm.overworld_running() else None
+        cam = sinnoh_view.read_camera(pm.m, fs) if fs else None
+        frame = getattr(pm.m, "frame_count", None)
+        if frame is None:
+            return cam
+        if cams and frame <= cams[-1][0]:
+            cams.clear()
+        cams.append((frame, cam))
+        del cams[:-12]
+        best = None
+        for f, c in cams:
+            if f <= frame - sinnoh_view.DISPLAY_LAG:
+                best = (f, c)
+        if best is None or any(c is None for f, c in cams if f >= best[0]):
+            return None
+        return best[1]
+
+    def draw(self, surface, pm, cam=None, *, off=(0, 0), mask=None, t=None, height=None, neighbor_shift=None):
+        """Draw the den on the top screen part (256 x 192 at `off`) of `surface`, or an edge arrow when it's off
+        screen. cam = the camera the top screen shows (SinnohView.display); None = YellowLink's own camera history
+        (call draw every frame then). mask/neighbor_shift: accepted for the same call as raid_gb.Den (unused).
+        Returns True if the den is visible."""
         import pygame
         from . import sinnoh_view
         try:
             if not pm.overworld_running() or pm.field_task():
                 return False
             d = self.offset(pm)
+            if cam is None:
+                cam = self._camera(pm)
         except Exception:  # noqa: BLE001
             return False
         if d is None:
             return False
         t = time.time() if t is None else t
+        ox, oy = off
         p = pm.position()
         ph = p["ph"] if height is None else height
         if cam is not None:
@@ -1004,9 +1073,9 @@ class Den:
                 if left < 256 and left + w > 0 and top < 192 and top + h > 0:
                     img = pygame.transform.smoothscale(raid_art.ds_den(t), (max(1, int(w)), max(1, int(h))))
                     clip = surface.get_clip()
-                    surface.set_clip(pygame.Rect(0, 0, 256, 192))
-                    surface.blit(img, (int(round(left)), int(round(top))))
+                    surface.set_clip(pygame.Rect(ox, oy, 256, 192))
+                    surface.blit(img, (int(round(left)) + ox, int(round(top)) + oy))
                     surface.set_clip(clip)
                     return True
-        raid_art.arrow(surface, (0, 0, 256, 192), d[0], d[1], abs(d[0]) + abs(d[1]), t)
+        raid_art.arrow(surface, (ox, oy, 256, 192), d[0], d[1], abs(d[0]) + abs(d[1]), t)
         return False

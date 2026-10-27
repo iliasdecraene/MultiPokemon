@@ -19,9 +19,10 @@ HOW (DESIGN.md appendix A; addresses = pret symbols, checked against the ROM's c
            per phase: fight = raid moves; down = asleep at 1 HP, Splash; flee = Teleport (Yellow: level 100).
   shared HP  the boss never faints while the group pool has HP: every frame (VBlank hook) an HP of 0 is set to 1
            (Yellow: 24-111 frames between HP 0 and the faint test, Crystal 40); Crystal also has guard hooks on
-           its faint tests (HasEnemyFainted and every `ld hl, wEnemyMonHP / ld a, [hli] / or [hl]`), skips
-           Perish Song's kill of the boss (HandlePerishSong.kill_enemy -> ret) and Destiny Bond taking the boss
-           down (BattleCommand_CheckFaint's `jr z, .no_dbond` forced). Yellow has neither move (Gen 1).
+           its faint tests (HasEnemyFainted and every `ld hl, wEnemyMonHP / ld a, [hli] / or [hl]`, which run
+           right after Perish Song's kill (HandlePerishSong.kill_enemy) and Destiny Bond's (BattleCommand_CheckFaint)
+           set the boss's HP to 0): those take the boss's current bar, like a one-hit KO (DESIGN A.1) - the same as in
+           Platinum. Yellow has neither move (Gen 1).
            Damage = drops of the boss's HP, turned into milli-bars by raid_data.BarMeter (exact per bar).
   balls    blocked while fighting (ItemUseBall / PokeBallEffect -> the game's "This isn't the time to use
            that!": no turn used, the ball stays). Catch phase: ONE throw; its result is forced inside the
@@ -216,6 +217,14 @@ def spec_for(game_id: str):
     return {"yellow": YellowSpec, "crystal": CrystalSpec}[game_id]
 
 
+def strongest_level(gm) -> int:
+    """The player's strongest party level (decision 3: a mythical boss is this + 5); eggs don't count."""
+    try:
+        return raid_data.strongest_level(p.level for p in gm.party() if getattr(p, "species", 0) not in (0, 0xFD))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 # --------------------------------------------------------------------------------------------------------------
 class RaidBattle:
     """One raid battle in the player's own game (see the module docstring and dev/raids/STATUS.md)."""
@@ -384,8 +393,9 @@ class RaidBattle:
             self._next_press = 0
 
     def taking_over(self) -> bool:
-        """True while auto_pick drives the buttons (the app should drop the player's own input then)."""
-        return self.auto
+        """True while YellowLink drives the game: the battle is being started, or auto_pick drives the buttons (the
+        app should drop the player's own input then)."""
+        return self.auto or self.phase == "starting"
 
     def busy(self) -> bool:
         return self._busy
@@ -462,7 +472,8 @@ class RaidBattle:
     # --- battle set-up
     def _on_init(self):
         S, m = self.S, self.m
-        if self.phase not in ("starting", "fleeing") or m[S.IN_BATTLE] != 1 or m[S.ENEMY_SPECIES] != self.species:
+        if self.phase not in ("starting", "fleeing", "down") or m[S.IN_BATTLE] != 1 \
+                or m[S.ENEMY_SPECIES] != self.species or self.max_hp:
             return
         self.max_hp = m.r16(S.ENEMY_MAX_HP)
         if self.game_id == "crystal":
@@ -475,6 +486,8 @@ class RaidBattle:
         self._was_in_battle = True
         if self.phase == "fleeing":
             self._start_flee()
+        elif self.phase == "down":                  # the group took it down while this battle was starting
+            self._apply_down()
         else:
             self.phase = "fight"
         self._note("override: max hp %d, segment %d" % (self.max_hp, hp))
@@ -577,23 +590,18 @@ class RaidBattle:
             self.events.append({"type": "damage", "hp": drop, "of": self.max_hp, "mb": mb})
 
     def _on_perish(self):
-        if not self._guarding():
-            return
-        # skip the kill: emulate the `ret` of HandlePerishSong.do_it (its stack is balanced here)
-        rf = self.pyboy.register_file
-        sp = rf.SP
-        rf.PC = self.pyboy.memory[sp] | (self.pyboy.memory[sp + 1] << 8)
-        rf.SP = (sp + 2) & 0xFFFF
-        self._note("perish song: the boss is unaffected")
+        # Perish Song's count ran out for the boss: HandlePerishSong.kill_enemy sets its HP to 0; the guards on the
+        # faint tests right after (CheckFaint_* -> HasEnemyFainted / HandlePlayerMonFaint) put it back to 1 and
+        # count the boss's current bar for the player - like a one-hit KO (DESIGN A.1), the same as Platinum.
+        if self._guarding():
+            self._note("perish song: takes the boss's current bar")
 
     def _on_dbond(self):
-        if not self._guarding():
-            return
+        # Destiny Bond: the boss knocked out a Destiny Bond user -> the game sets the boss's HP to 0 here; the guards
+        # / the frame watch keep it at 1 and count the current bar (see _on_perish).
         rf = self.pyboy.register_file
-        if self.pyboy.memory[self.S.BATTLE_TURN] != 0 and not rf.F & 0x80:
-            # the boss's move knocked out a Destiny Bond user: take .no_dbond (Z) - the boss stays
-            rf.F = rf.F | 0x80
-            self._note("destiny bond: the boss is unaffected")
+        if self._guarding() and self.pyboy.memory[self.S.BATTLE_TURN] != 0 and not rf.F & 0x80:
+            self._note("destiny bond: takes the boss's current bar")
 
     def _on_enemy_fainted(self):
         if self.phase in ("fight", "down", "fleeing"):
@@ -715,8 +723,8 @@ class RaidBattle:
         return m[S.MOVE_LIST_INDEX] if self.game_id == "yellow" else m[S.CUR_MOVE_NUM]
 
     # --- auto-pick (the 10-s timer ran out)
-    def _press(self, btn, gap=16):
-        self.pyboy.button(btn, 3)
+    def _press(self, btn, gap=16, hold=3):
+        self.pyboy.button(btn, hold)
         self._next_press = self.frame + gap
 
     def _autopilot(self):
@@ -727,12 +735,16 @@ class RaidBattle:
             return                                  # let the menu settle (presses before it reads input are lost)
         S, m = self.S, self.m
         ui = self.ui
+        throw = self.phase == "down" and self.throws == 0 and self.catch_success is not None
         if ui == "menu":
-            seq = ("up", "left", "a")               # cursor to FIGHT (the menu remembers ITEM/RUN), then A
+            # cursor to FIGHT (the menu remembers ITEM/PACK/RUN), then A; in the catch phase: ITEM/PACK (below FIGHT)
+            seq = ("up", "left", "down", "a") if throw else ("up", "left", "a")
             if self._menu_seq >= len(seq):
                 self._menu_seq = 0
             self._press(seq[self._menu_seq], 20)
             self._menu_seq += 1
+        elif ui == "bag" and throw:
+            self._autothrow()
         elif ui == "moves":
             target = self.choose_slot()
             cur = (m[S.CUR_MENU_ITEM] - 1) if self.game_id == "yellow" else (m[S.MENU_CURSOR_Y] - 1)
@@ -754,6 +766,58 @@ class RaidBattle:
                 self._press("down" if cur < target else "up")
         else:                                         # bag / party list / anything else: back out
             self._press("b", 20)
+
+    # cheapest first, the Master Ball last (Yellow: POKé, GREAT, ULTRA, SAFARI, MASTER; Crystal: + Kurt's balls)
+    BALL_ORDER = {"yellow": (4, 3, 2, 8, 1),
+                  "crystal": (5, 4, 2, 0x9D, 0x9F, 0xA0, 0xA1, 0xA4, 0xA5, 0xA6, 0xB1, 1)}
+
+    def ball_choice(self, items):
+        """Index in `items` ([item ids] as the bag/pocket lists them) of the ball to throw: the cheapest one (the
+        result is decided by the raid anyway - never waste a Master Ball if there is anything else)."""
+        order = self.BALL_ORDER[self.game_id]
+        best = None
+        for i, it in enumerate(items):
+            if it in order and (best is None or order.index(it) < order.index(items[best])):
+                best = i
+        return best
+
+    def _autothrow(self):
+        """Catch phase, the timer ran out: throw a ball from the bag (Yellow list / Crystal balls pocket)."""
+        S, m = self.S, self.m
+        if self.game_id == "yellow":
+            items = [m[0xD31D + 2 * i] for i in range(min(m[0xD31C], 20))]       # wBagItems
+            target = self.ball_choice(items)
+            if target is None:
+                self._press("b", 20)
+                return
+            cur = m[0xCC36] + m[S.CUR_MENU_ITEM]                                # wListScrollOffset + cursor
+            if cur < target:
+                self._press("down")
+            elif cur > target:
+                self._press("up")
+            else:
+                self._press("a", 40)
+            return
+        pocket = m[0xCF65]                                                     # wCurPocket: 1 = balls
+        if pocket != 1:
+            self._press("right" if pocket == 0 else "left", 24, hold=8)    # the pack only sees longer presses
+            return
+        items = [m[0xD8D8 + 2 * i] for i in range(min(m[0xD8D7], 12))]          # wBalls
+        target = self.ball_choice(items)
+        if target is None:
+            self._press("b", 20)
+            return
+        cur = m[0xD0E4] + m[S.MENU_CURSOR_Y] - 1                                # wMenuScrollPosition + cursor
+        if getattr(self, "_use_menu", False):
+            self._use_menu = False
+            self._press("a", 40)                                               # USE
+        elif cur < target:
+            self._press("down")
+        elif cur > target:
+            self._press("up")
+        else:
+            self._use_menu = True
+            self._press("a", 30)
 
     def choose_slot(self) -> int:
         """Decision 6: the move used last turn if it still has PP (and isn't disabled), else the strongest."""

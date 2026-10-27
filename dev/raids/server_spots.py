@@ -17,6 +17,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SRC = os.path.join(REPO, "client", "yellowlink", "raid_spots.json")
 DST = os.path.join(REPO, "server", "yellowlink_server", "raid_spots.json")
 PER_MAP = 40
+REGIONS = ("kanto", "johto", "sinnoh")
 
 
 def sample(points: list, n: int) -> list:
@@ -29,7 +30,9 @@ def sample(points: list, n: int) -> list:
 def convert(client: dict) -> dict:
     regions = {}
     for region in sorted(client):
-        maps = (client[region] or {}).get("maps") or {}
+        if region not in REGIONS or not isinstance(client[region], dict):
+            continue                                  # e.g. "_about"
+        maps = client[region].get("maps") or {}
         names, spots = {}, []
         for m in sorted(maps.values(), key=lambda v: v["map"]):
             if not m.get("spots"):
