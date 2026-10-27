@@ -70,8 +70,19 @@ if not any(os.path.basename(src).lower().startswith("libdesmume") for src, _ in 
 binaries.extend(_ds_libs)
 hiddenimports += ["desmume", "desmume.emulator", "desmume.controls", "desmume.i18n_util"]
 
-# Our own package (also discovered via analysis; this makes it explicit).
+# Our own package: EVERY module, also the ones only loaded on demand with importlib (raid_gb, raid_pt, raid_data,
+# raid_art, platinum_exp - PyInstaller's analysis can't see those). collect_submodules() needs the package on
+# sys.path at spec time (it wasn't, so 0.7.3-0.7.10 shipped without them); the file list below is the safety net.
+import sys as _sys
+if CLIENT_DIR not in _sys.path:
+    _sys.path.insert(0, CLIENT_DIR)
 hiddenimports += collect_submodules("yellowlink")
+_own = sorted(f[:-3] for f in os.listdir(os.path.join(CLIENT_DIR, "yellowlink"))
+              if f.endswith(".py") and not f.startswith("__"))
+hiddenimports += [f"yellowlink.{m}" for m in _own]
+for _m in ("raid_gb", "raid_pt", "raid_data", "raid_art", "platinum_exp"):
+    if f"yellowlink.{_m}" not in hiddenimports:
+        raise SystemExit(f"[yellowlink.spec] yellowlink.{_m} would be missing from the exe")
 
 # Optional bundled assets (icons, fonts, ...) -> <bundle>/assets
 ASSETS_DIR = os.path.join(CLIENT_DIR, "assets")

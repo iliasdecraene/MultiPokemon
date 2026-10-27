@@ -2811,6 +2811,21 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         pygame.quit()
 
 
+# Modules the app only loads on demand (importlib): the exe must contain them (selftest + test_exe_modules.py).
+ON_DEMAND_MODULES = ("platinum_exp", "raid_gb", "raid_pt", "raid_data", "raid_art")
+
+
+def selftest_modules() -> str:
+    """Import every on-demand module (raises if the build left one out) and load the raid spots."""
+    import importlib
+    for name in ON_DEMAND_MODULES:
+        importlib.import_module(f".{name}", __package__)
+    rd = importlib.import_module(".raid_data", __package__)
+    if not (rd.spots("kanto") and rd.spots("johto") and rd.spots("sinnoh")):
+        raise RuntimeError("raid spots (raid_spots.json) missing from the exe")
+    return f"modules ok: {', '.join(ON_DEMAND_MODULES)}"
+
+
 def selftest_ds(argv) -> int:
     """`YellowLink --selftest-ds <report.txt> [test.nds]`: start pygame, our sound device and DeSmuME the way the
     game does (used by the release build to prove the exe can run Platinum; a missing DLL fails the build)."""
@@ -2825,6 +2840,7 @@ def selftest_ds(argv) -> int:
         audio = AudioOut(50)
         lines.append(f"pygame {pygame.version.ver} SDL {'.'.join(map(str, pygame.get_sdl_version()))}, "
                      f"our audio {'mixer' if audio.ok else 'off'}")
+        lines.append(selftest_modules())
         if rom == "make":
             rom = nds_core.make_test_rom(os.path.join(os.path.dirname(os.path.abspath(out)), "yltest.nds"))
         lines.append(nds_core.selftest(rom))
