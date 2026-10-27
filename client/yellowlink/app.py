@@ -110,6 +110,53 @@ def rom_tag_path(resume_path):
     return resume_path.with_suffix(".rom")
 
 
+def _server_offset(app) -> float:
+    """server clock - local clock while online with a server that sends its time (net.time_offset), else 0."""
+    n = getattr(app, "net", None)
+    off = getattr(n, "time_offset", None)
+    return off if off is not None and getattr(n, "status", "") == "online" else 0.0
+
+
+UNKNOWN_TAG = "unknown-build"     # in <resume>.rom: a verified build, but we don't know which (refresh on resume)
+KEEP_OTHER_ROM = 3                # snapshots of unknown ROMs kept aside (newest)
+
+
+def resume_plan(tag_text, read_error: bool, rom_sha1: str, same_code) -> tuple:
+    """What to do with a Platinum resume snapshot: ("load", refresh_from) or ("aside", None).
+    refresh_from = the build the snapshot was taken on when it isn't this one (its wild table / cached FAT in RAM
+    are that build's: App._wild_refresh), None = same build. No tag = vanilla (before 0.7.7). A tag we can't read
+    (locked file, ...) or UNKNOWN_TAG = some verified build: load it and refresh (never throw a snapshot away for
+    that). Only a readable SHA1 of a ROM nobody verified is put aside."""
+    if read_error or (tag_text or "").strip() == UNKNOWN_TAG:
+        return "load", UNKNOWN_TAG
+    taken_on = (tag_text or "").strip() or library.PLATINUM_SHA1
+    if taken_on == rom_sha1:
+        return "load", None
+    if same_code(taken_on, rom_sha1):
+        return "load", taken_on
+    return "aside", None
+
+
+def snapshot_tag(refresh_pending, rom_sha1: str) -> str:
+    """The <resume>.rom to write with a snapshot: while a wild/FAT refresh is still pending, the RAM holds the old
+    build's data, so the snapshot keeps the old build's tag (else the next resume would skip the refresh)."""
+    return refresh_pending or rom_sha1
+
+
+def move_aside_other_rom(path, now=None):
+    """Put a snapshot of an unknown ROM aside (<name>.other-rom-<time>), keeping the newest KEEP_OTHER_ROM."""
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() if now is None else now))
+    dest = path.with_name(f"{path.stem}.other-rom-{stamp}")
+    os.replace(path, dest)
+    old = sorted(path.parent.glob(f"{path.stem}.other-rom*"), key=lambda p: p.name)
+    for p in old[:-KEEP_OTHER_ROM]:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    return dest
+
+
 def write_atomic(path, data: bytes, attempts: int = 5) -> bool:
     """Write via temp file + replace; tolerate Windows AV/OneDrive locks."""
     tmp = path.with_suffix(".tmp")
@@ -197,19 +244,23 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         # Same method names. The DS game runs in nds_core.NDSCore (DeSmuME) instead of PyBoy.
         self.ds = self.game_info.platform == "nds"
         self.sinnoh_problem = None
+        self.sinnoh_note = None       # Complete Sinnoh: an older verified build runs (sinnoh_rom.FALLBACK)
         self.sinnoh_events = None
         self.sinnoh_swarm = None
         self._wild_refresh = None     # set after resuming a snapshot of another ROM build (see _sinnoh_step)
+        # The file the emulator runs. cfg["rom_path"] stays the player's own file from the library (it is saved and
+        # shown in Settings); for Platinum the App runs the Complete Sinnoh copy made from it (sinnoh_rom.py).
+        self.rom_path = cfg["rom_path"]
         if self.ds:
             # Complete Sinnoh: everybody plays our own version, made here from the player's own Platinum
-            cfg["rom_path"] = self._complete_sinnoh_rom(cfg["rom_path"])
+            self.rom_path = self._complete_sinnoh_rom(cfg["rom_path"])
         self.gen2 = self.game_id == "crystal"
         self.G = _platinum_adapter() if self.ds else (crystal if self.gen2 else game)
         rom_cls = getattr(self.G, "RomData", None)
-        self.rom = rom_cls.from_file(cfg["rom_path"]) if rom_cls else None
+        self.rom = rom_cls.from_file(self.rom_path) if rom_cls else None
         # Multiplayer features rely on memory addresses verified on these exact ROMs.
         # Live/practice battles and wide view are Yellow-only (self.hooks / self.wv).
-        sha = library.sha1_file(cfg["rom_path"])
+        sha = library.sha1_file(self.rom_path)
         self.rom_sha1 = sha
         if self.ds:
             # Platinum: the adapter lists the ROMs it is verified on (vanilla + every Complete Sinnoh build:
@@ -309,11 +360,14 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             self.sys_msg("Complete Sinnoh couldn't be prepared, so this is plain Platinum for now ("
                          f"{self.sinnoh_problem}). Press F3 to send a report.", ui.BAD)
             self.toast("Playing plain Platinum this time - see the chat.", 8, ui.BAD)
+        if self.sinnoh_note:
+            self.sys_msg(self.sinnoh_note, ui.BAD)
         ds_error = cfg.pop("_ds_error", None)
         if ds_error:
             self.sys_msg(f"Pokémon Platinum couldn't start ({ds_error}). Press F3 to send a report.", ui.BAD)
             self.toast("Pokémon Platinum couldn't start - press F3 to send a report.", 8, ui.BAD)
-        log.info("config: name=%s server=%s rom=%s", cfg["name"], cfg["server_url"], cfg["rom_path"])
+        log.info("config: name=%s server=%s rom=%s (runs %s)", cfg["name"], cfg["server_url"], cfg["rom_path"],
+                 self.rom_path)
         if not cfg.get("seen_help"):
             self.mode = "help"  # show the controls once on first launch
             cfg["seen_help"] = True
@@ -376,7 +430,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         extra = {}
         if self.gen2:                # Crystal's real-time clock lives next to the save
             extra["rtc_file"] = io.BytesIO(self._load_rtc())
-        self.pyboy = PyBoy(self.cfg["rom_path"], window="null", ram_file=ram,
+        self.pyboy = PyBoy(self.rom_path, window="null", ram_file=ram,
                            sound_emulated=True, sound_sample_rate=48000, log_level="ERROR", **extra)
         self.pyboy.set_emulation_speed(0)
         self.emu = self.pyboy
@@ -422,21 +476,44 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
     def _complete_sinnoh_rom(self, vanilla: str) -> str:
         """The Complete Sinnoh ROM (roms/platinum-sinnoh.nds, made from the player's own vanilla Platinum the first
         time and after every spec update; sinnoh_rom.py), or the vanilla file if it can't be made - then the game
-        still runs (plain Platinum) and the player is told why. Dev/test harnesses can ask for vanilla with
-        YL_PT_ROM=vanilla (dev/platinum/ptrom.py sets it)."""
+        still runs (plain Platinum), the player is told why, and sinnoh_rom.BUILD_FAILED tells Soul Link partners
+        for the rest of this process. Dev/test harnesses can ask for vanilla with YL_PT_ROM=vanilla
+        (dev/platinum/ptrom.py sets it)."""
         if not vanilla or os.environ.get("YL_PT_ROM", "sinnoh").strip().lower() == "vanilla":
             return vanilla
+        from . import sinnoh_rom
         try:
-            from . import sinnoh_rom
+            sinnoh_rom.FALLBACK = None
             path, sha = sinnoh_rom.ensure(vanilla, self.lib.dir / "roms" / sinnoh_rom.FILE_NAME,
-                                          sha1=library.sha1_file)
+                                          sha1=library.sha1_file, on_build=self._building_notice)
             log.info("Complete Sinnoh ROM %s (%s)", path, sha[:12])
+            sinnoh_rom.BUILD_FAILED = None
+            if sinnoh_rom.FALLBACK:
+                ver, why = sinnoh_rom.FALLBACK
+                self.sinnoh_note = (f"Complete Sinnoh couldn't be updated ({why}), so you play the previous version "
+                                    f"(v{ver}) for now. Restart YellowLink to try again; press F3 to send a report.")
             return path
         except Exception as e:  # noqa: BLE001 - never stop the game for this: plain Platinum instead
             log.exception("Complete Sinnoh ROM could not be made")
             msg = str(e) if e.__class__.__name__ == "BuildError" else f"{e.__class__.__name__}: {e}"
             self.sinnoh_problem = msg
+            sinnoh_rom.BUILD_FAILED = msg
             return vanilla
+
+    def _building_notice(self):
+        """While the Complete Sinnoh ROM is being made (first start / after an update; before the game window
+        exists): a small window that says so."""
+        try:
+            pygame.init()
+            surf = pygame.display.get_surface() or pygame.display.set_mode((620, 120))
+            pygame.display.set_caption("YellowLink")
+            surf.fill(ui.BG)
+            img = pygame.font.Font(None, 34).render("Preparing Complete Sinnoh... (only this once)", True, ui.ACCENT)
+            surf.blit(img, img.get_rect(center=(surf.get_width() // 2, surf.get_height() // 2)))
+            pygame.display.flip()
+            pygame.event.pump()
+        except Exception:  # noqa: BLE001 - only a notice
+            log.exception("building notice failed")
 
     def _start_nds(self):
         """Pokémon Platinum: DeSmuME with this server's own battery save (never DeSmuME's shared .dsv)."""
@@ -454,7 +531,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         if save.exists():
             shutil.copy2(save, self.cfg.backup_dir / time.strftime(f"{self.save_tag}-%Y%m%d-%H%M%S.sav"))
             self._prune_backups()
-        self.nds = nds_core.NDSCore(self.cfg["rom_path"], save if len(data) == nds_core.SAVE_SIZE else None,
+        self.nds = nds_core.NDSCore(self.rom_path, save if len(data) == nds_core.SAVE_SIZE else None,
                                     volume=self._ds_volume())
         self.emu = self.nds
         log.info("DS game %s started (save %s, %s)", self.game_id, save, "loaded" if self.nds.loaded_save else "none")
@@ -467,7 +544,9 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         if self.full and getattr(self, "complete_sinnoh", False):
             from . import sinnoh_events, sinnoh_swarm
             self.sinnoh_events = sinnoh_events.EventUnlocker(self.game)
-            self.sinnoh_swarm = sinnoh_swarm.SwarmRotator(self.game)
+            self.sinnoh_swarm = sinnoh_swarm.SwarmRotator(self.game, clock=self.server_time,
+                                                          told=self.cfg.get("swarm_told"),
+                                                          on_told=self._swarm_told)
         if self.wide:
             self.wide = False
         self.last_sram = self._read_sram()
@@ -476,7 +555,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         if dev_state:
             self.nds.load_state(dev_state)
             if getattr(self, "complete_sinnoh", False):
-                self._wild_refresh = "dev state"      # the dev fixtures are vanilla snapshots
+                self._wild_refresh = library.PLATINUM_SHA1     # the dev fixtures are vanilla snapshots
             self.last_sram = self._bat_seen = self._read_sram()
         elif self._try_resume():
             pass
@@ -522,31 +601,35 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         path = self.cfg.resume_path
         if not self.cfg.get("auto_resume", True) or not path.exists():
             return False
-        taken_on = None
+        refresh_from = None
         if self.ds:
             # A snapshot remembers the ROM it was taken on (<resume>.rom; none = before 0.7.7 = vanilla). Plain
             # Platinum and every Complete Sinnoh build have identical code, so such a snapshot is safe to load
-            # (verified: dev/sinnoh/verify.py); only the current map's wild table in RAM is the old one, which
-            # _wild_refresh_now replaces at the first safe frame. A ROM we don't know: start from the save.
+            # (verified: dev/sinnoh/verify.py); only the current map's wild table and the cached file table in RAM
+            # are the old build's, which _wild_refresh_now replaces at the first safe frame. A ROM we don't know:
+            # start from the save (resume_plan).
+            tag = rom_tag_path(path)
+            text, read_error = None, False
             try:
-                tag = rom_tag_path(path)
-                taken_on = tag.read_text().strip() if tag.exists() else library.PLATINUM_SHA1
+                text = tag.read_text() if tag.exists() else None
             except OSError:
-                taken_on = ""
-            same = getattr(self.G, "same_code", lambda a, b: a == b)
-            if taken_on != self.rom_sha1 and not same(taken_on, self.rom_sha1):
-                log.info("resume snapshot is from another ROM (%s): starting from the save", taken_on[:12])
+                log.exception("could not read %s", tag)
+                read_error = True
+            action, refresh_from = resume_plan(text, read_error, self.rom_sha1,
+                                               getattr(self.G, "same_code", lambda a, b: a == b))
+            if action == "aside":
+                log.info("resume snapshot is from another ROM (%s): starting from the save", (text or "")[:12])
                 try:
-                    os.replace(path, path.with_suffix(".other-rom"))
+                    move_aside_other_rom(path)
                 except OSError:
                     log.exception("could not move the other ROM's snapshot aside")
                 return False
         try:
             with open(path, "rb") as f:
                 self.emu.load_state(f)
-            if self.ds and taken_on != self.rom_sha1:
-                log.info("resumed a snapshot from ROM %s on %s", taken_on[:12], self.rom_sha1[:12])
-                self._wild_refresh = taken_on
+            if self.ds and refresh_from:
+                log.info("resumed a snapshot from ROM %s on %s", refresh_from[:13], self.rom_sha1[:12])
+                self._wild_refresh = refresh_from
             self.last_sram = self._read_sram()
             self._bat_seen = self.last_sram
             self.pc_trust = True     # snapshots are always taken together with a PC commit
@@ -585,7 +668,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             return False
         ok = write_atomic(self.cfg.resume_path, buf.getvalue())
         if ok and self.ds:
-            write_atomic(rom_tag_path(self.cfg.resume_path), self.rom_sha1.encode())
+            write_atomic(rom_tag_path(self.cfg.resume_path), snapshot_tag(self._wild_refresh, self.rom_sha1).encode())
         if ok:
             self.flush_sram()
             if not self.chal:
@@ -745,7 +828,18 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             self.sys_msg(f"This server moved - reconnecting to {name}...", ui.ACCENT)
         self._restart_on(sid, "This server moved - reconnecting...")
 
+    def server_time(self) -> float:
+        """Unix time on the server's clock while online (the shared swarm clock, SPEC.md section 11), else the
+        local clock (offline, or an older server without `now`)."""
+        return time.time() + _server_offset(self)
+
+    def local_time_of(self, server_t: float) -> float:
+        """A server-clock moment on this PC's clock (for 'until HH:MM')."""
+        return server_t - _server_offset(self)
+
     def on_welcome(self, msg):
+        if self.net is not None and hasattr(self.net, "set_server_time"):
+            self.net.set_server_time(msg.get("now"))
         self.server_name = str(msg.get("server_name") or "")[:30]
         entry = self.cfg.server(self.cfg.server_id)
         if entry is not None and entry.get("seen_name", "") != self.server_name:
@@ -1230,7 +1324,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
     def plat_data(self):
         """The player's Platinum ROM data (ndsrom.PlatinumData: species names, growth, Gen-4 conversions) or None."""
         if not hasattr(self, "_plat_data"):
-            path = self.cfg["rom_path"] if self.ds else self.lib.rom_path("platinum")
+            path = self.rom_path if self.ds else self.lib.rom_path("platinum")
             self._plat_data = platinum_pc.load_data(path) if platinum_pc and path else None
         return self._plat_data
 
@@ -1246,7 +1340,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         if data is None:
             log.warning("no Platinum ROM data: the PC database is off in Platinum")
             return
-        self.pc_codec = platinum_pc.Gen4PC(self.game, data, platinum_pc.load_item_pockets(self.cfg["rom_path"]))
+        self.pc_codec = platinum_pc.Gen4PC(self.game, data, platinum_pc.load_item_pockets(self.rom_path))
         self.nds.hook_register(self.G.HOOK_PC_OPEN, self._pt_pc_hook)
 
     def _pt_pc_hook(self):
@@ -2035,7 +2129,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         """The Platinum friend renderer (camera history + Lucas/Dawn decoded from the player's ROM) or None."""
         sv = getattr(self, "_sv", None)
         if sv is None and self.full and self.ds:
-            sv = self._sv = sinnoh_view.SinnohView(self.cfg["rom_path"])
+            sv = self._sv = sinnoh_view.SinnohView(self.rom_path)
             if sv.error:
                 log.warning("friends in Sinnoh disabled: %s", sv.error)
         return sv if sv is not None and not sv.error else None
@@ -2388,12 +2482,17 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
                 self.toast(text, 8, ui.ACCENT)
                 self.sys_msg(text, ui.ACCENT)
 
+    def _swarm_told(self, slot):
+        """Remember the announced swarm slot (settings): no repeat after travelling / another server / a run."""
+        self.cfg["swarm_told"] = slot
+        self.cfg.save()
+
     def _swarm_text(self, news) -> str:
         """'Swarm now: Doduo on Route 201 (until 14:00)' from the running ROM's own tables and names."""
         try:
             from . import encdata, ndsrom, platinum_areas, sinnoh_swarm
             if getattr(self, "_swarm_tables", None) is None:
-                rom = ndsrom.NDSRom(self.cfg["rom_path"])
+                rom = ndsrom.NDSRom(self.rom_path)
                 try:
                     narc = rom.narc(encdata.NARC_PATH)
                     self._swarm_tables = [narc[i] for i in range(len(narc))]
@@ -2407,7 +2506,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             pd = self.plat_data
             name = pd.species_name(sp) if pd and sp else (f"#{sp}" if sp else "?")
             place = self.G.area_name(platinum_areas.AREAS[news["map"]])
-            until = time.strftime("%H:%M", time.localtime(news["ends"]))
+            until = time.strftime("%H:%M", time.localtime(self.local_time_of(news["ends"])))
             return f"Swarm now: {name} on {place} (until {until})"
         except Exception:  # noqa: BLE001
             log.exception("swarm text failed")
@@ -2421,7 +2520,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
         self._wild_refresh = None
         try:
             from . import encdata, ndsrom
-            rom = ndsrom.NDSRom(self.cfg["rom_path"])
+            rom = ndsrom.NDSRom(self.rom_path)
             try:
                 hdr = rom._read(0, 0x50)
                 fat_off, fat_size = struct.unpack_from("<II", hdr, 0x48)
@@ -2434,7 +2533,7 @@ class App(ChallengeMixin, TradeMixin, BadgeMixin, TradeEvoMixin, ShinyMixin, Rel
             if n:
                 log.info("cached FAT: %s", f"{n} entries refreshed" if n > 0 else "left alone (not recognised)")
             if data is not None and self.game.wild_table() != data and self.game.write_wild_table(data):
-                log.info("wild table %d refreshed from %s", tid, os.path.basename(self.cfg["rom_path"]))
+                log.info("wild table %d refreshed from %s", tid, os.path.basename(self.rom_path))
         except Exception:  # noqa: BLE001
             log.exception("wild table refresh failed")
 

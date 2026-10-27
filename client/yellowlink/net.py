@@ -29,6 +29,29 @@ class NetClient:
         self._stop = False
         self._thread = threading.Thread(target=self._run, name="yl-net", daemon=True)
         self.rtt_ms = None
+        # server time - local time (seconds), from welcome.now / pong.now (SPEC.md section 11); None = unknown
+        self.time_offset = None
+
+    MAX_OFFSET = 365 * 24 * 3600          # a "server time" further off than this is nonsense: ignored
+
+    def set_server_time(self, now, received=None):
+        """welcome.now: the server's clock at (about) `received` (default: now)."""
+        if isinstance(now, bool) or not isinstance(now, (int, float)):
+            return
+        off = float(now) - (time.time() if received is None else received)
+        if abs(off) <= self.MAX_OFFSET:
+            self.time_offset = off
+
+    def on_pong(self, msg, received=None):
+        """pong {t: our send time, now: server time}: round trip + the server clock at half the trip."""
+        received = time.time() if received is None else received
+        t = msg.get("t")
+        if isinstance(t, (int, float)) and not isinstance(t, bool):
+            rtt = max(0.0, received - t)
+            self.rtt_ms = int(round(rtt * 1000))
+            now = msg.get("now")
+            if isinstance(now, (int, float)) and not isinstance(now, bool):
+                self.set_server_time(now + rtt / 2, received)
 
     def start(self):
         self._thread.start()
@@ -137,7 +160,7 @@ class NetClient:
                 except ValueError:
                     continue
                 if msg.get("type") == "pong":
-                    self.rtt_ms = int((time.time() - msg.get("t", time.time())) * 1000)
+                    self.on_pong(msg)
                     continue
                 self.inbox.put(msg)
 

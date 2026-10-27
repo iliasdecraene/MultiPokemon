@@ -71,5 +71,8 @@ Expected output: see the `print` lines; screenshots go to a temp dir printed at 
   2-hour swarm switch, the Pokédex area screen (vs. vanilla in a second process). `YL_SINNOH_SHOTS=<dir>` saves a
   screenshot for every failed check. Uses `~/.config/desmume/platinum-sinnoh.dsv`: never run two of these at once
   (the app harnesses use their own folders and can run alongside).
-- `dev/e2e/sinnoh_app.py` — the app: builds/reuses/repairs `roms/platinum-sinnoh.nds`, resumes vanilla snapshots,
-  events by condition, swarm toast, plain-Platinum fallback.
+- `dev/e2e/sinnoh_app.py` — the app: builds/reuses/repairs `roms/platinum-sinnoh.nds` (settings keep the player's
+  own file), resumes vanilla snapshots (old tag kept until the refresh), events by condition, swarm toast (not
+  repeated after a restart), plain-Platinum fallback.
+- `dev/e2e/sinnoh_pairing.py` — a real Yellow client and a real Complete Sinnoh client: both advertise the same
+  `sinnoh_v<spec>`, a failed build shows as `sinnoh_failed` with the right tip, and a Platinum Soul Link starts.

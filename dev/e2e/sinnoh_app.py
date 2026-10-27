@@ -4,7 +4,7 @@
      it with every feature (App.full) and advertises sinnoh_v<spec> for Soul Link pairing
   2. a 0.7.6 resume snapshot (vanilla, no .rom tag) resumes in Complete Sinnoh; the loaded wild table is replaced by
      the ROM's at the first safe frame; the next snapshot is tagged with the Complete Sinnoh SHA1
-  3. a snapshot from an unknown ROM is put aside (.other-rom) and the battery save is used
+  3. a snapshot from an unknown ROM is put aside (.other-rom-<time>) and the battery save is used
   4. the Mystery Gift events arrive (toast + bag) once the save meets each condition (TEST SHORTCUTS: RAM flags):
      National Dex -> Member Card, Oak's Letter, Secret Key; + Dialga and Palkia caught -> Azure Flute;
      the shared 2-hour swarm is written into the save and announced once swarms are on (TEST SHORTCUT: swarmEnabled)
@@ -14,7 +14,7 @@
 Run: YL_SINNOH_SPEC=test python dev/e2e/sinnoh_app.py   (or with the real spec once its SHA1 is recorded)
 Needs dev/states/{platinum.nds, pt_saved.sav, pt_sl_route202.dsst, pt_town.dsst}. No server needed (offline).
 """
-import os, sys, shutil, tempfile, pathlib, hashlib
+import os, sys, shutil, tempfile, pathlib, hashlib, json
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 STATES = os.environ.get("YL_STATES", os.path.join(_REPO, "dev", "states"))
 tmp = pathlib.Path(tempfile.mkdtemp(prefix="yl_sn_"))
@@ -79,7 +79,9 @@ shutil.copy2(os.path.join(STATES, "pt_saved.sav"), cfg.save_path)
 a = start()
 check("built roms/platinum-sinnoh.nds on first start", SN.exists() and sha(SN) == WANT, f"{SN.exists()}")
 check("the player's own ROM copy is untouched", sha(vanilla_copy) == library.PLATINUM_SHA1)
-check("the app runs the Complete Sinnoh file", a.cfg["rom_path"] == str(SN), a.cfg["rom_path"])
+check("the app runs the Complete Sinnoh file", a.rom_path == str(SN), a.rom_path)
+check("... while the settings keep the player's own file", a.cfg["rom_path"] == str(vanilla_copy)
+      and json.loads(cfg.path.read_text())["rom_path"] == str(vanilla_copy), a.cfg["rom_path"])
 check("App.full + complete_sinnoh", a.full and a.complete_sinnoh and a.rom_sha1 == WANT)
 check("Soul Link capability sinnoh_v%s" % spec.SPEC_VERSION, a._sinnoh_caps() == ["sinnoh_v%s" % spec.SPEC_VERSION])
 check("event unlocker + swarm rotation running", a.sinnoh_events is not None and a.sinnoh_swarm is not None)
@@ -97,6 +99,8 @@ rom = ndsrom.NDSRom(str(SN))
 member = rom.narc(encdata.NARC_PATH)[141]
 vanilla_member = ndsrom.NDSRom(PT_ROM).narc(encdata.NARC_PATH)[141]
 check("resumed the vanilla snapshot in Complete Sinnoh", a.game.map_id() == 343 and a._wild_refresh is not None)
+check("a snapshot before the refresh keeps the old (vanilla) tag", a.autosave(force=True) and
+      tag.read_text() == library.PLATINUM_SHA1, tag.read_text() if tag.exists() else None)
 run(a, 600, lambda: a._wild_refresh is None)
 check("Route 202's table in RAM = the Complete Sinnoh ROM's%s" % (" (edited)" if member != vanilla_member else ""),
       a._wild_refresh is None and a.game.wild_table() == member)
@@ -114,8 +118,9 @@ a.shutdown()
 # 3 ---------------------------------------------------------------------------------------------------------
 tag.write_text("0" * 40)
 a = start()
-other = cfg.resume_path.with_suffix(".other-rom")
-check("snapshot of an unknown ROM put aside, battery used instead", other.exists() and a._wild_refresh is None)
+other = list(cfg.resume_path.parent.glob(cfg.resume_path.stem + ".other-rom-*"))
+check("snapshot of an unknown ROM put aside, battery used instead", len(other) == 1 and a._wild_refresh is None,
+      other)
 run(a, 900, lambda: a.game.is_safe())
 check("... and the game CONTINUE'd from the save", a.game.in_game())
 a.shutdown()
@@ -152,6 +157,7 @@ msgs = [m[1] for m in a.chat_log if "Swarm now" in m[1]]
 check("swarms on: 'Swarm now: <species> on <place> (until HH:MM)' in chat + toast", len(msgs) == 1 and
       any("Swarm now" in t[0] for t in a.toasts) and "?" not in msgs[0] and " on " in msgs[0], msgs)
 print("     ", msgs)
+check("the announced slot is remembered in the settings", cfg.get("swarm_told") == sinnoh_swarm.current()["slot"])
 a.shutdown()
 
 # 5 ---------------------------------------------------------------------------------------------------------
@@ -160,6 +166,8 @@ real_build = sinnoh_rom.build
 sinnoh_rom.build = lambda *x, **k: calls.append(1) or real_build(*x, **k)
 a = start()
 check("second start: no rebuild", calls == [])
+run(a, 400)
+check("... and the same swarm isn't announced again", not [m for m in a.chat_log if "Swarm now" in m[1]])
 a.shutdown()
 data = bytearray(SN.read_bytes())
 data[0x1000] ^= 0xFF
@@ -179,7 +187,7 @@ def broken(*x, **k):
 
 sinnoh_rom.ensure = broken
 a = start()
-check("can't be made: plain Platinum, still full features", a.cfg["rom_path"] == str(vanilla_copy) and a.full
+check("can't be made: plain Platinum, still full features", a.rom_path == str(vanilla_copy) and a.full
       and not a.complete_sinnoh and a.sinnoh_events is None and a.sinnoh_swarm is None)
 check("... and the player is told", any("plain Platinum" in m[1] for m in a.chat_log))
 check("... no sinnoh capability (no Soul Link with Complete Sinnoh players)", a._sinnoh_caps() == [])
@@ -187,7 +195,7 @@ a.shutdown()
 sinnoh_rom.ensure = real_ensure
 os.environ["YL_PT_ROM"] = "vanilla"
 a = start()
-check("YL_PT_ROM=vanilla (dev): the vanilla file", a.cfg["rom_path"] == str(vanilla_copy) and not a.complete_sinnoh)
+check("YL_PT_ROM=vanilla (dev): the vanilla file", a.rom_path == str(vanilla_copy) and not a.complete_sinnoh)
 a.shutdown()
 
 print("\n%d failed" % len(FAILS))

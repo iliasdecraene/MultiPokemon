@@ -425,3 +425,72 @@ def test_digest_covers_area_and_engine_edits():
     assert d(base, REGI) == d(area_spec(), REGI)
     # default = ENGINE_EDITS
     assert d(base) == d(base, sinnoh_rom.ENGINE_EDITS) != d(base, ())
+
+
+def test_ensure_calls_on_build_only_when_it_builds(fake_rom, tmp_path, monkeypatch):
+    """L2: the app shows 'Preparing Complete Sinnoh...' only while it really builds."""
+    spec = spec_with([land_edit(11)])
+    sha = sinnoh_rom.build(fake_rom, tmp_path / "ref.nds", spec, expected=None, engine_edits=())
+    monkeypatch.setitem(sinnoh_rom.EXPECTED, sinnoh_rom.spec_digest(spec, ()), (sha, 7))
+    dest = tmp_path / "roms" / sinnoh_rom.FILE_NAME
+    calls = []
+    sinnoh_rom.ensure(fake_rom, dest, spec, engine_edits=(), on_build=lambda: calls.append(1))
+    sinnoh_rom.ensure(fake_rom, dest, spec, engine_edits=(), on_build=lambda: calls.append(1))
+    assert calls == [1]
+
+
+def test_library_knows_the_built_file_name():
+    from yellowlink import library
+    assert library.BUILT_SINNOH_NAME == sinnoh_rom.FILE_NAME
+
+
+def test_build_retries_locked_files_and_uses_a_per_process_part(fake_rom, tmp_path, monkeypatch):
+    """M4: Windows antivirus / OneDrive briefly lock new files: copy and rename are retried like write_atomic; the
+    temporary file is per process, so two YellowLink windows never write the same .part."""
+    spec = spec_with([land_edit(5)])
+    real_replace, real_copy = os.replace, sinnoh_rom.shutil.copyfile
+    fails = {"replace": 2, "copy": 1}
+    parts = []
+
+    def flaky_replace(a, b):
+        parts.append(str(a))
+        if fails["replace"]:
+            fails["replace"] -= 1
+            raise PermissionError("locked")
+        return real_replace(a, b)
+
+    def flaky_copy(a, b):
+        if fails["copy"]:
+            fails["copy"] -= 1
+            raise PermissionError("locked")
+        return real_copy(a, b)
+    monkeypatch.setattr(sinnoh_rom.os, "replace", flaky_replace)
+    monkeypatch.setattr(sinnoh_rom.shutil, "copyfile", flaky_copy)
+    monkeypatch.setattr(sinnoh_rom.time, "sleep", lambda s: None)
+    sha = sinnoh_rom.build(fake_rom, tmp_path / "x.nds", spec, expected=None, engine_edits=())
+    assert hashlib.sha1((tmp_path / "x.nds").read_bytes()).hexdigest() == sha
+    assert fails == {"replace": 0, "copy": 0}
+    assert all(p.endswith(".%d.part" % os.getpid()) for p in parts)
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_ensure_keeps_an_older_verified_build_when_the_new_one_fails(fake_rom, tmp_path, monkeypatch):
+    """M4: after an update, if the new build can't be made, the previous (still verified) Complete Sinnoh file is
+    played instead of plain Platinum, and the app is told (FALLBACK)."""
+    old_spec, new_spec = spec_with([land_edit(12)], version=7), spec_with([land_edit(13)], version=8)
+    dest = tmp_path / "roms" / sinnoh_rom.FILE_NAME
+    dest.parent.mkdir()
+    old_sha = sinnoh_rom.build(fake_rom, dest, old_spec, expected=None, engine_edits=())
+    new_sha = sinnoh_rom.build(fake_rom, tmp_path / "n.nds", new_spec, expected=None, engine_edits=())
+    monkeypatch.setitem(sinnoh_rom.EXPECTED, sinnoh_rom.spec_digest(old_spec, ()), (old_sha, 7))
+    monkeypatch.setitem(sinnoh_rom.EXPECTED, sinnoh_rom.spec_digest(new_spec, ()), (new_sha, 8))
+    monkeypatch.setattr(sinnoh_rom, "FALLBACK", None)
+
+    def boom(*a, **k):
+        raise sinnoh_rom.BuildError("disk full")
+    monkeypatch.setattr(sinnoh_rom, "build", boom)
+    assert sinnoh_rom.ensure(fake_rom, dest, new_spec, engine_edits=()) == (str(dest), old_sha)
+    assert sinnoh_rom.FALLBACK == (7, "disk full")
+    dest.write_bytes(b"something else")                     # nothing verified to fall back to: the error
+    with pytest.raises(sinnoh_rom.BuildError):
+        sinnoh_rom.ensure(fake_rom, dest, new_spec, engine_edits=())

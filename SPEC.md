@@ -97,7 +97,7 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 ### Server -> Client
 | type | fields |
 |---|---|
-| `welcome` | `you` uid, `players` list[PlayerInfo], `roster` list[RosterEntry], `latest_client` str, `download_url` str, `motd` str, `server_name` str (may be empty; env `YL_SERVER_NAME`), `features` list[str] (0.7.5: `["badges"]`, 0.7.6: + `"trade_evo"` (section 7), 0.7.7: + `"shiny_alert"` (section 10); missing = older server) |
+| `welcome` | `you` uid, `players` list[PlayerInfo], `roster` list[RosterEntry], `latest_client` str, `download_url` str, `motd` str, `server_name` str (may be empty; env `YL_SERVER_NAME`), `features` list[str] (0.7.5: `["badges"]`, 0.7.6: + `"trade_evo"` (section 7), 0.7.7: + `"shiny_alert"` (section 10); missing = older server), `now` float = server time (unix seconds; 0.7.8, section 11: shared swarm clock; missing = older server) |
 | `player_join` | `player` PlayerInfo |
 | `player_leave` | `uid` |
 | `state` | `uid` + all state fields (relayed to everyone else) |
@@ -116,7 +116,7 @@ Server treats these as opaque except for validation: data decodes to exactly 44 
 | `trade_status` | `trade_id`, `state`: `complete` \| `pending` \| `failed` |
 | `report_saved` | `file` |
 | `error` | `message` |
-| `pong` | `t` |
+| `pong` | `t`, `now` float = server time (unix seconds; 0.7.8, optional: older servers send only `t`) |
 | `badges_data` | `uid`, `name`, `badges` {region: BadgeView} (section 9; unknown player: `badges` {} ) |
 
 PlayerInfo: `{uid, name, state: <last state obj or null>, has_sprite: bool}`
@@ -876,7 +876,7 @@ drawn while the enemy HUD is on screen: `GameMemory.enemy_hud_shown()` = wTileMa
 (CFD9) at column 1, 2 or 3 and tile (1, 3) is the HUD corner 0x74 (so not during the intro, menus over it, the
 Pokédex page after a catch, or when the HUD is cleared).
 
-## 11. Complete Sinnoh — our own version of Platinum (added in 0.7.8, client only; no protocol change)
+## 11. Complete Sinnoh — our own version of Platinum (added in 0.7.8; protocol: only the optional server time `now` in `welcome`/`pong`)
 
 Ilias's rule: normal Platinum stays normal Platinum (story, trainers, difficulty, trade evolutions), but every
 Pokémon family except the mythicals can be found in Sinnoh, the Mystery-Gift-only events are on, the Regi ruins work
@@ -905,10 +905,19 @@ without an event Regigigas, and the swarm changes every 2 hours (the same for ev
   133, header 0x80-0x83 + 0x15E-0x15F, the new area NARC); the result's SHA1 = `sinnoh_rom.EXPECTED[spec_digest]`
   (deterministic: one SHA1 per spec version; `spec_digest` = SHA1 over spec version + EDITS + RATE_EDITS +
   AREA_EDITS + ENGINE_EDITS + `BUILD_FORMAT`; recompute with `python dev/sinnoh/build_rom.py --update`, which also
-  prints every changed range; a unit test fails while it's missing). Written as `.part` and renamed. Afterwards only
-  the SHA1 is checked (~0.3 s, cached per path/size/mtime). Spec v2: SHA1 `8abeae7b6039637d0671fc3859a0952f8997054b`.
-- If it can't be made (disk full, a broken install), the app runs plain Platinum and says so in the chat (red line)
-  - never a reason not to play.
+  prints every changed range; a unit test fails while it's missing). Written as `<name>.<pid>.part` (two windows
+  never share one; copy and rename are retried like `write_atomic` for Windows antivirus/OneDrive locks; parts older
+  than an hour are removed) and renamed. Afterwards only the SHA1 is checked (~0.3 s, cached per path/size/mtime).
+  While it builds (first start, after an update) a small "Preparing Complete Sinnoh..." window shows. Spec v2: SHA1
+  `8abeae7b6039637d0671fc3859a0952f8997054b`. Once released, an `EXPECTED` line is never removed (unit test).
+- The App runs that file (`App.rom_path`: DeSmuME, ROM data, sprites, the wild/FAT refresh, the swarm names);
+  `cfg["rom_path"]` stays the player's own file from the library (saved, shown in Settings). A 0.7.7 config holding
+  `.../platinum-sinnoh.nds` as `rom_path` gets the library's Platinum back (`Library._migrate`); `identify()` never
+  knows the build.
+- If the new build can't be made but the old file is an older verified build, that one runs (`sinnoh_rom.FALLBACK`,
+  red chat line "couldn't be updated ... previous version"). If nothing verified can be made (disk full, a broken
+  install), the app runs plain Platinum and says so in the chat (red line) - never a reason not to play - and
+  remembers it for the process (`sinnoh_rom.BUILD_FAILED`, see Soul Link).
 - `platinum.VARIANTS` (sha1 -> Variant(key "vanilla"|"sinnoh", sha1, title, spec_version)) lists vanilla and every
   `EXPECTED` build; `SUPPORTED_SHA1S` = all of them -> `App.full` (every Platinum feature: same code, the builder
   proves only data differs). `variant_of(sha1)`, `same_code(a, b)`.
@@ -948,16 +957,24 @@ the game copies the FAT into RAM once at boot (`FS_LoadTable`; the "rom" FSArchi
 **0x021CEC60**, its size at +4), so an old snapshot would keep reading the vanilla area NARC
 (`PlatinumMemory.refresh_cached_fat`: writes only the 8-byte entries that differ, at most 8, else nothing). A script
 already loaded for the current map stays the old one until the next map load (only matters standing inside a Regi
-ruin). A snapshot of an unknown ROM is moved aside (`.other-rom`) and the game starts from the battery save. Saves
-(battery) are the same format for every variant: nothing to convert, per-server saves unchanged.
+ruin). While that refresh is still pending, new snapshots keep the OLD build's tag (`snapshot_tag`), so a later
+resume refreshes again. A tag that can't be read (locked file) or `unknown-build` = some verified build: load + refresh
+(`resume_plan`). Only a readable SHA1 nobody verified puts the snapshot aside (`<name>.other-rom-<time>`, the newest
+3 kept) and the game starts from the battery save. Saves (battery) are the same format for every variant: nothing to
+convert, per-server saves unchanged. The exe also removes DeSmuME's shared `platinum.dsv` / `platinum-sinnoh.dsv`
+next to it at every DS start (never used: the app imports its own save).
 
 ### Soul Link
 Areas are map labels (`platinum_areas.py`), not encounter tables: new species in existing tables (and the swarm
 rotation) change nothing. Both players of a Platinum run play Complete Sinnoh (always on). Clients put
 `"sinnoh_v<spec version>"` into `library.challenge_rules` (an existing free-form capability list, server
-unchanged); the Soul Link form only offers Platinum when both lists hold the same `sinnoh_v*` entry (or neither),
-with the tip "different versions of Sinnoh's wild Pokémon - update YellowLink". A run made on plain Platinum
-(0.7.4-0.7.6) continues on Complete Sinnoh.
+unchanged): playing Platinum, the version of the file it runs; playing Yellow/Crystal (with Platinum added), the
+version this YellowLink builds - so a Yellow player and a Platinum player can start a Platinum run. A client whose
+build failed in this process sends `"sinnoh_failed"` instead (and plays plain Platinum). The Soul Link form only
+offers Platinum when both lists hold the same `sinnoh_v*` entry (or neither), with the tip "<name>'s Complete Sinnoh
+couldn't be prepared - ask them to restart", "Your Complete Sinnoh couldn't be prepared - restart YellowLink" or
+"different versions of Sinnoh's wild Pokémon - update YellowLink". A run made on plain Platinum (0.7.4-0.7.6)
+continues on Complete Sinnoh.
 
 ### Mystery Gift events (`client/yellowlink/sinnoh_events.py`)
 What pret's Mystery Gift deliveryman writes (`src/scrcmd_mystery_gift.c`), given by the app at a safe frame once the
@@ -987,13 +1004,13 @@ offset 106 of each statue script:
 ```
 2B 03 0C 80        CheckPartyHasFatefulEncounterRegigigas VAR_RESULT    (0 or 1)
 11 00 0C 80 00 00  CompareVarToValue VAR_RESULT, 0        -> value 0 becomes 2 (never equal)
-1C 00 01 ...       GoToIf EQUAL, "something spoke out"
+1C 00 01 ...       GoToIf EQUAL, IronRuins_/IcebergRuins_ItsAStatueOfAPokemon, RockPeakRuins_FromSomewhereSomethingSpokeOut
 ```
 so the statue no longer refuses; the Hall of Fame check, the dots, the battle (Lv30), the "caught" state and the
 Regigigas side are the game's own. One save: dots -> statue -> catch Regirock, Regice, Registeel -> Snowpoint
 Temple B5F -> Regigigas Lv1 (dev/sinnoh/verify.py `regis` plays all of it).
 
-### Swarms every 2 hours (`client/yellowlink/sinnoh_swarm.py`, no server)
+### Swarms every 2 hours (`client/yellowlink/sinnoh_swarm.py`; the server only gives the time)
 The game: the save's SpecialEncounter block (body + **0x7F24**: marshDaily +0, **swarmDaily +4** (int),
 trophy garden +8, honey trees +0x10, radar chains, recent routes, 6 roamers, roamer route indexes, **swarmEnabled
 +0x14E** (u8)) - `swarmEnabled` is set once by the rival's sister in Sandgem (Hall of Fame + National Dex,
@@ -1003,8 +1020,13 @@ slots 0,1; the value is read at every encounter (and by the sister/TV). Every da
 YellowLink: 2-hour UTC slots `floor(unix time / 7200)`; slot n -> swarm `order(n // 22)[n % 22]`, where
 `order(c)` sorts 0..21 by `SHA1("yellowlink-swarm-v1:<c>:<i>")` and swaps its first two when the first equals the
 previous cycle's (unswapped) last - every swarm once per 44 hours, never twice in a row, a pure function of the
-clock (every player on every server agrees as long as their PC clock is right). At a safe frame (`SwarmRotator`,
+clock. The clock is the server's: `welcome.now` and every `pong.now` (sent every 5 s) give
+`time_offset = now - local time` (pong: corrected by half the round trip; values over a year off are ignored), so
+a PC clock that is hours wrong still gets the shared swarm; offline or with an older server (no `now`) = the
+local clock. At a safe frame (`SwarmRotator`,
 every 60 frames) the app writes `swarmDaily` = that index whenever `swarmDaily % 22` differs (also after the game's
 daily change); `swarmEnabled`, marshDaily and everything else are untouched. When a new slot starts and swarms are
 on in this save: toast + chat line "Swarm now: <species> on <place> (until HH:MM)" (species = the running ROM's
-table, place = the map's area name). Complete Sinnoh only (main game and Soul Link runs).
+table, place = the map's area name; HH:MM = the end of the slot on the player's own PC clock). The last announced
+slot is kept in the settings (`swarm_told`), so travelling, switching servers or entering a run doesn't repeat it.
+Complete Sinnoh only (main game and Soul Link runs).

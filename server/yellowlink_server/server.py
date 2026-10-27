@@ -458,6 +458,7 @@ class YellowLinkServer:
             "motd": self.config.motd,
             "server_name": self.config.name,
             "features": list(FEATURES),
+            "now": time.time(),                 # server time: the clients' shared swarm clock (SPEC.md section 11)
         })
         await self.send(client, {"type": "challenge_list", "challenges": self.challenges.mine(uid)})
         for c in others:
@@ -543,7 +544,7 @@ class YellowLinkServer:
         raise Invalid("already said hello")
 
     async def on_ping(self, client: Client, msg: dict) -> None:
-        await self.send(client, {"type": "pong", "t": msg.get("t")})
+        await self.send(client, {"type": "pong", "t": msg.get("t"), "now": time.time()})
 
     async def on_state(self, client: Client, msg: dict) -> None:
         state = {k: _int(msg, k) for k in ("map", "x", "y", "px", "py", "facing", "img")}

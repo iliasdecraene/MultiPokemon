@@ -9,7 +9,7 @@ The player adds their vanilla Platinum (US rev 0, `VANILLA_SHA1`); YellowLink co
     lists change length, so the rebuilt NARC (same structure, `encdata.make_narc`) is written after the last file of
     the vanilla ROM (inside the 128 MB image, which is 0xFF there) and its FAT entry + the header's "used ROM size"
     and header CRC are updated. The vanilla copy stays where it was (an old savestate's cached FAT still finds it);
-  * `/fielddata/script/scr_seq.narc` - 2 bytes in each of the three Regi ruins' scripts (`ENGINE_EDITS`, ours, not
+  * `/fielddata/script/scr_seq.narc` - 1 byte in each of the three Regi ruins' scripts (`ENGINE_EDITS`, ours, not
     the design spec's): the statue no longer asks for an event ("fateful encounter") Regigigas, so the Regis and
     then Snowpoint Temple's Regigigas can be caught in one save.
 
@@ -30,6 +30,7 @@ import logging
 import os
 import shutil
 import struct
+import time
 from pathlib import Path
 from typing import NamedTuple
 
@@ -68,7 +69,8 @@ class ScriptEdit(NamedTuple):
 
 # The Regi ruins (pret res/field/scripts/scripts_{iron,iceberg,rock_peak}_ruins.s, scr_seq members 392/394/396):
 #     CheckPartyHasFatefulEncounterRegigigas VAR_RESULT        2B 03 0C 80   (0 or 1)
-#     GoToIfEq VAR_RESULT, 0, <..._FromSomewhereSomethingSpokeOut>
+#     GoToIfEq VAR_RESULT, 0, <IronRuins_ItsAStatueOfAPokemon / IcebergRuins_ItsAStatueOfAPokemon /
+#                              RockPeakRuins_FromSomewhereSomethingSpokeOut>
 #        = CompareVarToValue VAR_RESULT, 0                  11 00 0C 80 00 00
 #          GoToIf 1 (equal), <offset>                       1C 00 01 ...
 # The compared value 0 becomes 2 (VAR_RESULT is never 2): the statue no longer needs an event Regigigas; everything
@@ -97,6 +99,16 @@ def _expected() -> dict:
 def known_builds() -> list:
     """[(sha1, spec version)] of every Complete Sinnoh build this YellowLink knows (platinum.VARIANTS)."""
     return list(_expected().values())
+
+
+# Why making the Complete Sinnoh ROM failed in this process (set by the app; None = no failure). A client then plays
+# plain Platinum and tells Soul Link partners (challenge.py `sinnoh_failed`) - also after travelling to another game.
+BUILD_FAILED: str | None = None
+
+
+# Set by ensure() when the new build failed and an older, still verified build is played instead: (its spec
+# version, why the new one failed). The app says so in the chat.
+FALLBACK: tuple | None = None
 
 
 class BuildError(Exception):
@@ -282,6 +294,19 @@ def plan(src, spec, engine_edits=None) -> Plan:
         rom.close()
 
 
+def _retry(fn, *args, attempts: int = 6):
+    """fn(*args), retried on OSError with a short pause: Windows antivirus / OneDrive briefly lock new files (like
+    app.write_atomic). The last error is raised."""
+    for i in range(attempts):
+        try:
+            return fn(*args)
+        except OSError:
+            if i == attempts - 1:
+                raise
+            log.warning("%s failed (attempt %d), retrying", getattr(fn, "__name__", fn), i + 1)
+            time.sleep(0.1 * (i + 1))
+
+
 def build(src, dest, spec=None, *, expected: str | None = "auto", sha1_of_src: str | None = None,
           engine_edits=None) -> str:
     """Make `dest` from the vanilla ROM `src` with `spec` (default: sinnoh_complete). Returns the new file's SHA1.
@@ -302,9 +327,15 @@ def build(src, dest, spec=None, *, expected: str | None = "auto", sha1_of_src: s
         raise BuildError("That isn't the Pokémon Platinum (USA) file YellowLink supports.")
     p = plan(src, spec, engine_edits)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    part = dest.with_name(dest.name + ".part")
+    part = dest.with_name(f"{dest.name}.{os.getpid()}.part")    # per process: two windows never share one
+    for stale in dest.parent.glob(dest.name + ".*part"):          # left over by a crash long ago
+        try:
+            if stale != part and time.time() - stale.stat().st_mtime > 3600:
+                stale.unlink()
+        except OSError:
+            pass
     try:
-        shutil.copyfile(src, part)
+        _retry(shutil.copyfile, src, part)
         with open(part, "r+b") as f:
             for off, data in p.writes:
                 f.seek(off)
@@ -321,7 +352,7 @@ def build(src, dest, spec=None, *, expected: str | None = "auto", sha1_of_src: s
         got = _sha1(part)
         if expected is not None and got != expected:
             raise BuildError("Making Complete Sinnoh went wrong (the result isn't the expected file).")
-        os.replace(part, dest)
+        _retry(os.replace, part, dest)
     except BaseException:
         try:
             part.unlink()
@@ -333,9 +364,10 @@ def build(src, dest, spec=None, *, expected: str | None = "auto", sha1_of_src: s
     return got
 
 
-def ensure(src, dest, spec=None, sha1=None, engine_edits=None) -> tuple:
-    """(path, sha1) of the Complete Sinnoh ROM: `dest` if it is already the expected file, else built now.
-    `sha1` = a function path -> SHA1 (library.sha1_file: cached per path/size/mtime). Raises BuildError."""
+def ensure(src, dest, spec=None, sha1=None, engine_edits=None, on_build=None) -> tuple:
+    """(path, sha1) of the Complete Sinnoh ROM: `dest` if it is already the expected file, else built now
+    (`on_build()` is called first: the app shows a notice). `sha1` = a function path -> SHA1 (library.sha1_file:
+    cached per path/size/mtime). Raises BuildError."""
     spec = spec or load_spec()
     if spec is None:
         raise BuildError("The Complete Sinnoh data is missing from this YellowLink.")
@@ -351,5 +383,23 @@ def ensure(src, dest, spec=None, sha1=None, engine_edits=None) -> tuple:
         except OSError:
             pass
         log.info("%s is out of date or damaged: making it again", dest)
-    got = build(src, dest, spec, expected=want, sha1_of_src=sha1(src), engine_edits=engine_edits)
+    old = None
+    if dest.exists():
+        try:
+            old = sha1(dest)
+        except OSError:
+            pass
+    if on_build:
+        on_build()
+    try:
+        got = build(src, dest, spec, expected=want, sha1_of_src=sha1(src), engine_edits=engine_edits)
+    except Exception as e:
+        # the build writes a .part and only replaces dest at the end: an older verified build is still intact
+        prev = next((ver for sha, ver in known_builds() if sha == old), None)
+        if prev is None:
+            raise
+        global FALLBACK
+        FALLBACK = (prev, str(e))
+        log.warning("Complete Sinnoh v%s could not be made (%s): keeping v%s", spec.SPEC_VERSION, e, prev)
+        return str(dest), old
     return str(dest), got

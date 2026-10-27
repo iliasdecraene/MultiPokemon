@@ -597,7 +597,13 @@ def _game_tip(app, form, g) -> str:
     if g == "platinum" and g in (e.get("challenge_games") or []):
         mine = app._sinnoh_caps() if hasattr(app, "_sinnoh_caps") else []
         theirs = sorted(c for c in (e.get("challenge_rules") or []) if c.startswith("sinnoh_v"))
-        if mine != theirs:      # different wild Pokémon (Complete Sinnoh version) - one of you must update
+        if mine != theirs:      # different wild Pokémon (Complete Sinnoh version)
+            if "sinnoh_failed" in (e.get("challenge_rules") or []):
+                return (f"{form['name']}'s Complete Sinnoh couldn't be prepared - ask them to restart YellowLink "
+                        "(and press F3 if it happens again).")
+            if hasattr(app, "_sinnoh_failed") and app._sinnoh_failed():
+                return ("Your Complete Sinnoh couldn't be prepared - restart YellowLink "
+                        "(and press F3 if it happens again).")
             return (f"You and {form['name']} have different versions of Sinnoh's wild Pokémon - "
                     "update YellowLink (press U) on both computers.")
     return f"{form['name']} doesn't have {title} added" + (" (v1.0)." if g == "crystal" else ".")

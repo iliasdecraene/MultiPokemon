@@ -181,3 +181,17 @@ Details (exact flags/vars/items from pret scripts) follow below once researched.
   challenge_flow_platinum, soullink_tradeevo, badges_flow, dev/platinum/verify.py (83/0) - all pass. Harness fixes:
   fake Soul Link partners send `ptrom.sinnoh_caps()`; platinum_boot / challenge_flow_platinum look for the battery
   file of the ROM the app really runs (platinum-sinnoh.dsv).
+
+### sinnoh-engine — review fixes (after merging main 0.7.7; SPEC section 11)
+- H1/L5: Yellow/Crystal clients advertise the `sinnoh_v<spec>` they would build (challenge.py `_sinnoh_caps`); a
+  process whose build failed sends `sinnoh_failed` (`sinnoh_rom.BUILD_FAILED`), and the form's tip says whose build
+  failed + restart instead of "update". e2e: dev/e2e/sinnoh_pairing.py.
+- H2: `App.rom_path` = the file the App runs; `cfg["rom_path"]` stays the library file; `Library._migrate` repairs
+  0.7.7 configs holding platinum-sinnoh.nds.
+- M1/M2/L7: `resume_plan` / `snapshot_tag` / `move_aside_other_rom` (app.py): old tag kept while a refresh is
+  pending; unreadable tag = load + refresh; only readable unknown SHA1s go aside (newest 3 kept). Unit test pins
+  every released `EXPECTED` line.
+- M3: server sends `now` in `welcome`/`pong`; `NetClient.time_offset`; the swarm rotator runs on `App.server_time()`.
+- M4: copy/rename retried, `<name>.<pid>.part`, older verified build kept when a new build fails (`FALLBACK`).
+- L1 `cfg["swarm_told"]`; L2 "Preparing Complete Sinnoh..." window while building; L3 the exe removes both shared
+  Platinum .dsv files; L6 docstring/label fixes.

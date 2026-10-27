@@ -8,7 +8,8 @@ How Platinum does swarms (pret src/special_encounter.c, src/overlay006/swarm.c, 
     two swarm species replace land slots 0 and 1 (40 %). The value is read at every encounter (and by the sister and
     the TV news), nothing is cached.
 
-YellowLink replaces only the choice: time is cut into 2-hour UTC slots; every slot gets one of the 22 swarms from a
+YellowLink replaces only the choice: time (the server's clock while online, SPEC.md section 11) is cut into 2-hour
+UTC slots; every slot gets one of the 22 swarms from a
 fixed shuffle (each cycle of 22 slots visits every swarm once, never the same one twice in a row), so every player
 on every server computes the same swarm at the same time with no server involved. At a safe frame the app writes
 `swarmDaily` = the swarm's index (0..21, the game only uses it modulo 22) whenever it differs - also after the
@@ -110,12 +111,16 @@ class SwarmRotator:
     game's swarm the current 2-hour one. Returns {'index', 'map', 'ends'} when the player should hear about it (a new
     swarm while swarms are on in this save, or swarms just turned on), else None."""
 
-    def __init__(self, pm, every: int = 60, clock=time.time):
+    def __init__(self, pm, every: int = 60, clock=time.time, told=None, on_told=None):
+        """clock() = unix time on the shared clock (the app: server time); told = the slot announced last (kept by
+        the app in its settings, so a new rotator after travelling doesn't repeat it); on_told(slot) after each
+        announcement."""
         self.pm = pm
         self.every = every
         self.clock = clock
+        self.on_told = on_told
         self._n = 0
-        self._told = None         # slot we announced last
+        self._told = told         # slot we announced last
 
     def step(self):
         self._n += 1
@@ -130,6 +135,8 @@ class SwarmRotator:
                     log.info("swarm -> #%d (map %d) for slot %d", cur["index"], cur["map"], cur["slot"])
             if enabled(self.pm) and self._told != cur["slot"] and swarm_index(self.pm) == cur["index"]:
                 self._told = cur["slot"]
+                if self.on_told:
+                    self.on_told(cur["slot"])
                 return cur
         except Exception:  # noqa: BLE001 - never let this stop the game
             log.exception("swarm step failed")

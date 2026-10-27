@@ -77,6 +77,9 @@ def identify(path) -> GameInfo | None:
         return None
 
 
+BUILT_SINNOH_NAME = "platinum-sinnoh.nds"      # sinnoh_rom.FILE_NAME: made by the app, never a library entry
+
+
 class Library:
     """Lives inside Config: cfg['games'] = {game_id: rom_path}, cfg['current_game'] = id."""
 
@@ -89,8 +92,12 @@ class Library:
         self._migrate()
 
     def _migrate(self):
-        """Older versions had a single rom_path (always Yellow)."""
+        """Older versions had a single rom_path (always Yellow). 0.7.7 saved the Complete Sinnoh copy it runs
+        (roms/platinum-sinnoh.nds) as rom_path: that is never the player's file - put their own Platinum back."""
         games = self.cfg.setdefault("games", {})
+        if Path(self.cfg.get("rom_path") or "").name == BUILT_SINNOH_NAME:
+            self.cfg["rom_path"] = games.get("platinum", "")
+            self.cfg.save()
         old = self.cfg.get("rom_path")
         if old and not games and Path(old).exists():
             info = identify(old)

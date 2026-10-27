@@ -31,7 +31,7 @@ VANILLA_SHA1 = PLATINUM_SHA1
 # ROM variants (Complete Sinnoh, SPEC.md "Complete Sinnoh"). The game YellowLink runs is always "platinum"; which
 # file runs it is a variant. Complete Sinnoh = the player's vanilla ROM with only data files changed (sinnoh_rom.py:
 # the wild-encounter NARC in place, the Pokédex area NARC rebuilt after the last file + its FAT entry and the header's
-# used size/CRC, 2 bytes in each Regi ruins script) - the code, every overlay and every table we read are
+# used size/CRC, 1 byte in each Regi ruins script) - the code, every overlay and every table we read are
 # byte-identical (checked by the builder: the copy differs from vanilla only in those planned ranges), so every address
 # and hook in this module and in platinum_exp / platinum_pc / sinnoh_view holds unchanged, and the whole Platinum
 # suite passes on it (dev/platinum/ptrom.py: YL_PT_ROM=sinnoh). A ROM not listed here gets no multiplayer features.

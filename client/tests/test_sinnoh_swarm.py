@@ -113,3 +113,22 @@ def test_species_of():
     assert sw.species_of(342, lambda m: 2, tables) == 84
     assert sw.species_of(342, lambda m: None, tables) is None
     assert sw.species_of(342, lambda m: 0, tables) is None
+
+
+def test_rotator_remembers_the_announced_slot():
+    """L1: travelling / switching servers / entering a run makes a new rotator: it must not repeat the toast for a
+    slot already announced (the app keeps the slot in its settings)."""
+    t = 249035 * 7200 + 5.0
+    told = []
+    r = sw.SwarmRotator(PM(enabled=True), every=1, clock=lambda: t, told=249035, on_told=told.append)
+    assert r.step() is None and told == []
+    r = sw.SwarmRotator(PM(enabled=True), every=1, clock=lambda: t + 7200, told=249035, on_told=told.append)
+    assert r.step()["slot"] == 249036 and told == [249036]
+
+
+def test_rotator_uses_the_given_clock_for_the_slot():
+    """M3: the app passes server time (time.time() + offset): a PC clock 3 hours wrong still gets the shared swarm."""
+    real = 249035 * 7200 + 100.0
+    pm = PM(enabled=True)
+    r = sw.SwarmRotator(pm, every=1, clock=lambda: real)
+    assert r.step()["slot"] == 249035 and sw.swarm_index(pm) == sw.pick(249035)

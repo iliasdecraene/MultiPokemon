@@ -212,7 +212,12 @@ class NDSCore:
         if getattr(sys, "frozen", False):
             # Windows (verified in the release smoke test): DeSmuME keeps <exe folder>/<rom>.dsv open until the
             # process ends, so it can only be removed here, before the first open. Locked = ours, already blank.
-            for p in battery_file_candidates(rom_path):
+            # Both Platinum file names (the player's platinum.nds and the Complete Sinnoh copy the app runs): a
+            # platinum.dsv left by 0.7.6 or a plain-Platinum fallback must not stay next to the exe either.
+            here = os.path.dirname(os.path.abspath(rom_path))
+            old = [p for name in ("platinum.nds", "platinum-sinnoh.nds")
+                   for p in battery_file_candidates(os.path.join(here, name))]
+            for p in dict.fromkeys(battery_file_candidates(rom_path) + old):
                 try:
                     if os.path.isfile(p):
                         os.remove(p)

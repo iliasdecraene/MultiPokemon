@@ -5,6 +5,7 @@ Mixed into App (see app.py). SPEC.md section 7 has the protocol.
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 
@@ -19,6 +20,7 @@ CHALLENGE_GAMES = ("yellow", "crystal", "platinum")     # order of the buttons i
 CHALLENGE_RULES = ("exp_share",)        # optional run rules this client applies (`library.challenge_rules`)
 CHALLENGE_CAPS = ("trade_evo",)         # ...and what else it can do in a run (same list; SPEC.md section 7)
 SINNOH_CAP = "sinnoh_v"                 # + Complete Sinnoh spec version, also in `challenge_rules` (SPEC.md 11)
+SINNOH_FAILED = "sinnoh_failed"         # ... instead, when this YellowLink couldn't make its Complete Sinnoh ROM
 LEGACY_GAMES = ("yellow", "crystal")    # every challenge client (0.6.0+) plays these; others need `challenge_games`
 # What the referee needs from a game adapter's memory class (crystal.py / platinum.py "Soul Link" sections)
 REFEREE_HELPERS = ("battle_info", "battle_party_slot", "has_poke_balls", "current_box_records", "move_party_to_box",
@@ -85,7 +87,8 @@ class ChallengeMixin:
         # Soul Link, so the server only allows Platinum for clients that send it - SPEC.md section 7)
         self.net.send({"type": "library", "games": sorted(g for g in self.lib.games if self._game_supported(g)),
                        "challenge_games": self.challenge_games(),
-                       "challenge_rules": list(CHALLENGE_RULES) + list(CHALLENGE_CAPS) + self._sinnoh_caps()})
+                       "challenge_rules": list(CHALLENGE_RULES) + list(CHALLENGE_CAPS) + self._sinnoh_caps()
+                       + ([SINNOH_FAILED] if self._sinnoh_failed() else [])})
         if self.chal:
             if self.chal_wait == "offline":
                 self.chal_wait = "load"           # back online: wait until the server says both are in
@@ -425,17 +428,40 @@ class ChallengeMixin:
                 out.append(g)
         return out
 
+    def _sinnoh_failed(self) -> str | None:
+        """Why this process couldn't make the Complete Sinnoh ROM (then it plays plain Platinum), else None."""
+        try:
+            from . import sinnoh_rom
+            failed = sinnoh_rom.BUILD_FAILED
+        except Exception:  # noqa: BLE001
+            failed = None
+        return getattr(self, "sinnoh_problem", None) or failed
+
     def _sinnoh_caps(self) -> list:
         """["sinnoh_v<spec version>"] when this client plays Complete Sinnoh (sent in `library.challenge_rules`, so
-        a Platinum Soul Link is only offered between players with the same wild Pokémon), else []."""
-        if not getattr(self, "complete_sinnoh", False):
+        a Platinum Soul Link is only offered between players with the same wild Pokémon), else [].
+        Playing Platinum: what it really runs (the ROM's variant). Playing Yellow/Crystal: the Complete Sinnoh this
+        YellowLink makes when it starts Platinum (the spec it ships with a checked build) - unless making it already
+        failed in this process (`sinnoh_rom.BUILD_FAILED`) or a dev harness asked for vanilla (YL_PT_ROM=vanilla)."""
+        if self._sinnoh_failed():
             return []
         try:
-            from . import platinum
-            v = platinum.variant_of(getattr(self, "rom_sha1", ""))
+            from . import platinum, sinnoh_rom
+            if getattr(self, "complete_sinnoh", False):
+                v = platinum.variant_of(getattr(self, "rom_sha1", ""))
+                return [f"{SINNOH_CAP}{v.spec_version}"] if v and v.spec_version is not None else []
+            if getattr(self, "ds", False):
+                return []                     # Platinum running, but plain (YL_PT_ROM=vanilla or an unknown file)
+            if "platinum" not in (getattr(getattr(self, "lib", None), "games", None) or {}):
+                return []                     # no Platinum added: nothing to pair
+            if os.environ.get("YL_PT_ROM", "sinnoh").strip().lower() == "vanilla":
+                return []
+            spec = sinnoh_rom.load_spec()
+            if spec is None or sinnoh_rom.expected_sha1(spec) is None:
+                return []
+            return [f"{SINNOH_CAP}{spec.SPEC_VERSION}"]
         except Exception:  # noqa: BLE001
             return []
-        return [f"{SINNOH_CAP}{v.spec_version}"] if v and v.spec_version is not None else []
 
     def challenge_games(self) -> list:
         """Games this client can run a challenge in: added, the verified ROM, and an adapter with the referee's
