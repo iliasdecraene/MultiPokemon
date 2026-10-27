@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -37,6 +38,19 @@ def empty_store() -> dict:
 
 
 LEFT_MAX = 1000       # ids of entries that left the store (withdrawn, traded, released) - never resurrected
+DEPARTED_MAX = 600    # per game: records it showed of mons that have left the store since (see PCSync.rebase)
+
+
+def rec_hash(rec: bytes) -> str:
+    return hashlib.sha1(bytes(rec)).hexdigest()[:20]
+
+
+def empty_ledger(fp=None) -> dict:
+    """What left / entered a game's party through the PC (and trades) since its last in-game save (SPEC.md 5,
+    "Back to the last in-game save"): `out` = [key, nick] deposited from this game, `back` = [key, nick]
+    withdrawn/released here, `changed` = nicks edited in the box UI, `traded` = nicks traded/gifted away,
+    `touched` = keys of every mon deposited or withdrawn here (never cancelled out)."""
+    return {"fp": fp, "out": [], "back": [], "changed": [], "traded": [], "touched": []}
 
 
 def _ids(st: dict) -> set:
@@ -306,9 +320,13 @@ class PCSync:
         self.deferred = None                   # a server copy to merge once nothing is pending
         self.uploading = None
         self.refused = None                    # (mons, free space) when a game couldn't be linked (store full)
+        self.ledger_committed = {}             # game_id -> empty_ledger(): changes since its last in-game save
+        self.departed_committed = {}           # game_id -> [rec_hash] of shown records whose mon has left since
         self.load()
         self.working = copy.deepcopy(self.committed)
         self.last_view = copy.deepcopy(self.last_view_committed)
+        self.ledger = copy.deepcopy(self.ledger_committed)
+        self.departed = copy.deepcopy(self.departed_committed)
         self.pending = False
         self.session_open = False
 
@@ -336,6 +354,12 @@ class PCSync:
             self.sync[self.home_key] = {"server_rev": int(data.get("server_rev", 0) or 0),
                                         "synced": data.get("synced")}
         self.locks = data.get("locks") if isinstance(data.get("locks"), dict) else {}
+        led = data.get("since_save")
+        self.ledger_committed = {str(k): v for k, v in led.items() if isinstance(v, dict)} \
+            if isinstance(led, dict) else {}
+        dep = data.get("departed")
+        self.departed_committed = {str(k): list(v) for k, v in dep.items() if isinstance(v, list)} \
+            if isinstance(dep, dict) else {}
         ls = data.get("lock_servers") if isinstance(data.get("lock_servers"), dict) else {}
         self.lock_servers = {t: ls.get(t, self.home_key) for t in self.locks}
 
@@ -383,7 +407,9 @@ class PCSync:
                                        # top-level copy = the home server's, so older versions still read it
                                        "server_rev": int(home.get("server_rev", 0) or 0),
                                        "synced": home.get("synced"), "sync": self.sync,
-                                       "locks": self.locks, "lock_servers": self.lock_servers}),
+                                       "locks": self.locks, "lock_servers": self.lock_servers,
+                                       "since_save": self.ledger_committed,
+                                       "departed": self.departed_committed}),
                            encoding="utf-8")
             os.replace(tmp, self.path)
             return True
@@ -399,6 +425,8 @@ class PCSync:
         _note_left(self.working, _ids(self.committed) - _ids(self.working))
         self.committed = copy.deepcopy(self.working)
         self.last_view_committed = copy.deepcopy(self.last_view)
+        self.ledger_committed = copy.deepcopy(self.ledger)
+        self.departed_committed = copy.deepcopy(self.departed)
         self.pending = False
         self.save()
         log.info("PC store committed (rev %d, %d mons)", self.committed["rev"], self.count())
@@ -408,6 +436,8 @@ class PCSync:
         """Discard pending changes (the game was rolled back to the last snapshot)."""
         self.working = copy.deepcopy(self.committed)
         self.last_view = copy.deepcopy(self.last_view_committed)
+        self.ledger = copy.deepcopy(self.ledger_committed)
+        self.departed = copy.deepcopy(self.departed_committed)
         self.pending = False
         self.session_open = False
 
@@ -507,6 +537,12 @@ class PCSync:
             self.unlock(tid)
             self.server_rev = max(self.server_rev, int(delta.get("srv_rev", 0)))
             return False
+        gone_ids = set(delta.get("remove", []))
+        gave = [e.get("nick") or "?" for st in (self.working,) for b in st["boxes"] for e in b if e.get("id") in gone_ids]
+        if gave:            # a trade/gift away: every game's "since your last save" note (Back to my last save)
+            for led in list(self.ledger.values()) + list(self.ledger_committed.values()):
+                led.setdefault("traded", []).extend(gave)
+                del led["traded"][:-50]
         for st in [x for x in (self.committed, self.working, self.synced) if x is not None]:
             for eid in delta.get("remove", []):
                 for box in st["boxes"]:
@@ -582,6 +618,7 @@ class PCSync:
                 break
             box.append(incoming.pop(0))
             self.pending = True
+        self._note_departed(game_id)
         view = []
         rec_boxes = []
         n = len(game_boxes)
@@ -646,7 +683,7 @@ class PCSync:
         """
         report = {"added": 0, "removed": 0, "changed": 0, "standins_returned": [], "standin_party_slots": [],
                   "party_removals": {}, "items_back": [], "items_taken": [], "locked_returned": [],
-                  "traded_returned": []}
+                  "traded_returned": [], "left_returned": [], "deposited": [], "withdrawn": [], "edited": []}
         before = self.last_view.get(game_id)
         if before is None:
             return report
@@ -674,10 +711,12 @@ class PCSync:
                 if pick and pick[1] in entries:
                     used.add(pick[1])
                     new_boxes[bi].append(entries[pick[1]])
-                elif pick and pick[1] in gone:
+                elif pick:
+                    # left the store while this game still showed it (traded away, withdrawn in another game,
+                    # merged away): never re-import it - that would be a copy
                     used.add(pick[1])
                     tombstones.append((bi, pick[1], bytes(rec)))
-                    continue                        # traded away while this game still showed it: drop
+                    continue
                 elif edits:
                     new_boxes[bi].append(None)      # placeholder: an edited known mon, or a deposit
                     changed_recs.append((bi, len(new_boxes[bi]) - 1, bytes(rec)))
@@ -686,6 +725,7 @@ class PCSync:
                 else:
                     new_boxes[bi].append(codec.entry_from_record(rec, origin=game_id))
                     report["added"] += 1
+                    report["deposited"].append([codec.key(rec), new_boxes[bi][-1].get("nick") or "?"])
         if changed_recs:
             self._match_edits(game_id, codec, before, changed_recs, new_boxes, used, entries, gone, locked, report,
                               override, tombstones)
@@ -702,9 +742,9 @@ class PCSync:
                 if eid in used:
                     continue
                 if eid not in entries:
-                    if eid in gone:                 # traded away while the PC was open, then withdrawn
-                        not_ours.append(_unb64(rb))
-                        report["traded_returned"].append(eid)
+                    # traded away (or moved to another game) while this game still showed it, then withdrawn
+                    not_ours.append(_unb64(rb))
+                    report["traded_returned" if eid in gone else "left_returned"].append(eid)
                     continue
                 if codec.is_standin(_unb64(rb)):
                     new_boxes[bi].append(entries[eid])          # stand-ins can't leave: put it back
@@ -715,6 +755,7 @@ class PCSync:
                     report["locked_returned"].append(entries[eid].get("nick", "?"))
                 else:
                     report["removed"] += 1
+                    report["withdrawn"].append([codec.key(_unb64(rb)), entries[eid].get("nick") or "?"])
         # stand-ins / locked / traded-away mons that were withdrawn must be removed from the party by the caller.
         # Each locked/traded mon takes out at most one party mon, and only if it is that very mon: the same bytes
         # (codecs with `same_mon`: the same bytes apart from what the box UI can change - Platinum's marks and held
@@ -751,7 +792,154 @@ class PCSync:
         self.last_view[game_id] = view
         if changed or report["added"] or report["removed"]:
             self.pending = True
+        self._ledger_note(game_id, report)
         return report
+
+    # "Back to my last in-game save" (SPEC.md section 5): the game comes back from its battery save -------------
+    def note_battery(self, game_id: str, fp) -> bool:
+        """`fp` = fingerprint of the game's in-game save (its battery, without what YellowLink writes there). A
+        new fingerprint means the player saved in-game: the game's since-the-save notes start over. True then.
+        Applied to the committed copy too (the battery is a fact on disk, whatever happens to pending changes)."""
+        if fp is None:
+            return False
+        led = self.ledger.get(game_id)
+        if led is not None and led.get("fp") in (fp, None):
+            if led.get("fp") is None:           # first time we see this game's save: keep what we noted so far
+                led["fp"] = fp
+                self.ledger_committed.setdefault(game_id, empty_ledger(fp))["fp"] = fp
+            return False
+        self.ledger[game_id] = empty_ledger(fp)
+        self.ledger_committed[game_id] = empty_ledger(fp)
+        self.save()
+        return led is not None
+
+    def since_save(self, game_id: str) -> dict:
+        """What changed through this game's PC (and trades) since its last in-game save."""
+        return self.ledger.get(game_id) or empty_ledger()
+
+    def _ledger_note(self, game_id, report):
+        led = self.ledger.setdefault(game_id, empty_ledger())
+        for k in ("out", "back", "changed", "traded", "touched"):
+            led.setdefault(k, [])
+        for key, _nick in report.get("withdrawn", []) + report.get("deposited", []):
+            if key not in led["touched"]:
+                led["touched"].append(key)
+        for key, nick in report.get("withdrawn", []):
+            hit = next((x for x in led["out"] if x[0] == key), None)
+            if hit:                         # deposited since the save and taken back out: as it was at the save
+                led["out"].remove(hit)
+            else:
+                led["back"].append([key, nick])
+        for key, nick in report.get("deposited", []):
+            hit = next((x for x in led["back"] if x[0] == key), None)
+            if hit:                         # withdrawn since the save and put back: as it was at the save
+                led["back"].remove(hit)
+            else:
+                led["out"].append([key, nick])
+        led["changed"].extend(report.get("edited", []))
+        for k in ("out", "back", "changed", "touched"):
+            del led[k][:-200]
+
+    def _note_departed(self, game_id):
+        """Before a new view replaces this game's last one: remember the records it showed of mons that have left
+        the store since (traded away, withdrawn in another game). An older in-game save still has them in its
+        boxes; rebase() must never take them for new Pokémon."""
+        ids = set(self._entries())
+        dep = self.departed.setdefault(game_id, [])
+        for box in self.last_view.get(game_id) or []:
+            for eid, rb in box:
+                if eid not in ids:
+                    h = rec_hash(_unb64(rb))
+                    if h not in dep:
+                        dep.append(h)
+        del dep[:-DEPARTED_MAX]
+
+    def rebase(self, game_id: str, codec) -> bool:
+        """The game was loaded from its battery save (YellowLink's "Back to my last in-game save", the game's own
+        soft reset + CONTINUE, or a start without resume snapshot): its boxes are those of that save, which can be
+        older than our last view. Make the last view what the game really holds now, so the next sync is right:
+          * a record we showed for an entry that is still in the store -> that entry (unchanged)
+          * a record of a mon that has left the store since (traded, gifted, withdrawn in another game, or the same
+            mon in the store with newer bytes) -> a tombstone: never imported again, the store wins
+          * a record we never saw (caught straight into a box, or withdrawn here after the save, so the save
+            still has it in its box) -> left out: the next sync imports it as a deposit
+        Store entries the save doesn't show are simply new to this game (they stay). Returns False if the game
+        isn't linked yet (nothing to do)."""
+        if self.session_open or game_id not in self.working.get("linked", []) or game_id not in self.last_view:
+            return False
+        self._prime(game_id, codec)
+        game_boxes = codec.read_boxes()
+        entries = self._entries()
+        self._note_departed(game_id)
+        departed = set(self.departed.get(game_id, []))
+        pool = {}
+        for bi, box in enumerate(self.last_view.get(game_id) or []):
+            for eid, rb in box:
+                pool.setdefault(_unb64(rb), []).append((bi, eid))
+        store_keys = None
+        used = set()
+        view = []
+        kept = dropped = new = 0
+        for bi, box in enumerate(game_boxes):
+            row = []
+            for rec in box:
+                rec = bytes(rec)
+                free = [c for c in pool.get(rec, []) if c[1] not in used]
+                pick = next((c for c in free if c[0] == bi and c[1] in entries), None) or \
+                    next((c for c in free if c[1] in entries), None) or (free[0] if free else None)
+                if pick:
+                    used.add(pick[1])
+                    row.append([pick[1], _b64(rec)])
+                    kept += pick[1] in entries
+                    dropped += pick[1] not in entries
+                    continue
+                if codec.is_standin(rec):
+                    continue                    # unknown stand-in copy: the diff ignores those anyway
+                touched = set(self.since_save(game_id).get("touched") or [])
+                if store_keys is None:
+                    store_keys = set()
+                    for e in (entries.values() if touched else []):
+                        try:
+                            r = codec.record_for(e)
+                            if not codec.is_standin(r):
+                                store_keys.add(codec.key(r))
+                        except Exception:  # noqa: BLE001 - a damaged entry only weakens this check
+                            pass
+                # departed, or a mon moved through this PC since the save that the store holds with newer bytes
+                # (withdrawn, levelled up, deposited again)
+                if rec_hash(rec) in departed or (codec.key(rec) in touched and codec.key(rec) in store_keys):
+                    row.append(["rebased-" + rec_hash(rec), _b64(rec)])
+                    dropped += 1
+                else:
+                    new += 1                    # not in the view: imported at the next sync
+            view.append(row)
+        self.last_view[game_id] = view
+        self.pending = True                     # committed with the next snapshot (which must match the game)
+        log.info("%s loaded from its save: view rebased (%d known, %d left the store, %d new)", game_id, kept,
+                 dropped, new)
+        return True
+
+    def party_clones(self, game_id: str, codec, party_records) -> list:
+        """After the game came back from its save: party slots holding a Pokémon that was put into the YellowLink
+        PC from this game after that save (it's in the store - or traded on - so the party copy is a clone).
+        Matched by key, each noted deposit at most once."""
+        out = [x[0] for x in self.since_save(game_id).get("out", [])]
+        slots = []
+        for i, rec in enumerate(party_records or []):
+            try:
+                k = codec.key(bytes(rec))
+            except Exception:  # noqa: BLE001
+                continue
+            if k in out:
+                out.remove(k)
+                slots.append(i)
+        return slots
+
+    def loaded_from_save(self, game_id: str, fp):
+        """The game's state is its save again: nothing has changed since it (working copy; committed with the
+        next snapshot, like the rebased view)."""
+        self.ledger[game_id] = empty_ledger(fp)
+        self.pending = True
 
     @staticmethod
     def _match_edits(game_id, codec, before, changed_recs, new_boxes, used, entries, gone, locked, report,
@@ -775,6 +963,7 @@ class PCSync:
                     entry = codec.updated_entry(entries[eid], rec, origin=game_id)
                     if entry != entries[eid]:
                         report["changed"] += 1
+                        report["edited"].append(entry.get("nick") or "?")
                     else:
                         override[eid] = rec                 # marks on another game's mon: kept as stored
                 else:
@@ -789,6 +978,7 @@ class PCSync:
             elif not codec.is_standin(rec):
                 entry = codec.entry_from_record(rec, origin=game_id)
                 report["added"] += 1
+                report["deposited"].append([codec.key(rec), entry.get("nick") or "?"])
             new_boxes[bi][pos] = entry
         for box in new_boxes:
             box[:] = [e for e in box if e is not None]

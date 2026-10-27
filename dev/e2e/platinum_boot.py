@@ -16,6 +16,9 @@ tmp = pathlib.Path(tempfile.mkdtemp(prefix="yl_pt_"))
 os.environ["XDG_CONFIG_HOME"] = str(tmp / "appdata")        # our app folder AND DeSmuME's battery folder (Linux)
 os.environ["SDL_VIDEODRIVER"] = "dummy"; os.environ["SDL_AUDIODRIVER"] = "dummy"
 sys.path.insert(0, os.path.join(_REPO, "client"))
+sys.path.insert(0, os.path.join(_REPO, "dev", "platinum"))
+import ptrom  # noqa: E402  YL_PT_ROM=vanilla (default) | sinnoh: the Sinnoh ROM the app / DS core runs
+print("Sinnoh ROM:", ptrom.label())
 import pygame
 pygame.quit = lambda: None          # several apps share this process (the friend keeps its window)
 from yellowlink.config import Config, app_dir
@@ -155,7 +158,9 @@ check("ROM copied into roms/", (app_dir() / "roms" / "platinum.nds").exists())
 lib.set_current("platinum")
 cfg.update(name="Ilias", server_url=f"ws://127.0.0.1:{PORT}", room_key="pt", seen_help=True, ds_scale=2)
 cfg.save()
-dsv = pathlib.Path(nds_core.battery_file_candidates(str(app_dir() / "roms" / "platinum.nds"))[0])
+# the file the app runs: roms/platinum.nds, or with YL_PT_ROM=sinnoh the Complete Sinnoh copy it makes next to it
+dsv = pathlib.Path(nds_core.battery_file_candidates(str(app_dir() / "roms" / (
+    "platinum-sinnoh.nds" if ptrom.SINNOH else "platinum.nds")))[0])
 
 # 1. boot -------------------------------------------------------------------------------------------------------
 A = start(cfg, os.path.join(STATES, "pt_room.dsst"))

@@ -286,7 +286,8 @@ def plat_helpers(monkeypatch):
             monkeypatch.setattr(platinum.PlatinumMemory, name, lambda self: None, raising=False)
 
 
-def test_shared_games_needs_partner_challenge_games_for_platinum(plat_helpers):
+def test_shared_games_needs_partner_challenge_games_for_platinum(plat_helpers, monkeypatch):
+    monkeypatch.setenv("YL_PT_ROM", "vanilla")          # plain Platinum on both sides (Complete Sinnoh: tests below)
     old = {"uid": "old", "games": ["crystal", "platinum", "yellow"]}             # a 0.7.2 client
     new = {"uid": "new", "games": ["platinum", "yellow"], "challenge_games": ["platinum", "yellow"]}
     unknown = {"uid": "unk"}                                                      # never sent `library`
@@ -609,3 +610,76 @@ def test_waiting_for_the_partner_keeps_ds_sound_paused():
     fake._ds_chal_paused = False
     appmod.App._pause_ds_audio(fake, False)
     assert calls == [False]
+
+
+def test_platinum_soul_link_needs_the_same_complete_sinnoh(plat_helpers, monkeypatch):
+    """Complete Sinnoh (SPEC.md section 11): clients advertise `sinnoh_v<spec>` in challenge_rules; Platinum runs
+    only between players with the same wild Pokémon (same version, or both plain Platinum)."""
+    sha = "ab" * 20
+    monkeypatch.setitem(platinum.VARIANTS, sha, platinum.Variant("sinnoh", sha, "Complete Sinnoh", 3))
+    same = {"uid": "same", "games": ["platinum"], "challenge_games": ["platinum"],
+            "challenge_rules": ["exp_share", "sinnoh_v3", "trade_evo"]}
+    older = {"uid": "older", "games": ["platinum"], "challenge_games": ["platinum"],
+             "challenge_rules": ["exp_share", "trade_evo"]}                        # 0.7.6: plain Platinum
+    other = {"uid": "other", "games": ["platinum"], "challenge_games": ["platinum"],
+             "challenge_rules": ["sinnoh_v4"]}
+    app = FakeApp(["yellow", "platinum"], [same, older, other])
+    app.complete_sinnoh, app.rom_sha1 = True, sha
+    assert app._sinnoh_caps() == ["sinnoh_v3"]
+    assert app.shared_games("same") == ["platinum"]
+    assert app.shared_games("older") == [] and app.shared_games("other") == []
+    app.chal_on_connected()
+    assert app.net.sent[-1]["challenge_rules"] == ["exp_share", "trade_evo", "sinnoh_v3"]
+    app.complete_sinnoh = False                                                   # plain Platinum (build failed)
+    app.sinnoh_problem = "disk full"
+    assert app._sinnoh_caps() == [] and app.shared_games("older") == ["platinum"]
+
+
+def test_yellow_or_crystal_client_advertises_complete_sinnoh(plat_helpers, monkeypatch):
+    """H1: a client playing Yellow/Crystal right now (ds False, no build in this process yet) still plays Complete
+    Sinnoh when it starts Platinum, so it advertises the spec version this YellowLink builds."""
+    from yellowlink import sinnoh_rom
+    monkeypatch.setattr(sinnoh_rom, "BUILD_FAILED", None)
+    monkeypatch.delenv("YL_PT_ROM", raising=False)
+    spec = sinnoh_rom.load_spec()
+    want = ["sinnoh_v%d" % spec.SPEC_VERSION]
+    assert sinnoh_rom.expected_sha1(spec)                         # the shipped spec has a checked build
+    partner = {"uid": "pt", "games": ["platinum", "yellow"], "challenge_games": ["platinum", "yellow"],
+               "challenge_rules": ["exp_share", "trade_evo"] + want}
+    app = FakeApp(["yellow", "platinum"], [partner])
+    app.ds = False                                                # on Yellow right now
+    assert app._sinnoh_caps() == want
+    assert app.shared_games("pt") == ["yellow", "platinum"]
+    app.chal_on_connected()
+    assert app.net.sent[-1]["challenge_rules"] == ["exp_share", "trade_evo"] + want
+    # dev: YL_PT_ROM=vanilla -> plain Platinum everywhere
+    monkeypatch.setenv("YL_PT_ROM", "vanilla")
+    assert app._sinnoh_caps() == []
+    monkeypatch.delenv("YL_PT_ROM")
+    # this process failed to build (e.g. on an earlier Platinum start): plain Platinum + say so to the others
+    monkeypatch.setattr(sinnoh_rom, "BUILD_FAILED", "disk full")
+    assert app._sinnoh_caps() == [] and app.shared_games("pt") == ["yellow"]
+    app.chal_on_connected()
+    assert app.net.sent[-1]["challenge_rules"] == ["exp_share", "trade_evo", chalmod.SINNOH_FAILED]
+
+
+def test_game_tip_when_a_complete_sinnoh_build_failed(plat_helpers, monkeypatch):
+    """L5: a failed build is not 'update YellowLink' - say whose build failed and to restart."""
+    from yellowlink import panels, sinnoh_rom
+    monkeypatch.setattr(sinnoh_rom, "BUILD_FAILED", None)
+    monkeypatch.delenv("YL_PT_ROM", raising=False)
+    v = "sinnoh_v%d" % sinnoh_rom.load_spec().SPEC_VERSION
+    form = {"uid": "x", "name": "Alex"}
+    failed = {"uid": "x", "games": ["platinum"], "challenge_games": ["platinum"],
+              "challenge_rules": ["exp_share", chalmod.SINNOH_FAILED]}
+    app = FakeApp(["platinum"], [failed])
+    app.ds = False
+    tip = panels._game_tip(app, form, "platinum")
+    assert "Alex" in tip and "couldn't be prepared" in tip and "restart" in tip and "update" not in tip
+    app.roster = [{"uid": "x", "games": ["platinum"], "challenge_games": ["platinum"], "challenge_rules": [v]}]
+    monkeypatch.setattr(sinnoh_rom, "BUILD_FAILED", "disk full")
+    tip = panels._game_tip(app, form, "platinum")
+    assert tip.startswith("Your Complete Sinnoh") and "restart" in tip and "update" not in tip
+    monkeypatch.setattr(sinnoh_rom, "BUILD_FAILED", None)
+    app.roster = [{"uid": "x", "games": ["platinum"], "challenge_games": ["platinum"], "challenge_rules": ["sinnoh_v1"]}]
+    assert "update YellowLink" in panels._game_tip(app, form, "platinum")

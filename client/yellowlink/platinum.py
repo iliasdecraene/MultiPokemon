@@ -20,10 +20,54 @@ How the game's memory is organised (all main RAM, 0x02000000-0x023FFFFF):
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
 
 from . import pk4
 
 PLATINUM_SHA1 = "ce81046eda7d232513069519cb2085349896dec7"   # Pokémon Platinum (USA) rev 0, "POKEMON PL" CPUE
+VANILLA_SHA1 = PLATINUM_SHA1
+
+# ---------------------------------------------------------------------------------------------------------
+# ROM variants (Complete Sinnoh, SPEC.md "Complete Sinnoh"). The game YellowLink runs is always "platinum"; which
+# file runs it is a variant. Complete Sinnoh = the player's vanilla ROM with only data files changed (sinnoh_rom.py:
+# the wild-encounter NARC in place, the Pokédex area NARC rebuilt after the last file + its FAT entry and the header's
+# used size/CRC, 1 byte in each Regi ruins script) - the code, every overlay and every table we read are
+# byte-identical (checked by the builder: the copy differs from vanilla only in those planned ranges), so every address
+# and hook in this module and in platinum_exp / platinum_pc / sinnoh_view holds unchanged, and the whole Platinum
+# suite passes on it (dev/platinum/ptrom.py: YL_PT_ROM=sinnoh). A ROM not listed here gets no multiplayer features.
+# ---------------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Variant:
+    key: str           # "vanilla" | "sinnoh"
+    sha1: str
+    title: str
+    spec_version: int | None = None    # Complete Sinnoh spec version (None = vanilla)
+
+
+def _variants() -> dict:
+    out = {VANILLA_SHA1: Variant("vanilla", VANILLA_SHA1, "Pokémon Platinum")}
+    from . import sinnoh_rom
+    for sha, ver in sinnoh_rom.known_builds():
+        if sha in out:            # an empty spec gives vanilla's own bytes: that is simply vanilla
+            continue
+        out[sha] = Variant("sinnoh", sha, "Pokémon Platinum (Complete Sinnoh)", ver)
+    return out
+
+
+VARIANTS = _variants()                      # sha1 -> Variant
+SUPPORTED_SHA1S = tuple(VARIANTS)           # App.full: these ROMs run every feature
+
+
+def variant_of(sha1: str):
+    """The Variant of a ROM SHA1, or None for a ROM nobody verified."""
+    return VARIANTS.get((sha1 or "").lower())
+
+
+def same_code(sha_a: str, sha_b: str) -> bool:
+    """Both ROMs are verified variants (identical code): a savestate of one may be loaded into the other."""
+    return variant_of(sha_a) is not None and variant_of(sha_b) is not None
 
 RAM_LO, RAM_HI = 0x02000000, 0x02400000
 
@@ -99,6 +143,11 @@ RUN_ACTIONS = range(88, 92)                            # MOVEMENT_ACTION_RUN_NOR
 
 MAP_HEADERS = 0x020E601C          # sMapHeaders in ARM9: 593 x 24 bytes, mapLabelTextID at +18 (verified = table)
 NUM_MAP_HEADERS = 593
+MH_WILD_ENCOUNTERS_ID = 0x0E      # MapHeader.wildEncountersArchiveID u16 (0xFFFF = none) = pl_enc_data.narc member
+FS_MAP_HEADER_DATA = 0x14         # FieldSystem.mapHeaderData (MapHeaderData*)
+MHD_WILD_ENCOUNTERS = 0x920       # MapHeaderData.wildEncounters (after 4 counts, 4 ptrs, tmpEventsBuf[512], initScripts[64])
+WILD_TABLE_SIZE = 424
+FS_ROM_FAT_PTR = 0x021CEC60       # NitroSDK "rom" FSArchive: fat (u32 ptr to the FAT copied by FS_LoadTable), +4 size
 
 # --- Soul Link (verified by dev/platinum/soullink_verify.py; dev/notes/soullink_platinum.md) ----------------
 # Battle: the battle child app (overlay 16): args (+0x18) = FieldBattleDTO, data (+0x1C) = BattleSystem.
@@ -683,6 +732,61 @@ class PlatinumMemory:
         if not body or not VARS_START <= n < VARS_END:
             return 0
         return self.m.r16(body + PAGE_VARS_FLAGS + 2 * (n - VARS_START))
+
+    # Complete Sinnoh (sinnoh_rom.py / sinnoh_events.py) -------------------------------------------------------
+    def wild_table_id(self):
+        """pl_enc_data.narc member of the current map (sMapHeaders[map].wildEncountersArchiveID) or None (no wild
+        Pokémon here / not in game)."""
+        m = self.map_id()
+        if self.field_system() is None or not 0 <= m < NUM_MAP_HEADERS:
+            return None
+        v = self.m.r16(MAP_HEADERS + 24 * m + MH_WILD_ENCOUNTERS_ID)
+        return None if v == 0xFFFF else v
+
+    def wild_table_addr(self):
+        """FieldSystem->mapHeaderData->wildEncounters: the game's copy of the current map's table (424 bytes,
+        copied from the NARC by MapHeaderData_LoadWildEncounters on every map load; all zero without one)."""
+        fs = self.field_system()
+        if fs is None:
+            return None
+        mhd = self.m.r32(fs + FS_MAP_HEADER_DATA)
+        return mhd + MHD_WILD_ENCOUNTERS if _ptr(mhd) else None
+
+    def wild_table(self):
+        a = self.wild_table_addr()
+        return self.m.read(a, WILD_TABLE_SIZE) if a else None
+
+    def write_wild_table(self, data: bytes) -> bool:
+        """Replace the loaded table (what the next map load would do with the ROM's own bytes). Only when safe."""
+        a = self.wild_table_addr()
+        if a is None or len(data) != WILD_TABLE_SIZE or not self.is_safe():
+            return False
+        self.m.write(a, data)
+        return True
+
+    def cached_fat_addr(self, fat_size: int):
+        """Where the game keeps its copy of the ROM's file allocation table (FS_LoadTable at boot, system.c: the
+        "rom" FSArchive's fat pointer at FS_ROM_FAT_PTR, its size at +4), or None if it doesn't look right."""
+        a = self.m.r32(FS_ROM_FAT_PTR)
+        if not _ptr(a) or self.m.r32(FS_ROM_FAT_PTR + 4) != fat_size:
+            return None
+        return a
+
+    def refresh_cached_fat(self, rom_fat: bytes, max_entries: int = 8) -> int:
+        """Make the game's cached FAT equal the running ROM's (after resuming a snapshot taken on another Complete
+        Sinnoh build: its FAT can point the moved Pokédex area file at the old place). Writes only the 8-byte entries
+        that differ, at most `max_entries` (more = something else is wrong: nothing written). Only when safe.
+        Returns the number of entries written (-1 = refused)."""
+        a = self.cached_fat_addr(len(rom_fat))
+        if a is None or not self.is_safe():
+            return -1
+        ram = self.m.read(a, len(rom_fat))
+        diff = [i for i in range(0, len(rom_fat), 8) if ram[i:i + 8] != rom_fat[i:i + 8]]
+        if len(diff) > max_entries:
+            return -1
+        for i in diff:
+            self.m.write(a + i, rom_fat[i:i + 8])
+        return len(diff)
 
     def in_safari_game(self) -> bool:
         return self.flag(FLAG_SAFARI_GAME_ACTIVE)

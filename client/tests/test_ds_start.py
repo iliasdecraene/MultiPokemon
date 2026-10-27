@@ -164,3 +164,84 @@ def test_failed_app_start_closes_sound_and_raises_dsunavailable(tmp_path, monkey
         appmod.App(cfg)
     assert closed
     pygame.quit()
+
+
+def test_complete_sinnoh_path_stays_on_the_app_not_in_the_config(tmp_path, monkeypatch):
+    """H2: the built ROM (roms/platinum-sinnoh.nds) is what the App runs (self.rom_path), but cfg['rom_path'] - saved
+    and shown in Settings - stays the player's own vanilla file."""
+    import pygame
+    from yellowlink import app as appmod
+    cfg = _cfg_with(tmp_path, monkeypatch, ["platinum"])
+    vanilla = str(tmp_path / "platinum.rom")
+    cfg["games"]["platinum"] = cfg["rom_path"] = vanilla
+    built = tmp_path / "platinum-sinnoh.nds"
+    built.write_bytes(b"built")
+    monkeypatch.setitem(appmod.library.KNOWN_GAMES, appmod.library.sha1_file(vanilla),
+                        appmod.library.GAMES_BY_ID["platinum"])
+    monkeypatch.setattr(appmod.App, "_complete_sinnoh_rom", lambda self, v: str(built))
+    seen = {}
+
+    def start(self):
+        seen.update(rom_path=self.rom_path, cfg=self.cfg["rom_path"], sha=self.rom_sha1)
+        raise ValueError("stop here")
+    monkeypatch.setattr(appmod.App, "_start_nds", start)
+    with pytest.raises(nds_core.DSUnavailable):
+        appmod.App(cfg)
+    assert seen["rom_path"] == str(built) and seen["cfg"] == vanilla
+    assert seen["sha"] == appmod.library.sha1_file(str(built))
+    assert cfg["rom_path"] == vanilla
+    pygame.quit()
+
+
+def test_failed_build_is_remembered_for_the_process(tmp_path, monkeypatch):
+    """H1: a failed Complete Sinnoh build -> plain Platinum, and sinnoh_rom.BUILD_FAILED tells Soul Link partners
+    (also after travelling to Yellow/Crystal in the same process)."""
+    import types as _t
+    from yellowlink import app as appmod, sinnoh_rom
+    monkeypatch.setattr(sinnoh_rom, "BUILD_FAILED", None)
+    monkeypatch.delenv("YL_PT_ROM", raising=False)
+
+    def boom(*a, **k):
+        raise sinnoh_rom.BuildError("Making Complete Sinnoh went wrong (test).")
+    monkeypatch.setattr(sinnoh_rom, "ensure", boom)
+    fake = _t.SimpleNamespace(lib=_t.SimpleNamespace(dir=tmp_path), sinnoh_problem=None,
+                              _building_notice=lambda: None)
+    assert appmod.App._complete_sinnoh_rom(fake, "/roms/platinum.nds") == "/roms/platinum.nds"
+    assert "went wrong" in fake.sinnoh_problem and sinnoh_rom.BUILD_FAILED == fake.sinnoh_problem
+
+
+def test_build_fallback_is_told(tmp_path, monkeypatch):
+    """M4: the new build failed, an older verified one runs: not a failure (no BUILD_FAILED), but the player hears it."""
+    import types as _t
+    from yellowlink import app as appmod, sinnoh_rom
+    monkeypatch.setattr(sinnoh_rom, "BUILD_FAILED", None)
+    monkeypatch.delenv("YL_PT_ROM", raising=False)
+
+    def old_build(*a, **k):
+        sinnoh_rom.FALLBACK = (1, "disk full")
+        return "/roms/platinum-sinnoh.nds", "ab" * 20
+    monkeypatch.setattr(sinnoh_rom, "ensure", old_build)
+    monkeypatch.setattr(sinnoh_rom, "FALLBACK", None)
+    fake = _t.SimpleNamespace(lib=_t.SimpleNamespace(dir=tmp_path), sinnoh_problem=None, sinnoh_note=None,
+                              _building_notice=lambda: None)
+    assert appmod.App._complete_sinnoh_rom(fake, "/roms/platinum.nds") == "/roms/platinum-sinnoh.nds"
+    assert fake.sinnoh_problem is None and sinnoh_rom.BUILD_FAILED is None
+    assert "disk full" in fake.sinnoh_note and "previous" in fake.sinnoh_note
+
+
+def test_frozen_start_removes_old_shared_battery_files(fresh, tmp_path):
+    """L3: the exe runs roms/platinum-sinnoh.nds now; DeSmuME's shared battery of the plain file (platinum.dsv,
+    from 0.7.6 or a plain-Platinum fallback) is removed too, so no stray save stays next to the exe."""
+    fresh.setattr(nds_core, "get_emulator", lambda: FakeEmu())
+    fresh.setattr(nds_core, "_staging_dir", lambda: str(tmp_path / "stage"))
+    fresh.setattr(sys, "frozen", True, raising=False)
+    fresh.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    (tmp_path / "stage").mkdir()
+    dsv_dir = tmp_path / "cfg" / "desmume"
+    dsv_dir.mkdir(parents=True)
+    for n in ("platinum.dsv", "platinum-sinnoh.dsv", "yellow.dsv"):
+        (dsv_dir / n).write_bytes(b"old save")
+    core = nds_core.NDSCore(str(tmp_path / "roms" / "platinum-sinnoh.nds"), None, 50)
+    assert sorted(p.name for p in dsv_dir.iterdir()) == ["yellow.dsv"]
+    (tmp_path / "stage").mkdir(exist_ok=True)
+    core.close(blank_battery=False)

@@ -44,3 +44,20 @@ def test_add_and_switch(tmp_path, monkeypatch):
     assert lib.current == "crystal" and cfg["rom_path"].endswith("crystal.gbc")
     assert lib.save_path().name == "crystal.sav" and lib.resume_path().name == "crystal.state"
     json.dumps(cfg)  # config stays serialisable
+
+
+def test_built_complete_sinnoh_path_in_config_is_put_back(tmp_path):
+    """0.7.7 saved the built roms/platinum-sinnoh.nds as cfg['rom_path']: Settings then showed a file that isn't a
+    known game. The library puts the player's own Platinum back (never learns the build's SHA1)."""
+    own = tmp_path / "roms" / "platinum.nds"
+    own.parent.mkdir(parents=True)
+    own.write_bytes(b"x")
+    built = tmp_path / "roms" / "platinum-sinnoh.nds"
+    built.write_bytes(b"y")
+    cfg = FakeCfg(games={"platinum": str(own)}, current_game="platinum", rom_path=str(built))
+    library.Library(cfg, tmp_path)
+    assert cfg["rom_path"] == str(own)
+    cfg = FakeCfg(games={}, rom_path=str(built))           # no library entry: just forget it
+    library.Library(cfg, tmp_path)
+    assert cfg["rom_path"] == "" and cfg["games"] == {}
+    assert library.identify(built) is None

@@ -35,6 +35,9 @@ tmp = pathlib.Path(tempfile.mkdtemp(prefix=f"yl_tevo_{PHASE}_"))
 os.environ["XDG_CONFIG_HOME"] = str(tmp / "appdata")
 os.environ["SDL_VIDEODRIVER"] = "dummy"; os.environ["SDL_AUDIODRIVER"] = "dummy"
 sys.path.insert(0, os.path.join(_REPO, "client"))
+sys.path.insert(0, os.path.join(_REPO, "dev", "platinum"))
+import ptrom  # noqa: E402  YL_PT_ROM=vanilla (default) | sinnoh: the Sinnoh ROM the app / DS core runs
+print("Sinnoh ROM:", ptrom.label())
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_REPO, "dev", "crystal"))
 sys.path.insert(0, os.path.join(_REPO, "server"))
@@ -394,7 +397,7 @@ class Partner:
         if self.net.status == "online" and not self.online:
             self.online = True
             self.net.send({"type": "library", "games": ["platinum"], "challenge_games": ["platinum"],
-                           "challenge_rules": ["exp_share", "trade_evo"]})
+                           "challenge_rules": ["exp_share", "trade_evo"] + ptrom.sinnoh_caps()})
 
     def take(self, mtype, **match):
         for i, m in enumerate(self.inbox):

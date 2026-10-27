@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import os
+import time
 
 import pytest
 from websockets.asyncio.client import connect
@@ -131,7 +132,14 @@ async def test_chat(connect_client):
 async def test_ping_pong(connect_client):
     a = await connect_client("Ilias")
     await a.send(type="ping", t=12345)
-    assert (await a.expect("pong"))["t"] == 12345
+    p = await a.expect("pong")
+    assert p["t"] == 12345
+    assert abs(p["now"] - time.time()) < 5          # server time (0.7.8, SPEC.md section 11: shared swarms)
+
+
+async def test_welcome_has_server_time(connect_client):
+    a = await connect_client("Ilias")
+    assert isinstance(a.welcome["now"], float) and abs(a.welcome["now"] - time.time()) < 5
 
 
 async def test_rate_limit_drops_excess(connect_client):

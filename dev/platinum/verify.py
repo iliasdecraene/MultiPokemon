@@ -88,7 +88,12 @@ def check_rom(rig):
     with open(ROM, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
-    ok(h.hexdigest() == P.PLATINUM_SHA1, "ROM SHA1 = PLATINUM_SHA1 (Platinum USA rev 0)")
+    v = P.variant_of(h.hexdigest())
+    if os.environ.get("YL_PT_ROM", "vanilla") == "sinnoh":
+        ok(v is not None and v.key == "sinnoh", "ROM SHA1 = a Complete Sinnoh build listed in platinum.VARIANTS (%s)"
+           % h.hexdigest()[:12])
+    else:
+        ok(h.hexdigest() == P.PLATINUM_SHA1, "ROM SHA1 = PLATINUM_SHA1 (Platinum USA rev 0)")
     d = rig.d
     # static code/data in the ARM9 binary (present from boot)
     labels = d.read(P.MAP_HEADERS, 24 * P.NUM_MAP_HEADERS)

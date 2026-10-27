@@ -20,6 +20,9 @@ tmp = pathlib.Path(tempfile.mkdtemp(prefix="yl_ptchal_"))
 os.environ["XDG_CONFIG_HOME"] = str(tmp / "appdata")        # our app folder AND DeSmuME's battery folder (Linux)
 os.environ["SDL_VIDEODRIVER"] = "dummy"; os.environ["SDL_AUDIODRIVER"] = "dummy"
 sys.path.insert(0, os.path.join(_REPO, "client"))
+sys.path.insert(0, os.path.join(_REPO, "dev", "platinum"))
+import ptrom  # noqa: E402  YL_PT_ROM=vanilla (default) | sinnoh: the Sinnoh ROM the app / DS core runs
+print("Sinnoh ROM:", ptrom.label())
 import pygame
 pygame.quit = lambda: None
 from yellowlink import __version__
@@ -80,7 +83,7 @@ class Partner:
         if self.net.status == "online" and not self.online:
             self.online = True
             self.net.send({"type": "library", "games": ["platinum"], "challenge_games": ["platinum"],
-                           "challenge_rules": ["exp_share"]})
+                           "challenge_rules": ["exp_share"] + ptrom.sinnoh_caps()})
 
     def take(self, mtype, **match):
         for i, m in enumerate(self.inbox):
@@ -98,7 +101,10 @@ cfg.update(name="Ilias", server_url=f"ws://127.0.0.1:{PORT}", room_key="pt", rom
 cfg.save()
 main_save = cfg.data_dir / "saves" / "platinum.sav"
 main_save.write_bytes(MAIN_SAVE)
-dsv = pathlib.Path(nds_core.battery_file_candidates(PT_ROM)[0])
+# DeSmuME's battery file is named after the ROM it runs: with YL_PT_ROM=sinnoh the app makes and runs
+# roms/platinum-sinnoh.nds from PT_ROM
+dsv = pathlib.Path(nds_core.battery_file_candidates(os.path.join(os.path.dirname(PT_ROM), "platinum-sinnoh.nds")
+                                                    if ptrom.SINNOH else PT_ROM)[0])
 check("test isolation: DeSmuME's battery folder is in this test's folder", str(dsv).startswith(str(tmp)), dsv)
 
 
